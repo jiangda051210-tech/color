@@ -1030,7 +1030,10 @@ def analyze_single_image(
             x0 = int(round(c * w / grid_cols))
             x1 = int(round((c + 1) * w / grid_cols))
             cell_mask = board_mask[y0:y1, x0:x1]
-            used = bool(np.count_nonzero(cell_mask) >= max(80, int(cell_mask.size * 0.28)))
+            cell_nz = np.count_nonzero(cell_mask)
+            cell_size = cell_mask.size
+            used = bool(cell_nz >= max(80, int(cell_size * 0.28)))
+            valid_ratio = float(cell_nz / max(1, cell_size))
             if not used:
                 grid.append(
                     {
@@ -1038,7 +1041,7 @@ def analyze_single_image(
                         "col": c + 1,
                         "used": False,
                         "delta_e00": None,
-                        "valid_ratio": float(np.count_nonzero(cell_mask) / max(1, cell_mask.size)),
+                        "valid_ratio": valid_ratio,
                     }
                 )
                 continue
@@ -1050,7 +1053,7 @@ def analyze_single_image(
                     "row": r + 1,
                     "col": c + 1,
                     "used": True,
-                    "valid_ratio": float(np.count_nonzero(cell_mask) / max(1, cell_mask.size)),
+                    "valid_ratio": valid_ratio,
                     "used_pixels": cnt,
                     "delta_e00": de,
                     "board_lab": [float(x) for x in mean_lab],
@@ -1257,7 +1260,8 @@ def analyze_dual_image(
             m1 = ref_mask[y0:y1, x0:x1]
             m2 = film_mask[y0:y1, x0:x1]
             m = m1 & m2
-            used = bool(np.count_nonzero(m) >= max(80, int(m.size * 0.28)))
+            m_nz = np.count_nonzero(m)
+            used = bool(m_nz >= max(80, int(m.size * 0.28)))
             if not used:
                 grid.append({"row": r + 1, "col": c + 1, "used": False, "delta_e00": None})
                 continue
@@ -1614,13 +1618,15 @@ def run_ensemble_single_mode(
     if not ok_members:
         raise RuntimeError("ensemble mode failed: no valid reports")
 
-    arr_avg = np.array([m["avg_delta_e00"] for m in ok_members], dtype=np.float32)
-    arr_p95 = np.array([m["p95_delta_e00"] for m in ok_members], dtype=np.float32)
-    arr_max = np.array([m["max_delta_e00"] for m in ok_members], dtype=np.float32)
-    arr_conf = np.array([m["confidence"] for m in ok_members], dtype=np.float32)
-    arr_dl = np.array([m["dL"] for m in ok_members], dtype=np.float32)
-    arr_dc = np.array([m["dC"] for m in ok_members], dtype=np.float32)
-    arr_dh = np.array([m["dH_deg"] for m in ok_members], dtype=np.float32)
+    _ens_mat = np.array(
+        [
+            (m["avg_delta_e00"], m["p95_delta_e00"], m["max_delta_e00"],
+             m["confidence"], m["dL"], m["dC"], m["dH_deg"])
+            for m in ok_members
+        ],
+        dtype=np.float32,
+    )
+    arr_avg, arr_p95, arr_max, arr_conf, arr_dl, arr_dc, arr_dh = _ens_mat.T
 
     base = reports[0]
     targets_used = base["profile"]["targets_used"]

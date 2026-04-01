@@ -939,12 +939,11 @@ class BatchBlendOptimizer:
                 'customer_tier': customer_tiers[gi] if customer_tiers and gi < len(customer_tiers) else None,
             })
 
-        # 对比不分组的色差
-        all_des = []
-        for i in range(n):
-            for j in range(i+1, n):
-                all_des.append(de_matrix[i][j])
-        unoptimized_max = max(all_des) if all_des else 0
+        # 对比不分组的色差 — reuse de_matrix entries already computed above
+        unoptimized_max = max(
+            (de_matrix[i][j] for i in range(n) for j in range(i + 1, n)),
+            default=0,
+        )
 
         return {
             'groups': group_stats,

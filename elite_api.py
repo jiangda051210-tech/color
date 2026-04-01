@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -128,6 +129,7 @@ ULTIMATE_SYSTEM = UltimateColorFilmSystem()
 ULTIMATE_LOCK = RLock()
 APP_START_TS = time.time()
 ACCEPTANCE_SYNC_CACHE: dict[str, dict[str, Any]] = {}
+ACCEPTANCE_SYNC_CACHE_LOCK = RLock()
 AUDIT_LOG_PATH = SETTINGS.audit_log_path
 METRICS_LOCK = RLock()
 AUDIT_LOG_LOCK = RLock()
@@ -1425,7 +1427,8 @@ def _sync_acceptance_customer_from_db(db_path: str | None, customer_id: str) -> 
             learner=INNOVATION_ENGINE.acceptance,
             customer_id=customer_id,
         )
-    ACCEPTANCE_SYNC_CACHE[cache_key] = {"loaded_at": now, "events_loaded": loaded}
+    with ACCEPTANCE_SYNC_CACHE_LOCK:
+        ACCEPTANCE_SYNC_CACHE[cache_key] = {"loaded_at": now, "events_loaded": loaded}
     return path, loaded, False
 
 
@@ -3814,7 +3817,7 @@ async def analyze_dual_upload(
         customer_tier=_clean_optional_text(customer_tier),
         innovation_context=_parse_optional_dict_json(innovation_context_json, "innovation_context_json"),
     )
-    return analyze_dual(req)
+    return await asyncio.to_thread(analyze_dual, req)
 
 
 @app.post("/v1/web/analyze/single-upload")
@@ -3852,7 +3855,7 @@ async def analyze_single_upload(
         customer_tier=_clean_optional_text(customer_tier),
         innovation_context=_parse_optional_dict_json(innovation_context_json, "innovation_context_json"),
     )
-    return analyze_single(req)
+    return await asyncio.to_thread(analyze_single, req)
 
 
 @app.post("/v1/analyze/batch")
@@ -4290,7 +4293,8 @@ def post_customer_acceptance_record(req: CustomerAcceptanceRecordRequest) -> dic
         profile = INNOVATION_ENGINE.acceptance.get_profile(req.customer_id)
     if db_path is not None:
         cache_key = f"{str(db_path.resolve())}::{req.customer_id}"
-        ACCEPTANCE_SYNC_CACHE.pop(cache_key, None)
+        with ACCEPTANCE_SYNC_CACHE_LOCK:
+            ACCEPTANCE_SYNC_CACHE.pop(cache_key, None)
         upsert_acceptance_profile(db_path, INNOVATION_ENGINE.acceptance, req.customer_id)
     return {"ok": True, "profile": profile, "persisted": db_path is not None}
 

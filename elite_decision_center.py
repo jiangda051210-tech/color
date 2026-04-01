@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 
@@ -63,14 +64,30 @@ def _merge_dict(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_POLICY_CACHE: dict[str, dict[str, Any]] = {}
+_POLICY_CACHE_MTIME: dict[str, float] = {}
+_POLICY_CACHE_LOCK = RLock()
+
+
 def load_decision_policy(config_path: Path | None) -> tuple[dict[str, Any], str]:
-    policy = deepcopy(DEFAULT_POLICY)
     if config_path is None:
-        return policy, "builtin_default"
+        return deepcopy(DEFAULT_POLICY), "builtin_default"
+    resolved = str(config_path.resolve())
+    try:
+        mtime = config_path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    with _POLICY_CACHE_LOCK:
+        if resolved in _POLICY_CACHE and _POLICY_CACHE_MTIME.get(resolved) == mtime:
+            return deepcopy(_POLICY_CACHE[resolved]), resolved
     raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise ValueError("decision policy config must be a JSON object")
-    return _merge_dict(policy, raw), str(config_path)
+    merged = _merge_dict(DEFAULT_POLICY, raw)
+    with _POLICY_CACHE_LOCK:
+        _POLICY_CACHE[resolved] = merged
+        _POLICY_CACHE_MTIME[resolved] = mtime
+    return deepcopy(merged), resolved
 
 
 def apply_policy_patch(policy: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

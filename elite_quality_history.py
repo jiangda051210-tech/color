@@ -12,6 +12,10 @@ import numpy as np
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _ALLOWED_SQL_TYPES = frozenset({"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"})
 
+# Tracks which DB paths have already been initialised in this process lifetime.
+# Avoids redundant CREATE TABLE / CREATE INDEX calls on every function entry.
+_DB_INITIALIZED: set[str] = set()
+
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
     if not _SAFE_IDENTIFIER.match(table):
@@ -30,6 +34,9 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str
 
 
 def init_db(db_path: Path) -> None:
+    resolved = str(db_path.resolve())
+    if resolved in _DB_INITIALIZED:
+        return
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     try:
@@ -113,9 +120,22 @@ def init_db(db_path: Path) -> None:
             ON quality_outcomes(run_id)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_quality_outcomes_outcome
+            ON quality_outcomes(outcome)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_quality_outcomes_severity
+            ON quality_outcomes(severity)
+            """
+        )
         conn.commit()
     finally:
         conn.close()
+    _DB_INITIALIZED.add(resolved)
 
 
 def _to_float(v: Any, default: float = 0.0) -> float:
