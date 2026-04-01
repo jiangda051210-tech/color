@@ -9,10 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import sqlite3
 import statistics
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from color_film_mvp_v3_optimized import de2000
@@ -2423,10 +2426,431 @@ class QualityCaseCenterV2:
         "cancelled": set(),
     }
 
-    def __init__(self) -> None:
+    def __init__(self, store_path: Optional[str] = None, db_path: Optional[str] = None) -> None:
+        self._lock = RLock()
         self._cases: Dict[str, Dict[str, Any]] = {}
         self._events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self._dedup: Dict[str, str] = {}
+        self._actions: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._role_rank = {
+            "operator": 1,
+            "supervisor": 2,
+            "engineer": 2,
+            "qa_manager": 3,
+            "quality_manager": 3,
+            "plant_manager": 4,
+            "director": 5,
+        }
+        self._waiver_policy = {
+            "low": {"standard": "supervisor", "vip": "qa_manager"},
+            "medium": {"standard": "qa_manager", "vip": "quality_manager"},
+            "high": {"standard": "quality_manager", "vip": "plant_manager"},
+            "critical": {"standard": "plant_manager", "vip": "director"},
+        }
+        path = str(store_path or "").strip()
+        db = str(db_path or "").strip()
+        self._store_path = path if path else None
+        self._db_path = db if db else None
+        backend = "memory"
+        if self._db_path:
+            backend = "sqlite"
+        elif self._store_path:
+            backend = "json_file"
+        self._store_meta: Dict[str, Any] = {
+            "enabled": bool(self._store_path or self._db_path),
+            "backend": backend,
+            "loaded": False,
+            "persist_count": 0,
+            "last_load_iso": "",
+            "last_persist_iso": "",
+            "last_error": "",
+        }
+        self._load_store()
+
+    @staticmethod
+    def _norm_role(role: str) -> str:
+        return str(role).strip().lower().replace("-", "_").replace(" ", "_")
+
+    def _rank(self, role: str) -> int:
+        return int(self._role_rank.get(self._norm_role(role), 0))
+
+    def _required_approver(
+        self,
+        severity: str,
+        customer_tier: str = "standard",
+    ) -> str:
+        sev = str(severity).strip().lower()
+        if sev not in self._waiver_policy:
+            sev = "high"
+        tier = str(customer_tier).strip().lower()
+        if tier not in {"standard", "vip"}:
+            tier = "standard"
+        return str(self._waiver_policy.get(sev, {}).get(tier, "quality_manager"))
+
+    def _normalize_open_action_count(self) -> None:
+        for cid, case in self._cases.items():
+            open_cnt = sum(1 for x in self._actions.get(cid, []) if x.get("status") != "completed")
+            case["open_action_count"] = int(open_cnt)
+
+    def _dump_store(self) -> Dict[str, Any]:
+        self._normalize_open_action_count()
+        return {
+            "version": 1,
+            "saved_at": _now_iso(),
+            "cases": self._cases,
+            "events": {k: list(v) for k, v in self._events.items()},
+            "actions": {k: list(v) for k, v in self._actions.items()},
+            "dedup": self._dedup,
+        }
+
+    def _open_case_db(self) -> sqlite3.Connection:
+        if not self._db_path:
+            raise ValueError("sqlite case db path not configured")
+        parent = os.path.dirname(self._db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(self._db_path, timeout=20.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        return conn
+
+    @staticmethod
+    def _json_dump(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _json_load(text: str, fallback: Any) -> Any:
+        try:
+            out = json.loads(text)
+            return out
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _ensure_db_column(conn: sqlite3.Connection, table: str, col: str, ddl_type: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(x[1]) for x in rows}
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl_type}")
+
+    def _init_db_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qcc_cases (
+                case_id TEXT PRIMARY KEY,
+                lot_id TEXT,
+                state TEXT,
+                severity TEXT,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+            """
+        )
+        self._ensure_db_column(conn, "qcc_cases", "lot_id", "TEXT")
+        self._ensure_db_column(conn, "qcc_cases", "state", "TEXT")
+        self._ensure_db_column(conn, "qcc_cases", "severity", "TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qcc_actions (
+                action_id TEXT PRIMARY KEY,
+                case_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qcc_actions_case_id ON qcc_actions(case_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qcc_cases_lot ON qcc_cases(lot_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qcc_cases_state ON qcc_cases(state)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qcc_cases_severity ON qcc_cases(severity)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qcc_cases_updated_at ON qcc_cases(updated_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qcc_events (
+                case_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (case_id, seq)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qcc_events_case_id ON qcc_events(case_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qcc_dedup (
+                dedup_key TEXT PRIMARY KEY,
+                case_id TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qcc_meta (
+                k TEXT PRIMARY KEY,
+                v TEXT NOT NULL
+            )
+            """
+        )
+
+    def _load_from_sqlite(self) -> None:
+        try:
+            with self._open_case_db() as conn:
+                self._init_db_schema(conn)
+                case_rows = conn.execute("SELECT case_id, payload FROM qcc_cases").fetchall()
+                action_rows = conn.execute("SELECT case_id, payload FROM qcc_actions").fetchall()
+                event_rows = conn.execute("SELECT case_id, payload FROM qcc_events ORDER BY case_id, seq").fetchall()
+                dedup_rows = conn.execute("SELECT dedup_key, case_id FROM qcc_dedup").fetchall()
+            self._cases = {}
+            self._actions = defaultdict(list)
+            self._events = defaultdict(list)
+            self._dedup = {}
+            for cid, payload_txt in case_rows:
+                payload = self._json_load(str(payload_txt), {})
+                if isinstance(payload, dict):
+                    self._cases[str(cid)] = payload
+            for cid, payload_txt in action_rows:
+                payload = self._json_load(str(payload_txt), {})
+                if isinstance(payload, dict):
+                    self._actions[str(cid)].append(payload)
+            for cid, payload_txt in event_rows:
+                payload = self._json_load(str(payload_txt), {})
+                if isinstance(payload, dict):
+                    self._events[str(cid)].append(payload)
+            for dkey, cid in dedup_rows:
+                self._dedup[str(dkey)] = str(cid)
+            self._normalize_open_action_count()
+            self._store_meta["loaded"] = True
+            self._store_meta["last_load_iso"] = _now_iso()
+            self._store_meta["last_error"] = ""
+        except Exception as exc:  # noqa: BLE001
+            self._store_meta["loaded"] = False
+            self._store_meta["last_error"] = f"sqlite_load_failed:{exc}"
+            self._store_meta["last_load_iso"] = _now_iso()
+
+    def _persist_to_sqlite(self) -> None:
+        try:
+            payload = self._dump_store()
+            cases = payload.get("cases", {})
+            actions = payload.get("actions", {})
+            events = payload.get("events", {})
+            dedup = payload.get("dedup", {})
+            with self._open_case_db() as conn:
+                self._init_db_schema(conn)
+                conn.execute("BEGIN")
+                conn.execute("DELETE FROM qcc_cases")
+                conn.execute("DELETE FROM qcc_actions")
+                conn.execute("DELETE FROM qcc_events")
+                conn.execute("DELETE FROM qcc_dedup")
+                for cid, row in dict(cases if isinstance(cases, dict) else {}).items():
+                    if not isinstance(row, dict):
+                        continue
+                    conn.execute(
+                        "INSERT INTO qcc_cases(case_id, lot_id, state, severity, updated_at, payload) VALUES(?, ?, ?, ?, ?, ?)",
+                        (
+                            str(cid),
+                            str(row.get("lot_id", "")),
+                            str(row.get("state", "")),
+                            str(row.get("severity", "")),
+                            str(row.get("updated_at", "")),
+                            self._json_dump(row),
+                        ),
+                    )
+                for cid, rows in dict(actions if isinstance(actions, dict) else {}).items():
+                    if not isinstance(rows, list):
+                        continue
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        aid = str(row.get("action_id", ""))
+                        if not aid:
+                            continue
+                        conn.execute(
+                            "INSERT INTO qcc_actions(action_id, case_id, updated_at, payload) VALUES(?, ?, ?, ?)",
+                            (aid, str(cid), str(row.get("completed_at") or row.get("created_at") or ""), self._json_dump(row)),
+                        )
+                for cid, rows in dict(events if isinstance(events, dict) else {}).items():
+                    if not isinstance(rows, list):
+                        continue
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        seq = int(row.get("seq", 0) or 0)
+                        if seq <= 0:
+                            continue
+                        conn.execute(
+                            "INSERT INTO qcc_events(case_id, seq, payload) VALUES(?, ?, ?)",
+                            (str(cid), seq, self._json_dump(row)),
+                        )
+                for dkey, cid in dict(dedup if isinstance(dedup, dict) else {}).items():
+                    conn.execute(
+                        "INSERT INTO qcc_dedup(dedup_key, case_id) VALUES(?, ?)",
+                        (str(dkey), str(cid)),
+                    )
+                conn.execute(
+                    "INSERT OR REPLACE INTO qcc_meta(k, v) VALUES(?, ?)",
+                    ("last_saved_at", str(payload.get("saved_at", ""))),
+                )
+                conn.commit()
+            self._store_meta["persist_count"] = int(self._store_meta.get("persist_count", 0)) + 1
+            self._store_meta["last_persist_iso"] = _now_iso()
+            self._store_meta["last_error"] = ""
+        except Exception as exc:  # noqa: BLE001
+            self._store_meta["last_error"] = f"sqlite_persist_failed:{exc}"
+
+    def _load_store(self) -> None:
+        if self._db_path:
+            self._load_from_sqlite()
+            return
+        if not self._store_path:
+            self._store_meta["loaded"] = True
+            self._store_meta["last_load_iso"] = _now_iso()
+            return
+        if not os.path.exists(self._store_path):
+            self._store_meta["loaded"] = True
+            self._store_meta["last_load_iso"] = _now_iso()
+            return
+        try:
+            with open(self._store_path, "r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+            if not isinstance(payload, dict):
+                raise ValueError("case store payload must be object")
+            self._cases = {str(k): dict(v) for k, v in dict(payload.get("cases", {})).items() if isinstance(v, dict)}
+            ev = payload.get("events", {})
+            ac = payload.get("actions", {})
+            self._events = defaultdict(list)
+            self._actions = defaultdict(list)
+            for k, v in dict(ev if isinstance(ev, dict) else {}).items():
+                if isinstance(v, list):
+                    self._events[str(k)] = [dict(x) for x in v if isinstance(x, dict)]
+            for k, v in dict(ac if isinstance(ac, dict) else {}).items():
+                if isinstance(v, list):
+                    self._actions[str(k)] = [dict(x) for x in v if isinstance(x, dict)]
+            dd = payload.get("dedup", {})
+            self._dedup = {str(k): str(v) for k, v in dict(dd if isinstance(dd, dict) else {}).items()}
+            self._normalize_open_action_count()
+            self._store_meta["loaded"] = True
+            self._store_meta["last_load_iso"] = _now_iso()
+            self._store_meta["last_error"] = ""
+        except Exception as exc:  # noqa: BLE001
+            self._store_meta["loaded"] = False
+            self._store_meta["last_error"] = f"load_failed:{exc}"
+            self._store_meta["last_load_iso"] = _now_iso()
+
+    def _persist_store(self) -> None:
+        if self._db_path:
+            self._persist_to_sqlite()
+            return
+        if not self._store_path:
+            return
+        try:
+            parent = os.path.dirname(self._store_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            payload = self._dump_store()
+            tmp = f"{self._store_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fp:
+                json.dump(payload, fp, ensure_ascii=False, sort_keys=True, indent=2, default=str)
+            os.replace(tmp, self._store_path)
+            self._store_meta["persist_count"] = int(self._store_meta.get("persist_count", 0)) + 1
+            self._store_meta["last_persist_iso"] = _now_iso()
+            self._store_meta["last_error"] = ""
+        except Exception as exc:  # noqa: BLE001
+            self._store_meta["last_error"] = f"persist_failed:{exc}"
+
+    def store_status(self) -> Dict[str, Any]:
+        meta = dict(self._store_meta)
+        if self._db_path:
+            meta["db_path"] = self._db_path
+            meta["db_exists"] = os.path.exists(self._db_path)
+        if self._store_path:
+            meta["path"] = self._store_path
+            meta["exists"] = os.path.exists(self._store_path)
+        meta["case_count"] = len(self._cases)
+        meta["open_case_count"] = sum(1 for x in self._cases.values() if x.get("state") not in {"closed", "cancelled"})
+        return meta
+
+    def consistency_check(self) -> Dict[str, Any]:
+        errors: List[Dict[str, Any]] = []
+        warnings: List[Dict[str, Any]] = []
+        with self._lock:
+            case_ids = set(self._cases.keys())
+            action_ids: Dict[str, str] = {}
+            event_count = 0
+            for cid, case in self._cases.items():
+                if str(case.get("case_id", "")) != str(cid):
+                    errors.append({"code": "case_id_mismatch", "case_id": cid})
+                state = str(case.get("state", ""))
+                if state not in self.STATES:
+                    errors.append({"code": "invalid_case_state", "case_id": cid, "state": state})
+                open_count = sum(1 for x in self._actions.get(cid, []) if x.get("status") != "completed")
+                if state not in {"closed", "cancelled"} and int(case.get("open_action_count", open_count)) != int(open_count):
+                    warnings.append(
+                        {
+                            "code": "open_action_count_mismatch",
+                            "case_id": cid,
+                            "case_value": case.get("open_action_count"),
+                            "actual": open_count,
+                        }
+                    )
+            for cid, rows in self._actions.items():
+                if cid not in case_ids:
+                    errors.append({"code": "orphan_action_case", "case_id": cid, "count": len(rows)})
+                for row in rows:
+                    aid = str(row.get("action_id", ""))
+                    if not aid:
+                        errors.append({"code": "action_missing_id", "case_id": cid})
+                        continue
+                    owner_cid = action_ids.get(aid)
+                    if owner_cid and owner_cid != cid:
+                        errors.append({"code": "duplicate_action_id", "action_id": aid, "case_id": cid, "owner_case_id": owner_cid})
+                    else:
+                        action_ids[aid] = cid
+                    status = str(row.get("status", ""))
+                    if status not in {"open", "completed"}:
+                        warnings.append({"code": "unknown_action_status", "action_id": aid, "status": status})
+            for cid, rows in self._events.items():
+                if cid not in case_ids:
+                    warnings.append({"code": "orphan_event_case", "case_id": cid, "count": len(rows)})
+                prev = "GENESIS"
+                expected_seq = 1
+                for row in rows:
+                    event_count += 1
+                    seq = int(row.get("seq", 0) or 0)
+                    if seq != expected_seq:
+                        errors.append({"code": "event_seq_gap", "case_id": cid, "expected_seq": expected_seq, "actual_seq": seq})
+                    if str(row.get("prev_hash", "")) != prev:
+                        errors.append({"code": "event_prev_hash_mismatch", "case_id": cid, "seq": seq})
+                    payload = {
+                        "case_id": str(row.get("case_id", cid)),
+                        "seq": seq,
+                        "event_type": str(row.get("event_type", "")),
+                        "actor": str(row.get("actor", "")),
+                        "details": dict(row.get("details", {}) if isinstance(row.get("details"), dict) else {}),
+                        "ts": str(row.get("ts", "")),
+                    }
+                    calc = self._hash_event(prev, payload)
+                    if str(row.get("hash", "")) != calc:
+                        errors.append({"code": "event_hash_mismatch", "case_id": cid, "seq": seq})
+                    prev = str(row.get("hash", ""))
+                    expected_seq += 1
+            for dkey, cid in self._dedup.items():
+                if cid not in case_ids:
+                    errors.append({"code": "dedup_orphan_case", "dedup_key": dkey, "case_id": cid})
+            summary = {
+                "case_count": len(self._cases),
+                "action_count": sum(len(x) for x in self._actions.values()),
+                "event_count": event_count,
+                "dedup_count": len(self._dedup),
+            }
+        return {
+            "ok": len(errors) == 0,
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "errors": errors[:200],
+            "warnings": warnings[:200],
+            "summary": summary,
+            "checked_at": _now_iso(),
+        }
 
     @staticmethod
     def _hash_event(prev_hash: str, payload: Dict[str, Any]) -> str:
@@ -2474,7 +2898,7 @@ class QualityCaseCenterV2:
             "lot_id": lot_id,
             "case_type": case_type,
             "issue": issue,
-            "severity": severity,
+            "severity": str(severity).strip().lower(),
             "source": source,
             "state": "open",
             "created_by": created_by,
@@ -2483,12 +2907,14 @@ class QualityCaseCenterV2:
             "linked_snapshot_id": linked_snapshot_id,
             "linked_decision_code": linked_decision_code,
             "waivers": [],
+            "open_action_count": 0,
             "metadata": dict(metadata or {}),
         }
         self._cases[cid] = row
         if dkey:
             self._dedup[dkey] = cid
         self._append_event(case_id=cid, event_type="case_opened", actor=created_by, details={"issue": issue, "severity": severity})
+        self._persist_store()
         return {"opened": True, "deduplicated": False, "case_id": cid, "state": "open"}
 
     def transition(self, case_id: str, to_state: str, actor: str, reason: str = "") -> Dict[str, Any]:
@@ -2504,6 +2930,7 @@ class QualityCaseCenterV2:
         case["state"] = target
         case["updated_at"] = _now_iso()
         self._append_event(case_id=case_id, event_type="state_transition", actor=actor, details={"from": cur, "to": target, "reason": reason})
+        self._persist_store()
         return {"ok": True, "case_id": case_id, "state": target}
 
     def add_action(
@@ -2514,21 +2941,133 @@ class QualityCaseCenterV2:
         description: str,
         actor: str,
         due_ts: Optional[float] = None,
+        priority: int = 2,
+        mandatory: bool = True,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"ok": False, "error": "case_not_found"}
-        info = {
+        action_id = f"{case_id}-ACT-{len(self._actions[case_id])+1:04d}"
+        due_val = float(due_ts) if _is_number(due_ts) else None
+        action = {
+            "action_id": action_id,
             "action_type": action_type,
             "owner": owner,
             "description": description,
-            "due_ts": float(due_ts) if _is_number(due_ts) else None,
+            "priority": max(1, min(5, int(priority))),
+            "mandatory": bool(mandatory),
+            "due_ts": due_val,
+            "status": "open",
+            "completed_by": "",
+            "completed_at": "",
+            "result": {},
             "payload": dict(payload or {}),
+            "created_at": _now_iso(),
         }
+        self._actions[case_id].append(action)
+        info = {
+            "action_id": action_id,
+            "action_type": action_type,
+            "owner": owner,
+            "description": description,
+            "due_ts": due_val,
+            "priority": action["priority"],
+            "mandatory": action["mandatory"],
+        }
+        case["open_action_count"] = sum(1 for x in self._actions[case_id] if x.get("status") != "completed")
         case["updated_at"] = _now_iso()
         self._append_event(case_id=case_id, event_type="action_added", actor=actor, details=info)
-        return {"ok": True, "case_id": case_id, "state": case.get("state")}
+        self._persist_store()
+        return {"ok": True, "case_id": case_id, "state": case.get("state"), "action_id": action_id}
+
+    def complete_action(
+        self,
+        case_id: str,
+        action_id: str,
+        actor: str,
+        result: Optional[Dict[str, Any]] = None,
+        effectiveness: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        case = self._cases.get(case_id)
+        if not case:
+            return {"ok": False, "error": "case_not_found"}
+        rows = self._actions.get(case_id, [])
+        target = [x for x in rows if x.get("action_id") == action_id]
+        if not target:
+            return {"ok": False, "error": "action_not_found"}
+        act = target[0]
+        if act.get("status") == "completed":
+            return {"ok": True, "case_id": case_id, "action_id": action_id, "deduplicated": True}
+        act["status"] = "completed"
+        act["completed_by"] = actor
+        act["completed_at"] = _now_iso()
+        act["result"] = dict(result or {})
+        eff = float(effectiveness) if _is_number(effectiveness) else None
+        if eff is not None:
+            act["effectiveness"] = max(0.0, min(1.0, eff))
+        case["open_action_count"] = sum(1 for x in rows if x.get("status") != "completed")
+        case["updated_at"] = _now_iso()
+        self._append_event(
+            case_id=case_id,
+            event_type="action_completed",
+            actor=actor,
+            details={
+                "action_id": action_id,
+                "effectiveness": act.get("effectiveness"),
+            },
+        )
+        self._persist_store()
+        return {"ok": True, "case_id": case_id, "action_id": action_id, "open_action_count": case["open_action_count"]}
+
+    def get_sla_report(
+        self,
+        lot_id: Optional[str] = None,
+        case_id: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        now = float(now_ts if now_ts is not None else time.time())
+        rows: List[Dict[str, Any]] = []
+        case_ids: List[str]
+        if case_id:
+            case_ids = [case_id]
+        elif lot_id:
+            case_ids = [c["case_id"] for c in self._cases.values() if c.get("lot_id") == lot_id]
+        else:
+            case_ids = list(self._cases.keys())
+        for cid in case_ids:
+            case = self._cases.get(cid)
+            if not case:
+                continue
+            if case.get("state") in {"closed", "cancelled"}:
+                continue
+            for act in self._actions.get(cid, []):
+                if act.get("status") == "completed":
+                    continue
+                due = act.get("due_ts")
+                overdue = bool(_is_number(due) and float(due) < now)
+                rows.append(
+                    {
+                        "case_id": cid,
+                        "lot_id": case.get("lot_id"),
+                        "severity": case.get("severity"),
+                        "action_id": act.get("action_id"),
+                        "owner": act.get("owner"),
+                        "priority": act.get("priority"),
+                        "mandatory": bool(act.get("mandatory", True)),
+                        "due_ts": due,
+                        "overdue": overdue,
+                    }
+                )
+        overdue_rows = [x for x in rows if x.get("overdue")]
+        critical_overdue = [x for x in overdue_rows if x.get("severity") in {"critical", "high"} and x.get("mandatory")]
+        return {
+            "count": len(rows),
+            "overdue_count": len(overdue_rows),
+            "critical_overdue_count": len(critical_overdue),
+            "rows": rows,
+            "overdue_rows": overdue_rows,
+        }
 
     def add_waiver(
         self,
@@ -2536,15 +3075,33 @@ class QualityCaseCenterV2:
         actor: str,
         approved_by: str,
         reason: str,
+        approver_role: str = "quality_manager",
+        risk_level: Optional[str] = None,
+        customer_tier: str = "standard",
+        waiver_type: str = "release_with_risk",
         expiry_ts: Optional[float] = None,
     ) -> Dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"ok": False, "error": "case_not_found"}
+        sev = str(risk_level or case.get("severity", "high")).strip().lower()
+        req = self._required_approver(severity=sev, customer_tier=customer_tier)
+        actual_role = self._norm_role(approver_role)
+        if self._rank(actual_role) < self._rank(req):
+            return {
+                "ok": False,
+                "error": "approval_insufficient",
+                "required_role": req,
+                "actual_role": actual_role,
+                "case_id": case_id,
+            }
         rec = {
             "waiver_id": f"{case_id}-WVR-{len(case.get('waivers', []))+1:04d}",
             "actor": actor,
             "approved_by": approved_by,
+            "approver_role": actual_role,
+            "required_role": req,
+            "waiver_type": waiver_type,
             "reason": reason,
             "expiry_ts": float(expiry_ts) if _is_number(expiry_ts) else None,
             "created_at": _now_iso(),
@@ -2552,6 +3109,7 @@ class QualityCaseCenterV2:
         case["waivers"].append(rec)
         case["updated_at"] = _now_iso()
         self._append_event(case_id=case_id, event_type="waiver_added", actor=actor, details=rec)
+        self._persist_store()
         return {"ok": True, "case_id": case_id, "waiver_id": rec["waiver_id"]}
 
     def close_case(self, case_id: str, actor: str, verification: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2561,22 +3119,39 @@ class QualityCaseCenterV2:
         cur = str(case.get("state", "open"))
         if cur not in {"verification", "action_in_progress"}:
             return {"ok": False, "error": "invalid_close_state", "state": cur}
+        pending_mandatory = [
+            x["action_id"]
+            for x in self._actions.get(case_id, [])
+            if x.get("status") != "completed" and bool(x.get("mandatory", True))
+        ]
+        if pending_mandatory:
+            return {
+                "ok": False,
+                "error": "mandatory_actions_pending",
+                "pending_actions": pending_mandatory,
+            }
         case["state"] = "closed"
         case["updated_at"] = _now_iso()
+        case["open_action_count"] = 0
         self._append_event(
             case_id=case_id,
             event_type="case_closed",
             actor=actor,
             details={"verification": dict(verification or {}), "closed_from": cur},
         )
+        self._persist_store()
         return {"ok": True, "case_id": case_id, "state": "closed"}
 
     def get_case(self, case_id: str) -> Dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"error": "case_not_found", "case_id": case_id}
+        actions = list(self._actions.get(case_id, []))
+        open_actions = [x for x in actions if x.get("status") != "completed"]
         return {
             "case": dict(case),
+            "actions": actions,
+            "open_action_count": len(open_actions),
             "events": list(self._events.get(case_id, [])),
             "event_count": len(self._events.get(case_id, [])),
         }
@@ -2589,7 +3164,12 @@ class QualityCaseCenterV2:
             rows = [x for x in rows if x.get("state") == state]
         rows.sort(key=lambda x: str(x.get("updated_at", "")))
         rows = rows[-max(1, int(last_n)) :]
-        return {"count": len(rows), "rows": rows}
+        out = []
+        for row in rows:
+            rid = str(row.get("case_id"))
+            open_cnt = sum(1 for x in self._actions.get(rid, []) if x.get("status") != "completed")
+            out.append({**row, "open_action_count": open_cnt})
+        return {"count": len(out), "rows": out}
 
 
 class RoleViewBuilderV2:
@@ -2642,6 +3222,7 @@ class RoleViewBuilderV2:
                     "arbitration_triggers": boundary.get("arbitration_triggers", []),
                     "review_triggers": boundary.get("review_triggers", []),
                 },
+                "case_governance": module_outputs.get("case_governance"),
                 "capa_candidates": assessment.get("business_suggestion_layer", {}).get("capa_candidates", {}),
                 "case_ref": assessment.get("case_ref"),
             }
@@ -2690,9 +3271,22 @@ class LifecycleRuleCenter:
                 "min_confidence_arbitration": 0.55,
                 "repeatability_review_std": 0.35,
                 "repeatability_hard_std": 0.45,
+                "msa_risk_review": 0.45,
+                "msa_risk_hard": 0.75,
+                "spc_risk_review": 0.4,
+                "spc_risk_hard": 0.75,
+                "metamerism_risk_review": 0.35,
+                "metamerism_risk_hard": 0.75,
+                "post_process_risk_review": 0.4,
+                "post_process_risk_hard": 0.78,
+                "storage_risk_review": 0.45,
+                "storage_risk_hard": 0.8,
                 "roll_transition_risk_review": 0.45,
                 "roll_tail_risk_review": 0.4,
                 "roll_tail_risk_hard": 0.8,
+                "case_overdue_review": 1,
+                "case_overdue_hard": 2,
+                "release_allowed_states": ["released", "in_run_monitoring", "hold_for_review", "retest", "arbitration"],
             },
             notes="default production lifecycle rules",
         )
@@ -2798,7 +3392,7 @@ class ReportFactory:
         }
 
 class UltimateColorFilmSystemV2Optimized:
-    def __init__(self) -> None:
+    def __init__(self, case_store_path: Optional[str] = None, case_db_path: Optional[str] = None) -> None:
         self.env = EnvironmentCompensatorV2()
         self.substrate = SubstrateAnalyzerV2()
         self.wet_dry = WetToDryPredictorV2()
@@ -2830,7 +3424,11 @@ class UltimateColorFilmSystemV2Optimized:
         self.state_machine = LifecycleStateMachineV2()
         self.failure_modes = FailureModeRegistryV2()
         self.alerts = AlertCenterV2()
-        self.case_center = QualityCaseCenterV2()
+        case_store_env = os.getenv("ELITE_CASE_CENTER_STORE_PATH", "").strip()
+        case_db_env = os.getenv("ELITE_CASE_CENTER_DB_PATH", "").strip()
+        resolved_case_store = str(case_store_path).strip() if case_store_path is not None else case_store_env
+        resolved_case_db = str(case_db_path).strip() if case_db_path is not None else case_db_env
+        self.case_center = QualityCaseCenterV2(store_path=(resolved_case_store or None), db_path=(resolved_case_db or None))
         self.role_views = RoleViewBuilderV2()
         self.lifecycle_rules = LifecycleRuleCenter()
         self.report_factory = ReportFactory()
@@ -3282,6 +3880,8 @@ class UltimateColorFilmSystemV2Optimized:
         description: str,
         actor: str,
         due_ts: Optional[float] = None,
+        priority: int = 2,
+        mandatory: bool = True,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.case_center.add_action(
@@ -3291,7 +3891,25 @@ class UltimateColorFilmSystemV2Optimized:
             description=description,
             actor=actor,
             due_ts=due_ts,
+            priority=priority,
+            mandatory=mandatory,
             payload=payload,
+        )
+
+    def complete_case_action(
+        self,
+        case_id: str,
+        action_id: str,
+        actor: str,
+        result: Optional[Dict[str, Any]] = None,
+        effectiveness: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return self.case_center.complete_action(
+            case_id=case_id,
+            action_id=action_id,
+            actor=actor,
+            result=result,
+            effectiveness=effectiveness,
         )
 
     def transition_case(self, case_id: str, to_state: str, actor: str, reason: str = "") -> Dict[str, Any]:
@@ -3303,6 +3921,10 @@ class UltimateColorFilmSystemV2Optimized:
         actor: str,
         approved_by: str,
         reason: str,
+        approver_role: str = "quality_manager",
+        risk_level: Optional[str] = None,
+        customer_tier: str = "standard",
+        waiver_type: str = "release_with_risk",
         expiry_ts: Optional[float] = None,
     ) -> Dict[str, Any]:
         return self.case_center.add_waiver(
@@ -3310,6 +3932,10 @@ class UltimateColorFilmSystemV2Optimized:
             actor=actor,
             approved_by=approved_by,
             reason=reason,
+            approver_role=approver_role,
+            risk_level=risk_level,
+            customer_tier=customer_tier,
+            waiver_type=waiver_type,
             expiry_ts=expiry_ts,
         )
 
@@ -3321,6 +3947,20 @@ class UltimateColorFilmSystemV2Optimized:
 
     def list_quality_cases(self, lot_id: Optional[str] = None, state: Optional[str] = None, last_n: int = 100) -> Dict[str, Any]:
         return self.case_center.list_cases(lot_id=lot_id, state=state, last_n=last_n)
+
+    def get_case_store_status(self) -> Dict[str, Any]:
+        return self.case_center.store_status()
+
+    def get_case_store_consistency(self) -> Dict[str, Any]:
+        return self.case_center.consistency_check()
+
+    def get_case_sla_report(
+        self,
+        lot_id: Optional[str] = None,
+        case_id: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return self.case_center.get_sla_report(lot_id=lot_id, case_id=case_id, now_ts=now_ts)
 
     def build_role_view(self, role: str, assessment: Dict[str, Any]) -> Dict[str, Any]:
         return self.role_views.build(role=role, assessment=assessment)
@@ -3368,6 +4008,8 @@ class UltimateColorFilmSystemV2Optimized:
         roll_transition_review = float(p.get("roll_transition_risk_review", 0.45))
         roll_tail_review = float(p.get("roll_tail_risk_review", 0.4))
         roll_tail_hard = float(p.get("roll_tail_risk_hard", 0.8))
+        case_overdue_review = int(p.get("case_overdue_review", 1))
+        case_overdue_hard = int(p.get("case_overdue_hard", 2))
         release_allowed_states = set(p.get("release_allowed_states", ["released", "in_run_monitoring", "hold_for_review", "retest", "arbitration"]))
 
         hard_blocks: List[str] = []
@@ -3392,6 +4034,8 @@ class UltimateColorFilmSystemV2Optimized:
             hard_blocks.append("golden_sample_invalid")
         if bool(context.get("missing_critical_data", False)):
             hard_blocks.append("critical_data_missing")
+        if bool(context.get("open_critical_case", False)):
+            hard_blocks.append("open_critical_quality_case")
         if bool(context.get("rule_conflict", False)):
             arbitration_triggers.append("rule_conflict_detected")
         lifecycle_state = str(context.get("lifecycle_state", "created"))
@@ -3458,6 +4102,14 @@ class UltimateColorFilmSystemV2Optimized:
             arbitration_triggers.append("roll_tail_drift_high")
         elif roll_tail_risk >= roll_tail_review:
             review_triggers.append("roll_tail_drift_review")
+        case_overdue_actions = int(context.get("case_overdue_actions", 0) or 0)
+        if case_overdue_actions >= case_overdue_hard:
+            hard_blocks.append("quality_case_sla_overdue")
+        elif case_overdue_actions >= case_overdue_review:
+            review_triggers.append("quality_case_sla_risk")
+        open_high_case_count = int(context.get("open_high_case_count", 0) or 0)
+        if open_high_case_count > 0:
+            review_triggers.append("open_high_quality_case")
 
         conf = float(context.get("confidence", 1.0) or 1.0)
         if conf < conf_arb:
@@ -3632,6 +4284,18 @@ class UltimateColorFilmSystemV2Optimized:
         else:
             storage_report = {"risk_score": 0.0}
         state_snapshot = self.state_machine.snapshot(lot_id=lot_id)
+        case_listing = self.list_quality_cases(lot_id=lot_id, last_n=200)
+        case_rows = list(case_listing.get("rows", []))
+        active_cases = [x for x in case_rows if str(x.get("state", "open")) not in {"closed", "cancelled"}]
+        open_critical_case = any(str(x.get("severity", "")).lower() == "critical" for x in active_cases)
+        open_high_case_count = sum(1 for x in active_cases if str(x.get("severity", "")).lower() in {"high", "critical"})
+        case_sla = self.get_case_sla_report(lot_id=lot_id)
+        case_governance = {
+            "active_case_count": len(active_cases),
+            "open_critical_case": open_critical_case,
+            "open_high_case_count": open_high_case_count,
+            "sla": case_sla,
+        }
 
         boundary_context = {
             "sensor_health": m.get("sensor_health", "ok"),
@@ -3659,6 +4323,9 @@ class UltimateColorFilmSystemV2Optimized:
             "tail_drift_detected": bool(run_report.get("tail_drift", {}).get("detected", False)),
             "roll_transition_risk": float(roll_report.get("transition_risk_score", 0.0) or 0.0),
             "roll_tail_risk": float(roll_report.get("tail_risk_score", 0.0) or 0.0),
+            "open_critical_case": bool(open_critical_case),
+            "open_high_case_count": int(open_high_case_count),
+            "case_overdue_actions": int(case_sla.get("overdue_count", 0) or 0),
             "lifecycle_state": state_snapshot.get("current_state", "created"),
             "confidence": float(confidence if _is_number(confidence) else bd.get("confidence", 1.0) or 1.0),
         }
@@ -3759,6 +4426,8 @@ class UltimateColorFilmSystemV2Optimized:
             prioritized_actions.append({"priority": 1, "owner": "operator", "action": "quarantine_tail_roll_segment_and_issue_rework_ticket"})
         if float(roll_report.get("transition_risk_score", 0.0) or 0.0) >= 0.45:
             prioritized_actions.append({"priority": 1, "owner": "process_engineer", "action": "lock_transition_zone_until_stable_recheck_passes"})
+        if int(case_sla.get("overdue_count", 0) or 0) > 0:
+            prioritized_actions.append({"priority": 1, "owner": "quality_manager", "action": "clear_overdue_quality_case_actions_before_release"})
         if not prioritized_actions:
             prioritized_actions.append({"priority": 2, "owner": "quality_manager", "action": "routine_monitoring"})
         prioritized_actions = sorted(prioritized_actions, key=lambda x: int(x["priority"]))
@@ -3784,6 +4453,7 @@ class UltimateColorFilmSystemV2Optimized:
                 {"source": "post_process", "strength": "medium", "details": post_report},
                 {"source": "storage_transport", "strength": "medium", "details": storage_report},
                 {"source": "roll_tracker", "strength": "high" if roll_report.get("tail_sustained_drift") else "medium", "details": roll_report},
+                {"source": "case_governance", "strength": "high" if case_sla.get("critical_overdue_count", 0) else "medium", "details": case_governance},
                 {"source": "traceability", "strength": "high" if trace.get("integrity") else "medium", "details": {"integrity": trace.get("integrity"), "missing": trace.get("missing_required_stages", [])}},
             ]
         )
@@ -3813,6 +4483,7 @@ class UltimateColorFilmSystemV2Optimized:
             "state_snapshot": state_snapshot,
             "traceability_integrity": trace.get("integrity", False),
             "roll_context": {"roll_id": roll_id, "status": roll_report.get("status")},
+            "case_governance": case_governance,
         }
         business_suggestion_layer = {
             "disposition_plan": disposition,
@@ -3848,6 +4519,7 @@ class UltimateColorFilmSystemV2Optimized:
                 "post_process": post_report,
                 "storage_transport": storage_report,
                 "roll_tracker": roll_report,
+                "case_governance": case_governance,
             },
             "version_links": self.get_version_links(lot_id),
             "prioritized_actions": prioritized_actions,
@@ -3940,6 +4612,8 @@ class UltimateColorFilmSystemV2Optimized:
                 owner="quality_manager",
                 description=f"link integrated assessment snapshot {snapshot_id}",
                 actor=str(m.get("actor", "system")),
+                mandatory=False,
+                priority=4,
                 payload={"snapshot_id": snapshot_id, "decision_code": decision_code},
             )
         self.data_guard.cache_submission(idem_key, result)
@@ -4138,7 +4812,7 @@ class UltimateColorFilmSystemV2Optimized:
                 "spc_and_msa_are_runtime_estimators_not_formal_certified_qms_records",
                 "post_process_and_storage_models_are_proxy_estimators_requiring_field_calibration",
                 "roll_length_risk_requires_dense_meter_sampling_for_high_confidence",
-                "quality_case_workflow_is_in_memory_and_needs_persistent_workflow_backend_for_enterprise_scale",
+                "quality_case_workflow_supports_local_file_and_single-node_sqlite_persistence_but_needs_multi-node_workflow_backend_for_enterprise_scale",
                 "manual_override_policy_requires_external_approval_workflow_integration",
             ],
             "explicit_unknown_states": [

@@ -4915,6 +4915,9 @@ def get_lifecycle_manifest() -> dict[str, Any]:
             "roll_summary": "/v1/lifecycle/roll/summary",
             "rule_simulation": "/v1/lifecycle/decision/simulate-rules",
             "case_list": "/v1/lifecycle/case/list",
+            "case_sla_report": "/v1/lifecycle/case/sla-report",
+            "case_store_status": "/v1/lifecycle/case/store-status",
+            "case_store_check": "/v1/lifecycle/case/store-check",
             "role_view": "/v1/lifecycle/decision/role-view",
         },
     }
@@ -6004,6 +6007,12 @@ def post_lifecycle_case_action(payload: dict[str, Any]) -> dict[str, Any]:
     actor = str(payload.get("actor", "system"))
     due_ts_raw = payload.get("due_ts")
     due_ts = float(due_ts_raw) if due_ts_raw is not None else None
+    priority_raw = payload.get("priority", 2)
+    priority = int(priority_raw)
+    mandatory_raw = payload.get("mandatory", True)
+    mandatory = bool(mandatory_raw)
+    if isinstance(mandatory_raw, str):
+        mandatory = mandatory_raw.strip().lower() not in {"0", "false", "no", "off"}
     extra = payload.get("payload")
     if extra is not None and not isinstance(extra, dict):
         raise HTTPException(status_code=422, detail="payload must be object")
@@ -6015,7 +6024,30 @@ def post_lifecycle_case_action(payload: dict[str, Any]) -> dict[str, Any]:
             description=description,
             actor=actor,
             due_ts=due_ts,
+            priority=priority,
+            mandatory=mandatory,
             payload=extra if isinstance(extra, dict) else None,
+        )
+    return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
+
+
+@app.post("/v1/lifecycle/case/action/complete")
+def post_lifecycle_case_action_complete(payload: dict[str, Any]) -> dict[str, Any]:
+    case_id = _payload_text_required(payload, "case_id")
+    action_id = _payload_text_required(payload, "action_id")
+    actor = _payload_text_required(payload, "actor")
+    result_payload = payload.get("result")
+    if result_payload is not None and not isinstance(result_payload, dict):
+        raise HTTPException(status_code=422, detail="result must be object")
+    effectiveness_raw = payload.get("effectiveness")
+    effectiveness = float(effectiveness_raw) if effectiveness_raw is not None else None
+    with ULTIMATE_LOCK:
+        result = ULTIMATE_SYSTEM.complete_case_action(
+            case_id=case_id,
+            action_id=action_id,
+            actor=actor,
+            result=result_payload if isinstance(result_payload, dict) else None,
+            effectiveness=effectiveness,
         )
     return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
 
@@ -6037,6 +6069,11 @@ def post_lifecycle_case_waiver(payload: dict[str, Any]) -> dict[str, Any]:
     actor = _payload_text_required(payload, "actor")
     approved_by = _payload_text_required(payload, "approved_by")
     reason = _payload_text_required(payload, "reason")
+    approver_role = str(payload.get("approver_role", "quality_manager"))
+    risk_level_raw = payload.get("risk_level")
+    risk_level = str(risk_level_raw) if risk_level_raw is not None else None
+    customer_tier = str(payload.get("customer_tier", "standard"))
+    waiver_type = str(payload.get("waiver_type", "release_with_risk"))
     expiry_ts_raw = payload.get("expiry_ts")
     expiry_ts = float(expiry_ts_raw) if expiry_ts_raw is not None else None
     with ULTIMATE_LOCK:
@@ -6045,6 +6082,10 @@ def post_lifecycle_case_waiver(payload: dict[str, Any]) -> dict[str, Any]:
             actor=actor,
             approved_by=approved_by,
             reason=reason,
+            approver_role=approver_role,
+            risk_level=risk_level,
+            customer_tier=customer_tier,
+            waiver_type=waiver_type,
             expiry_ts=expiry_ts,
         )
     return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
@@ -6077,6 +6118,31 @@ def get_lifecycle_case_get(case_id: str) -> dict[str, Any]:
 def get_lifecycle_case_list(lot_id: str | None = None, state: str | None = None, last_n: int = 100) -> dict[str, Any]:
     with ULTIMATE_LOCK:
         result = ULTIMATE_SYSTEM.list_quality_cases(lot_id=lot_id, state=state, last_n=max(1, int(last_n)))
+    return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
+
+
+@app.get("/v1/lifecycle/case/sla-report")
+def get_lifecycle_case_sla_report(
+    lot_id: str | None = None,
+    case_id: str | None = None,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    with ULTIMATE_LOCK:
+        result = ULTIMATE_SYSTEM.get_case_sla_report(lot_id=lot_id, case_id=case_id, now_ts=now_ts)
+    return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
+
+
+@app.get("/v1/lifecycle/case/store-status")
+def get_lifecycle_case_store_status() -> dict[str, Any]:
+    with ULTIMATE_LOCK:
+        result = ULTIMATE_SYSTEM.get_case_store_status()
+    return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
+
+
+@app.get("/v1/lifecycle/case/store-check")
+def get_lifecycle_case_store_check() -> dict[str, Any]:
+    with ULTIMATE_LOCK:
+        result = ULTIMATE_SYSTEM.get_case_store_consistency()
     return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
 
 

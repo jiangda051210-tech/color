@@ -346,18 +346,27 @@ powershell -ExecutionPolicy Bypass -File "D:\color match\autocolor\stop_elite_ap
 - `POST /v1/lifecycle/decision/simulate-rules-batch`：多快照+多规则组合的批量影响模拟
 - `POST /v1/lifecycle/decision/role-view`：按角色生成操作工/工艺/质量/客服/管理层视图
 - `POST /v1/lifecycle/case/open`：质量工单开启（NC/偏差/争议）
-- `POST /v1/lifecycle/case/action`：工单行动项登记（责任人/描述/到期）
+- `POST /v1/lifecycle/case/action`：工单行动项登记（责任人/优先级/强制项/到期）
+- `POST /v1/lifecycle/case/action/complete`：工单行动项闭环（结果+有效性）
 - `POST /v1/lifecycle/case/transition`：工单状态迁移（open->investigating->...）
-- `POST /v1/lifecycle/case/waiver`：让步放行审计登记（批准人/原因）
+- `POST /v1/lifecycle/case/waiver`：让步放行审计登记（批准人+审批角色+风险等级）
 - `POST /v1/lifecycle/case/close`：工单关闭与效果验证记录
 - `GET /v1/lifecycle/case/get`：单工单详情+事件链
 - `GET /v1/lifecycle/case/list`：工单列表查询
+- `GET /v1/lifecycle/case/sla-report`：工单SLA逾期摘要（按lot/case）
+- `GET /v1/lifecycle/case/store-status`：工单持久化存储状态（是否启用/最近落盘/异常）
+- `GET /v1/lifecycle/case/store-check`：工单存储一致性体检（序列/哈希链/引用）
 - `POST /v1/lifecycle/report/release`：批次放行报告（customer/internal 双视角）
 - `POST /v1/lifecycle/report/complaint`：客诉调查摘要自动生成
 - `GET /v1/lifecycle/known-boundaries`：当前系统显式边界清单（用于上线治理）
 - `GET /v1/report/html`：在线查看 HTML 报告（项目目录内安全路径）
 - `GET /v1/history/executive`：经营指标（放行率/三方指数/成本）
 - `GET /v1/history/runs`：历史明细记录
+
+> 启用工单持久化：
+> - 推荐 SQLite：设置 `ELITE_CASE_CENTER_DB_PATH`（例如 `D:\\color match\\autocolor\\data\\case_store.sqlite`）
+> - 兼容 JSON 文件：设置 `ELITE_CASE_CENTER_STORE_PATH`（例如 `D:\\color match\\autocolor\\data\\case_store.json`）
+> 服务重启后将自动恢复工单/行动项/事件链。若两个变量同时配置，优先使用 SQLite。
 
 ### 一键全链路验收（整项目）
 

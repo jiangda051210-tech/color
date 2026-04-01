@@ -1261,14 +1261,19 @@ def main(argv: list[str] | None = None) -> int:
         if cid:
             status, body = _get(base, "/v1/lifecycle/case/get", {"case_id": cid})
             _assert_200("lifecycle_case_get", status, body)
+            action_id = None
             status, body = _post(base, "/v1/lifecycle/case/action", {
                 "case_id": cid,
                 "action_type": "temporary_containment",
                 "owner": "E2E-QA",
                 "description": "hold shipment and remeasure tail segment",
                 "actor": "E2E-QA",
+                "priority": 1,
+                "mandatory": True,
+                "due_ts": time.time() + 7200,
             })
             _assert_200("lifecycle_case_action", status, body)
+            action_id = body.get("result", {}).get("action_id")
             status, body = _post(base, "/v1/lifecycle/case/transition", {
                 "case_id": cid,
                 "to_state": "investigating",
@@ -1276,13 +1281,63 @@ def main(argv: list[str] | None = None) -> int:
                 "reason": "start investigation",
             })
             _assert_200("lifecycle_case_transition", status, body)
+            status, body = _post(base, "/v1/lifecycle/case/transition", {
+                "case_id": cid,
+                "to_state": "action_planned",
+                "actor": "E2E-QA",
+                "reason": "plan containment",
+            })
+            _assert_200("lifecycle_case_transition_plan", status, body)
+            status, body = _post(base, "/v1/lifecycle/case/transition", {
+                "case_id": cid,
+                "to_state": "action_in_progress",
+                "actor": "E2E-QA",
+                "reason": "execute containment",
+            })
+            _assert_200("lifecycle_case_transition_execute", status, body)
+            if action_id:
+                status, body = _post(base, "/v1/lifecycle/case/action/complete", {
+                    "case_id": cid,
+                    "action_id": action_id,
+                    "actor": "E2E-QA",
+                    "result": {"note": "shipment held and tail segment quarantined"},
+                    "effectiveness": 0.84,
+                })
+                _assert_200("lifecycle_case_action_complete", status, body)
             status, body = _post(base, "/v1/lifecycle/case/waiver", {
                 "case_id": cid,
                 "actor": "E2E-QA",
                 "approved_by": "E2E-MANAGER",
                 "reason": "urgent shipment with customer confirmation",
+                "approver_role": "quality_manager",
+                "risk_level": "high",
+                "customer_tier": "standard",
+                "waiver_type": "release_with_risk",
             })
             _assert_200("lifecycle_case_waiver", status, body)
+            status, body = _get(base, "/v1/lifecycle/case/sla-report", {"case_id": cid})
+            _assert_200("lifecycle_case_sla_report", status, body)
+            status, body = _get(base, "/v1/lifecycle/case/store-status")
+            _assert_200("lifecycle_case_store_status", status, body)
+            status, body = _get(base, "/v1/lifecycle/case/store-check")
+            _assert_200("lifecycle_case_store_check", status, body)
+            if not bool(body.get("result", {}).get("ok", False)):
+                raise RuntimeError(f"lifecycle_case_store_check returned not ok: {body}")
+            status, body = _post(base, "/v1/lifecycle/case/transition", {
+                "case_id": cid,
+                "to_state": "verification",
+                "actor": "E2E-QA",
+                "reason": "verify closure",
+            })
+            _assert_200("lifecycle_case_transition_verify", status, body)
+            status, body = _post(base, "/v1/lifecycle/case/close", {
+                "case_id": cid,
+                "actor": "E2E-QA",
+                "verification": {"result": "effective", "evidence": "e2e closure path"},
+            })
+            _assert_200("lifecycle_case_close", status, body)
+            if not bool(body.get("result", {}).get("ok", False)):
+                raise RuntimeError(f"lifecycle_case_close returned not ok: {body}")
     status, body = _post(base, "/v1/lifecycle/report/release", {
         "lot_id": trace_lot,
         "assessment": assess_result,

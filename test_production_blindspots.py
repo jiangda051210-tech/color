@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import os
 import random
+import tempfile
 import time
 
 from color_film_mvp_v3_optimized import ColorFilmPipelineV3Optimized
@@ -53,6 +55,10 @@ def _good_assessment_payload(lot: str):
         "current_lab": {"L": 62.0, "a": 3.2, "b": 14.8},
         "meta": {"environment_severity": 0.2, "golden_status": "ok", "idempotency_key": f"idem-{lot}"},
     }
+
+
+def _set_release_ready_state(sys: UltimateColorFilmSystemV2Optimized, lot: str) -> None:
+    sys.transition_state(lot_id=lot, to_state="in_run_monitoring", actor="QA", reason="unit test prep", force=True)
 
 
 def test_local_hotspot_override():
@@ -405,8 +411,12 @@ def test_case_workflow_and_batch_rule_simulation():
         actor="QA",
     )
     assert act["ok"] is True
+    aid = act.get("action_id")
+    assert aid
     step3 = sys.transition_case(cid, "action_in_progress", "QA", "execute")
     assert step3["ok"] is True
+    done = sys.complete_case_action(case_id=cid, action_id=aid, actor="QA", result={"note": "done"}, effectiveness=0.9)
+    assert done["ok"] is True
     step4 = sys.transition_case(cid, "verification", "QA", "verify")
     assert step4["ok"] is True
     wv = sys.add_case_waiver(cid, actor="QA", approved_by="Manager", reason="customer approved")
@@ -433,6 +443,298 @@ def test_case_workflow_and_batch_rule_simulation():
     assert batch["total_simulations"] == 1
 
 
+def test_case_approval_gate_and_mandatory_action_close_guard():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-CASE-GATE"
+    _add_trace(sys, lot, complete=True)
+
+    opened = sys.open_quality_case(
+        lot_id=lot,
+        case_type="nonconformance",
+        issue="critical release dispute",
+        severity="high",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"gate-{lot}",
+    )
+    cid = opened.get("case_id")
+    assert cid
+
+    act = sys.add_case_action(
+        case_id=cid,
+        action_type="containment",
+        owner="OP-A",
+        description="hold shipment",
+        actor="QA",
+        mandatory=True,
+        priority=1,
+    )
+    assert act["ok"] is True
+    aid = act.get("action_id")
+    assert aid
+
+    assert sys.transition_case(cid, "investigating", "QA", "start")["ok"] is True
+    assert sys.transition_case(cid, "action_planned", "QA", "plan")["ok"] is True
+    assert sys.transition_case(cid, "action_in_progress", "QA", "execute")["ok"] is True
+    assert sys.transition_case(cid, "verification", "QA", "verify")["ok"] is True
+
+    blocked_close = sys.close_quality_case(cid, actor="QA", verification={"result": "pending"})
+    assert blocked_close["ok"] is False
+    assert blocked_close["error"] == "mandatory_actions_pending"
+
+    denied = sys.add_case_waiver(
+        cid,
+        actor="QA",
+        approved_by="LINE-LEAD",
+        reason="try bypass",
+        approver_role="supervisor",
+        risk_level="high",
+        customer_tier="standard",
+    )
+    assert denied["ok"] is False
+    assert denied["error"] == "approval_insufficient"
+
+    done = sys.complete_case_action(case_id=cid, action_id=aid, actor="QA", result={"note": "containment done"}, effectiveness=0.88)
+    assert done["ok"] is True
+
+    closed = sys.close_quality_case(cid, actor="QA", verification={"result": "effective"})
+    assert closed["ok"] is True
+    assert closed["state"] == "closed"
+
+
+def test_case_sla_overdue_triggers_review_and_hard_block():
+    sys = UltimateColorFilmSystemV2Optimized()
+
+    lot_review = "LOT-CASE-SLA-REVIEW"
+    _add_trace(sys, lot_review, complete=True)
+    _set_release_ready_state(sys, lot_review)
+    opened_review = sys.open_quality_case(
+        lot_id=lot_review,
+        case_type="nonconformance",
+        issue="pending review action",
+        severity="low",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"sla-review-{lot_review}",
+    )
+    cid_review = opened_review.get("case_id")
+    assert cid_review
+    sys.add_case_action(
+        case_id=cid_review,
+        action_type="retest",
+        owner="OP-A",
+        description="late action",
+        actor="QA",
+        due_ts=time.time() - 120.0,
+        mandatory=True,
+    )
+    payload_review = _good_assessment_payload(lot_review)
+    payload_review["meta"]["idempotency_key"] = f"idem-{lot_review}-001"
+    out_review = sys.integrated_assessment(**payload_review)
+    reasons_review = set(out_review["boundary"]["review_triggers"] + out_review["boundary"]["hard_blocks"] + out_review["boundary"]["arbitration_triggers"])
+    assert "quality_case_sla_risk" in reasons_review
+    assert out_review["module_outputs"]["case_governance"]["sla"]["overdue_count"] >= 1
+
+    lot_hard = "LOT-CASE-SLA-HARD"
+    _add_trace(sys, lot_hard, complete=True)
+    _set_release_ready_state(sys, lot_hard)
+    opened_hard = sys.open_quality_case(
+        lot_id=lot_hard,
+        case_type="nonconformance",
+        issue="critical unresolved issue",
+        severity="critical",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"sla-hard-{lot_hard}",
+    )
+    cid_hard = opened_hard.get("case_id")
+    assert cid_hard
+    sys.add_case_action(
+        case_id=cid_hard,
+        action_type="containment",
+        owner="OP-A",
+        description="overdue #1",
+        actor="QA",
+        due_ts=time.time() - 180.0,
+        mandatory=True,
+    )
+    sys.add_case_action(
+        case_id=cid_hard,
+        action_type="containment",
+        owner="OP-B",
+        description="overdue #2",
+        actor="QA",
+        due_ts=time.time() - 90.0,
+        mandatory=True,
+    )
+    payload_hard = _good_assessment_payload(lot_hard)
+    payload_hard["meta"]["idempotency_key"] = f"idem-{lot_hard}-001"
+    out_hard = sys.integrated_assessment(**payload_hard)
+    assert "open_critical_quality_case" in out_hard["boundary"]["hard_blocks"]
+    assert "quality_case_sla_overdue" in out_hard["boundary"]["hard_blocks"]
+    assert out_hard["status"] in {"auto_blocked", "manual_arbitration_required"}
+
+
+def test_case_center_persistence_reload():
+    temp_dir = tempfile.mkdtemp(prefix="elite_case_store_")
+    store_path = os.path.join(temp_dir, "case_store.json")
+    lot = "LOT-CASE-PERSIST"
+    try:
+        sys_a = UltimateColorFilmSystemV2Optimized(case_store_path=store_path)
+        _add_trace(sys_a, lot, complete=True)
+        opened = sys_a.open_quality_case(
+            lot_id=lot,
+            case_type="nonconformance",
+            issue="persistence check",
+            severity="high",
+            source="unit_test",
+            created_by="QA",
+            dedup_key=f"persist-{lot}",
+        )
+        cid = opened.get("case_id")
+        assert cid
+        act = sys_a.add_case_action(
+            case_id=cid,
+            action_type="containment",
+            owner="OP-A",
+            description="hold shipment",
+            actor="QA",
+            mandatory=True,
+            priority=1,
+            due_ts=time.time() + 300.0,
+        )
+        assert act["ok"] is True
+        assert os.path.exists(store_path)
+
+        sys_b = UltimateColorFilmSystemV2Optimized(case_store_path=store_path)
+        listed = sys_b.list_quality_cases(lot_id=lot, last_n=5)
+        assert listed["count"] == 1
+        case = listed["rows"][0]
+        assert case["case_id"] == cid
+        assert case["open_action_count"] >= 1
+
+        sla = sys_b.get_case_sla_report(case_id=cid)
+        assert sla["count"] >= 1
+        st = sys_b.get_case_store_status()
+        assert st["enabled"] is True
+        assert st["loaded"] is True
+    finally:
+        if os.path.exists(store_path):
+            os.remove(store_path)
+        if os.path.isdir(temp_dir):
+            os.rmdir(temp_dir)
+
+
+def test_case_center_sqlite_persistence_reload():
+    temp_dir = tempfile.mkdtemp(prefix="elite_case_db_")
+    db_path = os.path.join(temp_dir, "case_store.sqlite")
+    lot = "LOT-CASE-SQLITE"
+    try:
+        sys_a = UltimateColorFilmSystemV2Optimized(case_db_path=db_path)
+        _add_trace(sys_a, lot, complete=True)
+        opened = sys_a.open_quality_case(
+            lot_id=lot,
+            case_type="nonconformance",
+            issue="sqlite persistence check",
+            severity="high",
+            source="unit_test",
+            created_by="QA",
+            dedup_key=f"sqlite-{lot}",
+        )
+        cid = opened.get("case_id")
+        assert cid
+        act = sys_a.add_case_action(
+            case_id=cid,
+            action_type="containment",
+            owner="OP-A",
+            description="hold shipment",
+            actor="QA",
+            mandatory=True,
+            priority=1,
+            due_ts=time.time() + 300.0,
+        )
+        assert act["ok"] is True
+        assert os.path.exists(db_path)
+
+        sys_b = UltimateColorFilmSystemV2Optimized(case_db_path=db_path)
+        listed = sys_b.list_quality_cases(lot_id=lot, last_n=5)
+        assert listed["count"] == 1
+        case = listed["rows"][0]
+        assert case["case_id"] == cid
+        assert case["open_action_count"] >= 1
+
+        sla = sys_b.get_case_sla_report(case_id=cid)
+        assert sla["count"] >= 1
+        st = sys_b.get_case_store_status()
+        assert st["enabled"] is True
+        assert st["backend"] == "sqlite"
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            fp = f"{db_path}{suffix}"
+            if os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except PermissionError:
+                    pass
+        if os.path.isdir(temp_dir):
+            try:
+                os.rmdir(temp_dir)
+            except OSError:
+                pass
+
+
+def test_case_store_consistency_check_ok():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-CASE-CHECK-OK"
+    _add_trace(sys, lot, complete=True)
+    opened = sys.open_quality_case(
+        lot_id=lot,
+        case_type="nonconformance",
+        issue="consistency ok check",
+        severity="medium",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"check-ok-{lot}",
+    )
+    cid = opened.get("case_id")
+    assert cid
+    sys.add_case_action(
+        case_id=cid,
+        action_type="containment",
+        owner="OP-A",
+        description="hold shipment",
+        actor="QA",
+        mandatory=True,
+        priority=1,
+    )
+    out = sys.get_case_store_consistency()
+    assert out["ok"] is True
+    assert out["error_count"] == 0
+
+
+def test_case_store_consistency_detects_event_tamper():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-CASE-CHECK-TAMPER"
+    opened = sys.open_quality_case(
+        lot_id=lot,
+        case_type="nonconformance",
+        issue="tamper check",
+        severity="high",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"check-tamper-{lot}",
+    )
+    cid = opened.get("case_id")
+    assert cid
+    rows = sys.case_center._events.get(cid, [])  # noqa: SLF001
+    assert len(rows) >= 1
+    rows[0]["hash"] = "tampered_hash"
+    out = sys.get_case_store_consistency()
+    assert out["ok"] is False
+    codes = {str(x.get("code", "")) for x in out.get("errors", [])}
+    assert "event_hash_mismatch" in codes
+
+
 def run_all():
     test_local_hotspot_override()
     test_data_invalid_guard()
@@ -455,8 +757,17 @@ def run_all():
     test_replay_with_new_rule_or_meta()
     test_auto_case_open_and_role_view()
     test_case_workflow_and_batch_rule_simulation()
+    test_case_approval_gate_and_mandatory_action_close_guard()
+    test_case_sla_overdue_triggers_review_and_hard_block()
+    test_case_center_persistence_reload()
+    test_case_center_sqlite_persistence_reload()
+    test_case_store_consistency_check_ok()
+    test_case_store_consistency_detects_event_tamper()
     print("production blindspot tests passed")
 
 
 if __name__ == "__main__":
     run_all()
+
+
+
