@@ -1,0 +1,16 @@
+# Core web framework
+fastapi>=0.100.0,<1.0.0
+uvicorn[standard]>=0.23.0,<1.0.0
+pydantic>=2.0.0,<3.0.0
+
+# Computer vision & numerical computing
+numpy>=1.24.0,<2.0.0
+opencv-python-headless>=4.8.0,<5.0.0
+
+# Optional: enhanced statistics (used in elite_counterfactual, elite_open_bandit)
+scipy>=1.11.0,<2.0.0
+
+# Development / testing
+pytest>=7.4.0,<9.0.0
+pytest-asyncio>=0.21.0,<1.0.0
+httpx>=0.24.0,<1.0.0

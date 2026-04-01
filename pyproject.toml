@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "senia-elite-color"
+version = "2.3.0"
+description = "SENIA Elite Color Matching System — industry-grade automated color QC for production lines"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.100.0,<1.0.0",
+    "uvicorn[standard]>=0.23.0,<1.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "numpy>=1.24.0,<2.0.0",
+    "opencv-python-headless>=4.8.0,<5.0.0",
+    "scipy>=1.11.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0,<9.0.0",
+    "pytest-asyncio>=0.21.0,<1.0.0",
+    "httpx>=0.24.0,<1.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "S",    # flake8-bandit (security)
+    "PL",   # pylint
+]
+ignore = [
+    "S101",   # assert used in tests
+    "S311",   # standard pseudo-random not suitable for crypto — acceptable in color science
+    "PLR0913",# too many arguments — large data-class constructors are intentional
+    "PLR0912",# too many branches — complex decision logic is intentional
+    "PLR0915",# too many statements — large pipeline functions are intentional
+    "PLR2004",# magic value comparisons — color-science constants are self-documenting
+    "E501",   # line too long — handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = ["S", "PLR"]
+"run_*.py"  = ["S", "PLR"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# Mypy — static type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+warn_return_any = false
+warn_unused_ignores = true
+files = [
+    "elite_runtime.py",
+    "elite_color_match.py",
+    "elite_quality_history.py",
+    "elite_decision_center.py",
+    "elite_customer_tier.py",
+    "elite_process_advisor.py",
+]
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["."]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

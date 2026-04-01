@@ -95,6 +95,25 @@ SETTINGS = load_runtime_settings(ROOT_DIR)
 APP_VERSION = "2.3.0"
 DEFAULT_OUTPUT_ROOT = SETTINGS.default_output_root
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+# Allowed image magic-byte signatures: (offset, bytes)
+_IMAGE_MAGIC: list[tuple[int, bytes]] = [
+    (0, b"\xff\xd8\xff"),          # JPEG
+    (0, b"\x89PNG\r\n\x1a\n"),    # PNG
+    (0, b"BM"),                    # BMP
+    (0, b"II\x2a\x00"),           # TIFF little-endian
+    (0, b"MM\x00\x2a"),           # TIFF big-endian
+    (0, b"RIFF"),                  # WebP (RIFF container)
+    (0, b"GIF87a"),               # GIF87
+    (0, b"GIF89a"),               # GIF89
+]
+
+
+def _is_valid_image_bytes(data: bytes) -> bool:
+    for offset, magic in _IMAGE_MAGIC:
+        if data[offset : offset + len(magic)] == magic:
+            return True
+    return False
 DEFAULT_GLOB = "*.jpg,*.jpeg,*.png,*.bmp,*.tif,*.tiff,*.webp"
 DEFAULT_ACTION_RULES_CONFIG = ROOT_DIR / "process_action_rules.json"
 DEFAULT_DECISION_POLICY_CONFIG = ROOT_DIR / "decision_policy.default.json"
@@ -1919,6 +1938,8 @@ async def _upload_to_image_input(upload: UploadFile, field_name: str) -> ImageIn
     if len(payload) > MAX_UPLOAD_BYTES:
         max_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
         raise HTTPException(status_code=413, detail=f"{field_name} exceeds upload limit ({max_mb}MB)")
+    if not _is_valid_image_bytes(payload):
+        raise HTTPException(status_code=415, detail=f"{field_name} is not a recognised image format (JPEG/PNG/BMP/TIFF/WebP)")
     return ImageInput(b64=base64.b64encode(payload).decode("ascii"))
 
 
