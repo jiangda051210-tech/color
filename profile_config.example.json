@@ -1,0 +1,23 @@
+﻿{
+  "profiles": {
+    "wood": {
+      "targets": {
+        "avg_delta_e00": 1.6,
+        "p95_delta_e00": 2.6,
+        "max_delta_e00": 3.8
+      },
+      "bias_thresholds": {
+        "dL": 0.35,
+        "dC": 0.40,
+        "dH_deg": 2.2
+      }
+    },
+    "solid": {
+      "targets": {
+        "avg_delta_e00": 0.9,
+        "p95_delta_e00": 1.6,
+        "max_delta_e00": 2.2
+      }
+    }
+  }
+}

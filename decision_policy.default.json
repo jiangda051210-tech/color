@@ -1,0 +1,49 @@
+{
+  "decision_policy": {
+    "auto_release_min_confidence": 0.82,
+    "manual_review_min_confidence": 0.68,
+    "recapture_max_confidence": 0.62,
+    "max_avg_ratio_for_auto_release": 1.0,
+    "max_p95_ratio_for_auto_release": 1.0,
+    "hard_stop_flags": [
+      "history_avg_outlier_high",
+      "history_p95_outlier_high",
+      "history_max_outlier_high"
+    ],
+    "recapture_flags": [
+      "low_overall_confidence",
+      "lighting_non_uniform",
+      "board_low_sharpness",
+      "sample_low_sharpness",
+      "board_effective_pixels_low",
+      "sample_effective_pixels_low"
+    ],
+    "critical_process_risk_levels": [
+      "high",
+      "critical"
+    ]
+  },
+  "stakeholder_weights": {
+    "customer": {
+      "quality": 0.58,
+      "stability": 0.24,
+      "confidence": 0.18
+    },
+    "boss": {
+      "throughput": 0.42,
+      "risk": 0.38,
+      "cost": 0.2
+    },
+    "company": {
+      "governance": 0.4,
+      "customer_risk": 0.35,
+      "operational_risk": 0.25
+    }
+  },
+  "cost_model": {
+    "manual_review_cost": 18.0,
+    "recapture_cost": 10.0,
+    "hold_delay_cost": 120.0,
+    "escape_cost": 350.0
+  }
+}

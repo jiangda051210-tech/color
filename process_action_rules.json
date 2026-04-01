@@ -1,0 +1,56 @@
+﻿{
+  "targets": {
+    "avg_delta_e00": 1.2,
+    "p95_delta_e00": 2.0,
+    "max_delta_e00": 3.0
+  },
+  "bias_thresholds": {
+    "dL": 0.35,
+    "dC": 0.35,
+    "dH_deg": 2.0
+  },
+  "action_rules": [
+    {
+      "condition": "median_dL > 0.35",
+      "meaning": "film too bright",
+      "actions": [
+        "reduce total ink by 1-3%",
+        "increase black contribution 0.5-1%",
+        "reduce coating reflectance if applicable"
+      ]
+    },
+    {
+      "condition": "median_dL < -0.35",
+      "meaning": "film too dark",
+      "actions": [
+        "increase total ink by 1-3%",
+        "reduce black contribution 0.5-1%",
+        "check oven over-dry and line speed"
+      ]
+    },
+    {
+      "condition": "median_dC > 0.35",
+      "meaning": "film too saturated",
+      "actions": [
+        "reduce chroma channels by 1-2%",
+        "increase neutral balance"
+      ]
+    },
+    {
+      "condition": "median_dC < -0.35",
+      "meaning": "film not saturated enough",
+      "actions": [
+        "increase chroma channels by 1-2%",
+        "reduce gray component replacement"
+      ]
+    },
+    {
+      "condition": "abs(median_dH_deg) > 2",
+      "meaning": "hue shifted",
+      "actions": [
+        "adjust hue-related channel by 0.5-1%",
+        "verify raw material lot consistency"
+      ]
+    }
+  ]
+}

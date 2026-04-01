@@ -1,0 +1,42 @@
+{
+  "default_tier": "standard",
+  "tiers": {
+    "vip": {
+      "description": "Key account, prioritize complaint prevention and consistency.",
+      "decision_policy_patch": {
+        "auto_release_min_confidence_delta": 0.04,
+        "manual_review_min_confidence_delta": 0.02,
+        "max_avg_ratio_for_auto_release_delta": -0.04,
+        "max_p95_ratio_for_auto_release_delta": -0.04
+      }
+    },
+    "standard": {
+      "description": "Default enterprise balance policy.",
+      "decision_policy_patch": {}
+    },
+    "growth": {
+      "description": "Emerging customer, keep balanced with moderate throughput focus.",
+      "decision_policy_patch": {
+        "auto_release_min_confidence_delta": -0.005,
+        "max_avg_ratio_for_auto_release_delta": 0.005,
+        "max_p95_ratio_for_auto_release_delta": 0.005
+      }
+    },
+    "economy": {
+      "description": "Cost-sensitive segment with controlled throughput gain.",
+      "decision_policy_patch": {
+        "auto_release_min_confidence_delta": -0.015,
+        "max_avg_ratio_for_auto_release_delta": 0.015,
+        "max_p95_ratio_for_auto_release_delta": 0.015
+      }
+    }
+  },
+  "customers": {
+    "VIP-DEMO": {
+      "tier": "vip"
+    },
+    "STD-DEMO": {
+      "tier": "standard"
+    }
+  }
+}
