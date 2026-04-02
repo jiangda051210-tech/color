@@ -124,7 +124,7 @@ export default function EliteObservatory() {
   const [focusMode, setFocusMode] = useState(Boolean(dft.focusMode));
   const [uiRole, setUiRole] = useState(dft.uiRole);
   const [cfg, setCfg] = useState({ dbPath: dft.dbPath, lineId: dft.lineId, productCode: dft.productCode, apiKey: "", window: 160, subgroup: 5, driftTh: 3 });
-  const [live, setLive] = useState({ hBusy: false, aBusy: false, hErr: "", aErr: "", hAt: "", aAt: "", cockpit: null, nba: null, spc: null, drift: null, shift: null, supplier: null, waiverHealth: null, texture: null, spectral: null, observer: null, aging: null, ink: null, blend: null, passport: null });
+  const [live, setLive] = useState({ hBusy: false, aBusy: false, hErr: "", aErr: "", hAt: "", aAt: "", cockpit: null, nba: null, spc: null, drift: null, shift: null, supplier: null, waiverHealth: null, snapshots: null, snapshotVerify: null, alertSummary: null, texture: null, spectral: null, observer: null, aging: null, ink: null, blend: null, passport: null });
   const hs = useRef(0), as = useRef(0);
 
   const sLab = useMemo(() => rgbToLab(sample.r, sample.g, sample.b), [sample]);
@@ -194,10 +194,24 @@ export default function EliteObservatory() {
       request(`/v1/report/shift/from-history?${q()}`),
       request("/v1/supplier/scorecard"),
       request(`/v1/lifecycle/decision/waiver-health?lot_id=${encodeURIComponent(waiverLot)}&target_state=hold_for_review`),
+      request(`/v1/lifecycle/decision/snapshots?lot_id=${encodeURIComponent(waiverLot)}&last_n=3`),
+      request("/v1/lifecycle/alerts/summary?last_n=120"),
     ]);
     if (id !== hs.current) return;
-    const names = ["cockpit", "nba", "spc", "drift", "shift", "supplier", "waiverHealth"], nx = {}, errs = [];
+    const names = ["cockpit", "nba", "spc", "drift", "shift", "supplier", "waiverHealth", "snapshots", "alertSummary"], nx = {}, errs = [];
     rs.forEach((r, i) => { if (r.status === "fulfilled") nx[names[i]] = r.value; else errs.push(`${names[i]}: ${String(r.reason?.message || r.reason || "error")}`); });
+    const snapRows = nx.snapshots?.result?.rows;
+    const latestSnapshot = Array.isArray(snapRows) && snapRows.length ? snapRows[snapRows.length - 1] : null;
+    const latestSnapshotId = String(latestSnapshot?.snapshot_id || "");
+    if (latestSnapshotId) {
+      try {
+        nx.snapshotVerify = await request(`/v1/lifecycle/decision/verify-snapshot?snapshot_id=${encodeURIComponent(latestSnapshotId)}`);
+      } catch (verifyErr) {
+        errs.push(`snapshotVerify: ${String(verifyErr?.message || verifyErr || "error")}`);
+      }
+    } else {
+      nx.snapshotVerify = { result: { verified: null, mismatches: [], snapshot_id: null } };
+    }
     setLive((x) => ({ ...x, ...nx, hBusy: false, hAt: new Date().toLocaleString(), hErr: errs.join(" | ") }));
   }, [cfg.driftTh, cfg.lineId, cfg.productCode, cfg.subgroup, q, request]);
 
@@ -246,6 +260,21 @@ export default function EliteObservatory() {
   const risk = num(cockpit.risk_index_0_100, num(signals.risk_index_0_100, 0)), autoRelease = num(cockpit.auto_release_rate, num(signals.auto_release_rate, 0)), complaint = num(cockpit.complaint_rate, num(signals.complaint_rate, 0)), saving = num(cockpit.annual_saving_cny, 0);
   const waiver = live.waiverHealth?.result || {}, waiverStatus = String(waiver.status || "unknown").toLowerCase(), waiverRequired = Boolean(waiver.waiver_required), waiverAction = String(waiver.next_action || "");
   const waiverC = waiverStatus === "approved" ? T.g : waiverStatus === "not_required" ? T.a : waiverStatus === "missing" ? T.rd : waiverStatus === "invalid" ? T.rd : T.w;
+  const snapRows = Array.isArray(live.snapshots?.result?.rows) ? live.snapshots.result.rows : [];
+  const latestSnapshot = snapRows.length ? snapRows[snapRows.length - 1] : null;
+  const latestSnapshotId = String(latestSnapshot?.snapshot_id || "");
+  const snapshotVerify = live.snapshotVerify?.result || {};
+  const snapshotVerified = snapshotVerify.verified;
+  const snapshotState = !latestSnapshotId ? "no_snapshot" : snapshotVerified === true ? "verified" : snapshotVerified === false ? "tampered" : "unknown";
+  const snapshotMismatches = Array.isArray(snapshotVerify.mismatches) ? snapshotVerify.mismatches : [];
+  const snapshotC = snapshotState === "verified" ? T.g : snapshotState === "tampered" ? T.rd : snapshotState === "unknown" ? T.w : T.dim;
+  const alertSummary = live.alertSummary?.result || {};
+  const alertPrimary = alertSummary.primary_alert || null;
+  const alertFatigue = num(alertSummary.fatigue_index, 0);
+  const alertSeverity = alertSummary.severity_counts || {};
+  const alertPrimaryMsg = String(alertPrimary?.message || "no_primary_alert");
+  const alertPrimarySeverity = String(alertPrimary?.severity || "none").toLowerCase();
+  const alertPrimaryC = alertPrimarySeverity === "critical" ? T.rd : alertPrimarySeverity === "high" ? T.w : alertPrimarySeverity === "medium" ? T.a : T.g;
   const spcR = live.spc?.result || {}, spcV = (spcR.xbar?.values || fallbackSpc).slice(-30), spcM = num(spcR.xbar?.mean, mean(spcV)), spcU = num(spcR.xbar?.ucl, spcM + .6), spcL = num(spcR.xbar?.lcl, Math.max(0, spcM - .6)), cp = num(spcR.capability?.Cp, 1.2), cpk = num(spcR.capability?.Cpk, 1.1), ppm = num(spcR.capability?.ppm_est, 120), grd = String(spcR.capability?.grade || "B").replace("_", " ");
   const dPred = live.drift?.prediction || {}, driftF = Array.isArray(dPred.forecast_next_5) && dPred.forecast_next_5.length ? dPred.forecast_next_5 : fallbackDrift.slice(-5), driftS = spcV.slice(-20).concat(driftF), driftB = num(dPred.batches_remaining, 8), slope = num(dPred.slope_per_batch, .042), urg = String(dPred.urgency || "high").toUpperCase(), dRec = String(dPred.recommendation || "Monitor trend and schedule correction before threshold.");
   const sh = live.shift?.report || {}, shs = sh.summary || {}, dec = sh.decisions || {};
@@ -299,11 +328,15 @@ export default function EliteObservatory() {
     if (waiverStatus === "missing") rows.push({ code: "waiver_missing", level: "block", text: "State requires waiver but none is valid" });
     else if (waiverStatus === "invalid") rows.push({ code: "waiver_invalid", level: "block", text: "Waiver approval metadata invalid" });
     else if (waiverRequired && waiverStatus === "approved") rows.push({ code: "waiver_approved_manual_release", level: "review", text: "Waiver approved: keep manual review before release" });
+    if (snapshotState === "tampered") rows.push({ code: "snapshot_tamper_detected", level: "block", text: "Snapshot signature mismatch detected" });
+    else if (latestSnapshotId && snapshotState === "unknown") rows.push({ code: "snapshot_verify_unknown", level: "review", text: "Snapshot verify status is unknown" });
+    if (alertFatigue >= 0.65) rows.push({ code: "alert_fatigue_high", level: "review", text: `Alert fatigue ${alertFatigue.toFixed(2)} high` });
+    if (num(alertSeverity.critical, 0) > 0) rows.push({ code: "critical_alert_active", level: "review", text: `Critical alerts ${Math.round(num(alertSeverity.critical, 0))}` });
     if (urg === "HIGH") rows.push({ code: "drift_high", level: "review", text: "Drift urgency HIGH" });
     if (String(agRisk.level || "").toLowerCase() === "high") rows.push({ code: "aging_high", level: "review", text: "Aging warranty risk HIGH" });
     if (err) rows.push({ code: "pipeline_degraded", level: "review", text: "Pipeline degraded mode" });
     return rows;
-  }, [agRisk.level, cpk, err, mi, risk, urg, waiverRequired, waiverStatus, warn]);
+  }, [agRisk.level, alertFatigue, alertSeverity.critical, cpk, err, latestSnapshotId, mi, risk, snapshotState, urg, waiverRequired, waiverStatus, warn]);
   const laneState = useMemo(() => {
     const blocks = laneSignals.filter((x) => x.level === "block");
     const reviews = laneSignals.filter((x) => x.level === "review");
@@ -333,12 +366,25 @@ export default function EliteObservatory() {
         next_action: waiverAction,
         waiver_ids: Array.isArray(waiver.waiver_ids) ? waiver.waiver_ids : [],
       },
+      snapshot_integrity: {
+        snapshot_id: latestSnapshotId || null,
+        status: snapshotState,
+        mismatches: snapshotMismatches,
+        verified: snapshotVerified === true,
+      },
+      alert_digest: {
+        fatigue_index: Number(alertFatigue.toFixed(4)),
+        primary: alertPrimary || null,
+        severity_counts: alertSeverity,
+      },
       next_action: nba,
       cockpit,
       module_errors: { history: live.hErr || null, algorithm: live.aErr || null },
       raw_modules: {
         spc: live.spc,
         drift: live.drift,
+        alert_summary: live.alertSummary,
+        snapshot_verify: live.snapshotVerify,
         aging: live.aging,
         spectral: live.spectral,
         ink: live.ink,
@@ -355,7 +401,7 @@ export default function EliteObservatory() {
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-  }, [autoRelease, cfg.productCode, cpk, cockpit, complaint, de.total, laneSignals, laneState, live.aErr, live.aging, live.blend, live.drift, live.hErr, live.ink, live.passport, live.spc, live.spectral, mi, nba, risk, uiRole, waiver.waiver_ids, waiverAction, waiverRequired, waiverStatus, warn]);
+  }, [alertFatigue, alertPrimary, alertSeverity, autoRelease, cfg.productCode, cpk, cockpit, complaint, de.total, laneSignals, laneState, latestSnapshotId, live.aErr, live.aging, live.alertSummary, live.blend, live.drift, live.hErr, live.ink, live.passport, live.snapshotVerify, live.spc, live.spectral, mi, nba, risk, snapshotMismatches, snapshotState, snapshotVerified, uiRole, waiver.waiver_ids, waiverAction, waiverRequired, waiverStatus, warn]);
 
   const inp = { width: "100%", border: `1px solid ${T.b}`, background: "rgba(8,14,26,.86)", color: T.tx, borderRadius: 6, padding: "6px 8px", fontSize: 11, fontFamily: T.mono, boxShadow: "inset 0 1px 0 rgba(255,255,255,.03)" };
   const setRgb = (which, ch, v) => which === "s" ? setSample((x) => ({ ...x, [ch]: clamp(num(v, 0), 0, 255) })) : setFilm((x) => ({ ...x, [ch]: clamp(num(v, 0), 0, 255) }));
@@ -369,6 +415,26 @@ export default function EliteObservatory() {
     <main style={{ maxWidth: "1480px", margin: "0 auto", padding: "12px 16px 24px" }}>
       <Panel t="Role Command" c={roleProfile.color}><div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr", gap: 8 }}><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Primary Action</div><div style={{ fontSize: 12, color: roleProfile.color, fontWeight: 700 }}>{roleActions.primary}</div></div><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Secondary</div><div style={{ fontSize: 11, color: T.tx }}>{roleActions.secondary}</div></div><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Do Not</div><div style={{ fontSize: 11, color: T.w }}>{roleActions.avoid}</div><div style={{ marginTop: 6, fontSize: 9, color: T.m }}>Scope panel: {canShowScope ? "enabled" : "hidden in this role"}</div></div></div></Panel>
       <Panel t="Decision Lane" c={laneState.color}><div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 8 }}><div style={{ border: `1px solid ${laneState.color}35`, borderRadius: 8, background: `${laneState.color}10`, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Current Lane</div><div style={{ fontSize: 16, color: laneState.color, fontWeight: 800, fontFamily: T.mono }}>{laneState.text}</div><div style={{ marginTop: 4, fontSize: 10, color: T.tx }}>{laneState.desc}</div><div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>{laneSignals.length ? laneSignals.slice(0, 4).map((x) => <Tag key={x.code} t={x.code} c={x.level === "block" ? T.rd : T.w} />) : <Tag t="no-major-conflict" c={T.g} />}</div></div><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px", display: "flex", flexDirection: "column", gap: 8 }}><button onClick={exportSnapshot} style={{ border: `1px solid ${T.a}35`, background: `${T.a}14`, color: T.a, borderRadius: 8, padding: "7px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Export Snapshot JSON</button><div style={{ fontSize: 10, color: T.dim }}>Top evidence: {(laneSignals[0] && laneSignals[0].text) || "No blocking signal"}</div><div style={{ fontSize: 9, color: T.m }}>Lane key: {laneState.key}</div><div style={{ marginTop: 4, borderTop: `1px solid ${T.b}`, paddingTop: 6, fontSize: 10, color: T.dim }}>Waiver Gate: <span style={{ color: waiverC, fontWeight: 700, textTransform: "uppercase" }}>{waiverStatus}</span></div><div style={{ fontSize: 9, color: T.m }}>{waiverAction || "follow_standard_release_gate"}</div></div></div></Panel>
+      <Panel t="Governance Integrity" c={snapshotC}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+          <div style={{ border: `1px solid ${snapshotC}35`, borderRadius: 8, background: `${snapshotC}10`, padding: "8px 10px" }}>
+            <div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Snapshot Verify</div>
+            <div style={{ fontSize: 13, color: snapshotC, fontWeight: 800, textTransform: "uppercase", fontFamily: T.mono }}>{snapshotState}</div>
+            <div style={{ marginTop: 4, fontSize: 9, color: T.m, fontFamily: T.mono }}>{latestSnapshotId || "--"}</div>
+            {snapshotMismatches.length ? <div style={{ marginTop: 4, fontSize: 9, color: T.rd }}>Mismatch: {snapshotMismatches.join(", ")}</div> : null}
+          </div>
+          <div style={{ border: `1px solid ${alertPrimaryC}35`, borderRadius: 8, background: `${alertPrimaryC}10`, padding: "8px 10px" }}>
+            <div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Primary Alert</div>
+            <div style={{ fontSize: 11, color: alertPrimaryC, fontWeight: 700, textTransform: "uppercase" }}>{alertPrimarySeverity}</div>
+            <div style={{ marginTop: 4, fontSize: 9, color: T.m, maxHeight: 30, overflow: "hidden" }}>{alertPrimaryMsg}</div>
+          </div>
+          <div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px" }}>
+            <div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Alert Fatigue</div>
+            <div style={{ fontSize: 13, color: alertFatigue >= 0.65 ? T.w : T.g, fontWeight: 800, fontFamily: T.mono }}>{alertFatigue.toFixed(2)}</div>
+            <div style={{ marginTop: 4, fontSize: 9, color: T.m }}>C/H/M/L = {Math.round(num(alertSeverity.critical, 0))}/{Math.round(num(alertSeverity.high, 0))}/{Math.round(num(alertSeverity.medium, 0))}/{Math.round(num(alertSeverity.low, 0))}</div>
+          </div>
+        </div>
+      </Panel>
       <Panel t="Smart Control" c={busy ? T.w : err ? T.rd : T.g}><div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}><Tag t={`History: ${live.hAt || "--"}`} c={T.a} /><Tag t={`AI: ${live.aAt || "--"}`} c={T.r} /><button onClick={refreshAll} style={{ marginLeft: "auto", border: `1px solid ${T.a}35`, background: `${T.a}14`, color: T.a, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Refresh Full Pipeline</button><button onClick={() => setAuto((v) => !v)} style={{ border: `1px solid ${auto ? `${T.g}45` : T.b}`, background: auto ? `${T.g}14` : T.bg, color: auto ? T.g : T.dim, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Auto {auto ? "On" : "Off"}</button>{canShowScope ? <button onClick={() => setShowCfg((v) => !v)} style={{ border: `1px solid ${T.b}`, background: T.bg, color: T.dim, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{showCfg ? "Hide Scope" : "Show Scope"}</button> : null}</div>{err ? <div style={{ fontSize: 10, color: T.rd, marginBottom: 8 }}>Degraded mode: {err}</div> : null}{showCfg ? <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8 }}><div style={{ gridColumn: "1 / span 2" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>History DB Path</div><input value={cfg.dbPath} onChange={(e) => setCfgF("dbPath", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Line ID</div><input value={cfg.lineId} onChange={(e) => setCfgF("lineId", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Product Code</div><input value={cfg.productCode} onChange={(e) => setCfgF("productCode", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>API Key</div><input value={cfg.apiKey} onChange={(e) => setCfgF("apiKey", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Window</div><input type="number" min={20} max={2000} value={cfg.window} onChange={(e) => setCfgF("window", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Subgroup</div><input type="number" min={2} max={10} value={cfg.subgroup} onChange={(e) => setCfgF("subgroup", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Drift Th</div><input type="number" min={0.5} max={10} step={0.1} value={cfg.driftTh} onChange={(e) => setCfgF("driftTh", e.target.value)} style={inp} /></div></div> : null}</Panel>
       <Panel t="Sampling Cockpit" c={gc}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>{["s", "f"].map((k) => <div key={k} style={{ border: `1px solid ${T.b}`, borderRadius: 8, padding: 8, background: T.bg }}><div style={{ fontSize: 10, color: T.dim, marginBottom: 6 }}>{k === "s" ? "Sample RGB" : "Film RGB"}</div>{["r", "g", "b"].map((ch) => <div key={`${k}_${ch}`} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}><span style={{ width: 12, fontSize: 10, color: T.dim, textTransform: "uppercase" }}>{ch}</span><input type="number" min={0} max={255} value={(k === "s" ? sample : film)[ch]} onChange={(e) => setRgb(k, ch, e.target.value)} style={{ ...inp, padding: "4px 6px" }} /></div>)}</div>)}</div><div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16 }}><div style={{ width: 46, height: 46, borderRadius: 10, background: `rgb(${sample.r},${sample.g},${sample.b})`, border: `2px solid ${T.a}50`, boxShadow: `0 4px 20px rgba(${sample.r},${sample.g},${sample.b},.25)` }} /><div style={{ width: 34, height: 14, borderRadius: 8, background: `linear-gradient(90deg,rgb(${sample.r},${sample.g},${sample.b}),rgb(${film.r},${film.g},${film.b}))`, border: `1px solid ${T.b}` }} /><div style={{ width: 46, height: 46, borderRadius: 10, background: `rgb(${film.r},${film.g},${film.b})`, border: `2px solid ${T.r}50`, boxShadow: `0 4px 20px rgba(${film.r},${film.g},${film.b},.25)` }} /><div style={{ textAlign: "center", marginLeft: 6 }}><div style={{ fontSize: 34, fontWeight: 900, color: gc, fontFamily: T.mono, lineHeight: 1, textShadow: glow(gc, 7) }}>{de.total.toFixed(2)}</div><div style={{ fontSize: 9, color: T.dim }}>DeltaE - {gl}</div></div></div></Panel>
       {tab === "overview" ? <><Panel t="Decision Core" c={gc}><div style={{ display: "flex", gap: 14, alignItems: "center" }}><Radar l={de.dL} c={de.dC} h={de.dH} /><div style={{ flex: 1 }}><div style={{ marginBottom: 6, fontSize: 10, color: T.dim }}>Next Action</div><Tag t={nba.code || "RUN_OPS_CHECK"} c={warnC} /> <Tag t={`confidence ${num(nba.confidence, .8).toFixed(2)}`} c={T.a} /><div style={{ marginTop: 8, fontSize: 10, color: T.dim }}>{(Array.isArray(nba.reasons) && nba.reasons.length ? nba.reasons.slice(0, 2) : ["Balanced state detected, keep monitoring trend."]).join(" | ")}</div></div></div></Panel><Panel t="System Snapshot" c={T.a}><div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 6 }}>{[{ k: "Warning", v: warn, c: warnC }, { k: "Risk", v: risk.toFixed(1), c: risk < 45 ? T.g : risk < 70 ? T.w : T.rd }, { k: "Auto Release", v: `${(autoRelease * 100).toFixed(1)}%`, c: autoRelease > .82 ? T.g : T.w }, { k: "Complaint", v: `${(complaint * 100).toFixed(2)}%`, c: complaint < .03 ? T.g : T.w }, { k: "Annual Saving", v: `¥${Math.round(saving).toLocaleString()}`, c: T.g }, { k: "SPC Cpk", v: cpk.toFixed(2), c: cpk >= 1.33 ? T.g : cpk >= 1 ? "#a3e635" : T.rd }].map((x) => <div key={x.k} style={{ padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.b}`, background: T.bg }}><div style={{ fontSize: 8, color: T.m, marginBottom: 3 }}>{x.k}</div><div style={{ fontSize: 15, color: x.c, fontWeight: 800, fontFamily: T.mono }}>{x.v}</div></div>)}</div></Panel></> : null}

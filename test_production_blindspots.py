@@ -486,6 +486,19 @@ def test_snapshot_signature_verify_and_tamper_detection():
     assert "decision_hash" in set(verify_bad["mismatches"]) or "snapshot_hash" in set(verify_bad["mismatches"])
 
 
+def test_integrated_assessment_contains_alert_digest_and_trigger_alerts():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-ALERT-DIGEST"
+    _add_trace(sys, lot, complete=True)
+    out = sys.integrated_assessment(**_good_assessment_payload(lot))
+    digest = out.get("alert_digest", {})
+    assert isinstance(digest, dict)
+    assert "fatigue_index" in digest
+    assert "severity_counts" in digest
+    assert isinstance(out.get("trigger_alerts", []), list)
+    assert isinstance(out.get("replay_signature", {}), dict)
+
+
 def test_trace_revision_and_override_append_only():
     sys = UltimateColorFilmSystemV2Optimized()
     lot = "LOT-TRACE-REV"
@@ -955,6 +968,7 @@ def run_all():
     test_release_report_contains_waiver_summary_for_audiences()
     test_alert_center_dedup_escalation_and_digest()
     test_snapshot_signature_verify_and_tamper_detection()
+    test_integrated_assessment_contains_alert_digest_and_trigger_alerts()
     test_trace_revision_and_override_append_only()
     test_trace_event_idempotency_deduplicates()
     test_replay_with_new_rule_or_meta()
