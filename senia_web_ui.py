@@ -305,7 +305,8 @@ body::after {{
       <span class="brand-tag">v{app_version}</span>
     </div>
     <nav class="topbar-links">
-      <a href="/v1/web/executive-dashboard">Dashboard</a>
+      <a href="/v1/web/dashboard">Full Dashboard</a>
+      <a href="/v1/web/executive-dashboard">Executive</a>
       <a href="/v1/web/precision-observatory">Observatory</a>
       <a href="/docs">API</a>
     </nav>

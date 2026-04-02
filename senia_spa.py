@@ -398,6 +398,25 @@ panelsEl.innerHTML += `
     <div class="result-box" id="r-backup"></div>
   </div>
   <div class="card">
+    <div class="card-title">Edge SDK (Offline Analysis)</div>
+    <form id="f-edge">
+      <div class="form-row">
+        <div class="form-field" style="flex:2"><label>Ref Pixels JSON</label>
+          <textarea name="ref_pixels_json">[[128,128,128],[130,127,125],[129,129,128]]</textarea></div>
+        <div class="form-field" style="flex:2"><label>Sample Pixels JSON</label>
+          <textarea name="sample_pixels_json">[[140,125,115],[142,123,112],[138,126,118]]</textarea></div>
+        <div class="form-field"><label>Profile</label><input name="profile" value="wood"></div>
+      </div>
+      <button type="button" class="btn btn-secondary" onclick="postForm('/v1/senia/edge/analyze','f-edge','r-edge')">Analyze (Edge)</button>
+    </form>
+    <div class="result-box" id="r-edge"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Capture Station Guide</div>
+    <button class="btn btn-secondary" onclick="getJson('/v1/senia/capture-station/guide','r-guide')">View BOM & Setup Guide</button>
+    <div class="result-box" id="r-guide"></div>
+  </div>
+  <div class="card">
     <div class="card-title">Danger Zone</div>
     <button class="btn" style="background:var(--fail);color:white" onclick="if(confirm('Reset all learning data?'))postJson('/v1/senia/admin/reset-learning','r-reset')">Reset Learning</button>
     <div class="result-box" id="r-reset"></div>

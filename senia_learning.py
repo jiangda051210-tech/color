@@ -114,9 +114,10 @@ class OnlineLearner:
         }
 
     def get_adjustment(self, profile: str = "solid") -> dict[str, float]:
-        """获取当前累积的阈值调整量."""
+        """获取当前累积的阈值调整量 (返回副本, 不影响内部状态)."""
         with self._lock:
-            return self._adjustments.get(profile, {"pass_dE_adj": 0.0, "marginal_dE_adj": 0.0})
+            adj = self._adjustments.get(profile, {"pass_dE_adj": 0.0, "marginal_dE_adj": 0.0})
+            return dict(adj)  # 返回副本, 防止外部修改污染内部状态
 
     def apply_to_thresholds(self, base_pass: float, base_marginal: float, profile: str) -> tuple[float, float]:
         """将学习到的调整应用到基础阈值上."""

@@ -84,7 +84,10 @@ from elite_innovation_state import (
     upsert_acceptance_profile,
 )
 from elite_backup import BackupManager
+from senia_auto_match import auto_match as senia_auto_match_pixels
+from senia_capture_station import CAPTURE_STATION_BOM, BUILD_STEPS, IPHONE_CAMERA_SETTINGS
 from senia_colorchecker import calibrate_from_photo
+from senia_edge_sdk import analyze_offline as edge_analyze_offline
 from senia_instant import process_instant, InstantResult
 from senia_knowledge_crawler import KnowledgeEngine, WebCrawler, AutoModelUpgrader
 from senia_spa import render_senia_spa
@@ -6883,7 +6886,7 @@ async def senia_analyze_endpoint(
     try:
         run_id = f"senia_{int(time.time())}_{lot_id or 'auto'}"
         record_run(
-            db_path=DEFAULT_HISTORY_DB, run_id=run_id, report=report,
+            db_path=DEFAULT_HISTORY_DB, report=report,
             line_id=report.get("detection", {}).get("sample_source", ""),
             product_code=product_code, lot_id=lot_id,
         )
@@ -7303,6 +7306,40 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
         from senia_knowledge_crawler import INDUSTRY_STANDARDS
         return {"found": False, "available": list(INDUSTRY_STANDARDS.keys())}
     return {"found": True, "standard": name, "data": data}
+
+
+# ── 管理 API ──────────────────────────────────────────
+
+# ── Edge SDK (离线分析) ──────────────────────────────────
+
+@app.post("/v1/senia/edge/analyze")
+def senia_edge_analyze(
+    ref_pixels_json: str = Form(...),
+    sample_pixels_json: str = Form(...),
+    profile: str = Form("wood"),
+) -> dict[str, Any]:
+    """
+    Edge SDK 离线分析: 输入 RGB 像素列表, 返回判定.
+    用于手机/嵌入式端离线对色后同步到云端验证.
+    """
+    try:
+        ref = [tuple(p) for p in json.loads(ref_pixels_json)]
+        smp = [tuple(p) for p in json.loads(sample_pixels_json)]
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid pixel JSON: {exc}") from exc
+    return edge_analyze_offline(ref, smp, profile)
+
+
+# ── 拍摄工位指南 ────────────────────────────────────────
+
+@app.get("/v1/senia/capture-station/guide")
+def senia_capture_guide() -> dict[str, Any]:
+    """返回拍摄工位搭建指南 (BOM + 步骤 + iPhone设置)."""
+    return {
+        "bom": CAPTURE_STATION_BOM,
+        "build_steps": BUILD_STEPS,
+        "iphone_settings": IPHONE_CAMERA_SETTINGS,
+    }
 
 
 # ── 管理 API ──────────────────────────────────────────

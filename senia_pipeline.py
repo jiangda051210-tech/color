@@ -170,6 +170,7 @@ def run_pipeline(
         grid_cols=grid_cols,
         thresholds=thresholds,
         capture_confidence=capture_confidence,
+        profile=profile,
     )
 
     # ── Step 5: 调色建议 (M5) ──
