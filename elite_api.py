@@ -84,6 +84,13 @@ from elite_innovation_state import (
 )
 from elite_backup import BackupManager
 from senia_colorchecker import calibrate_from_photo
+from senia_learning import (
+    OnlineLearner,
+    AmbientLightLearner,
+    RecipeDigitalTwin,
+    CrossBatchMemory,
+    predict_aging_acceptance,
+)
 from senia_history import compute_lot_trend, compare_with_baseline
 from senia_image_pipeline import analyze_photo as senia_analyze_photo
 from senia_models import (
@@ -176,6 +183,10 @@ BACKUP_MANAGER = BackupManager(
 )
 
 THRESHOLD_STORE = ThresholdStore(config_path=ROOT_DIR / "senia_thresholds.json")
+ONLINE_LEARNER = OnlineLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_feedback.json")
+AMBIENT_LEARNER = AmbientLightLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_ambient.json")
+RECIPE_TWIN = RecipeDigitalTwin(store_path=DEFAULT_OUTPUT_ROOT / "senia_recipe_twin.json")
+BATCH_MEMORY = CrossBatchMemory(store_path=DEFAULT_OUTPUT_ROOT / "senia_batch_memory.json")
 
 _log.info("modules_initialized", version=APP_VERSION,
           config_count=len(CONFIG_STORE.status()),
@@ -6954,6 +6965,95 @@ def senia_set_customer_threshold(
 def senia_list_thresholds() -> dict[str, Any]:
     """列出所有阈值覆盖."""
     return THRESHOLD_STORE.status()
+
+
+# ── 自学习 API ──────────────────────────────────────────
+
+@app.post("/v1/senia/feedback")
+def senia_record_feedback(
+    run_id: str = Form(...),
+    system_tier: str = Form(...),
+    operator_tier: str = Form(...),
+    dE00: float = Form(...),
+    profile: str = Form("solid"),
+) -> dict[str, Any]:
+    """
+    操作员反馈: 覆盖系统判定, 系统自动学习调整阈值.
+    例: 系统判 MARGINAL, 操作员认为应该 PASS → 系统学习放宽阈值.
+    """
+    return ONLINE_LEARNER.record_feedback(run_id, system_tier, operator_tier, dE00, profile)
+
+
+@app.get("/v1/senia/learning/stats")
+def senia_learning_stats() -> dict[str, Any]:
+    """查看自学习统计: 反馈总数、一致率、累积调整."""
+    return ONLINE_LEARNER.stats()
+
+
+@app.post("/v1/senia/recipe-twin/record")
+def senia_recipe_twin_record(
+    product_code: str = Form(...),
+    recipe_json: str = Form(...),
+    measured_L: float = Form(...),
+    measured_a: float = Form(...),
+    measured_b: float = Form(...),
+) -> dict[str, Any]:
+    """记录 配方→色值 数据, 积累训练配方数字孪生."""
+    try:
+        recipe = json.loads(recipe_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid recipe_json: {exc}") from exc
+    return RECIPE_TWIN.record_sample(product_code, recipe, (measured_L, measured_a, measured_b))
+
+
+@app.post("/v1/senia/recipe-twin/predict")
+def senia_recipe_twin_predict(
+    product_code: str = Form(...),
+    recipe_json: str = Form(...),
+) -> dict[str, Any]:
+    """从配方预测色值 (需要先积累≥10组数据)."""
+    try:
+        recipe = json.loads(recipe_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid recipe_json: {exc}") from exc
+    return RECIPE_TWIN.predict(product_code, recipe)
+
+
+@app.post("/v1/senia/batch-memory/remember")
+def senia_batch_memory_remember(
+    product_code: str = Form(...),
+    lot_id: str = Form(...),
+    L: float = Form(...),
+    a: float = Form(...),
+    b: float = Form(...),
+) -> dict[str, Any]:
+    """记住一个批次的色值, 用于未来追加订单匹配."""
+    return BATCH_MEMORY.remember(product_code, lot_id, (L, a, b))
+
+
+@app.get("/v1/senia/batch-memory/find")
+def senia_batch_memory_find(
+    product_code: str,
+    L: float,
+    a: float,
+    b: float,
+    top_k: int = 3,
+) -> dict[str, Any]:
+    """找到最接近目标色值的历史批次 (客户追加订单时用)."""
+    results = BATCH_MEMORY.find_closest(product_code, (L, a, b), min(top_k, 10))
+    return {"product_code": product_code, "target_lab": [L, a, b], "matches": results}
+
+
+@app.get("/v1/senia/aging-predict")
+def senia_aging_predict(
+    current_dE: float,
+    current_dL: float = 0.0,
+    current_db: float = 0.0,
+    profile: str = "wood",
+    months: int = 12,
+) -> dict[str, Any]:
+    """预测色差随时间变化 + 老化感知验收建议."""
+    return predict_aging_acceptance(current_dE, current_dL, current_db, profile, min(months, 60))
 
 
 if __name__ == "__main__":
