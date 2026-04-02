@@ -283,20 +283,20 @@ def analyze_photo(
         sample_source = "contour"
 
     has_sample = sample_quad is not None
+    if not has_sample:
+        raise RuntimeError(
+            "未检测到标样区域, 无法进行对色判定。"
+            "请确保标样放在大货旁边或上方, 且标样面积占大货的 1.5%~50%。"
+            "如果标样和大货颜色非常接近, 请在标样边缘贴定位标记以辅助检测。"
+        )
 
     # ── 3. 透视校正 ──
     board_warp, board_M, board_rect = perspective_warp(image_bgr, board_quad)
 
-    if has_sample:
-        sample_warp, sample_M, sample_rect = perspective_warp(image_bgr, sample_quad)
-        # 计算标样在大货坐标系中的位置 (用于遮罩)
-        sample_center = sample_quad.mean(axis=0)
-        sample_on_board = cv2.perspectiveTransform(
-            sample_quad.reshape(1, -1, 2), board_M
-        ).reshape(-1, 2)
-    else:
-        # 无标样: 无法对色, 只做单板分析
-        sample_warp = None
+    sample_warp, sample_M, sample_rect = perspective_warp(image_bgr, sample_quad)
+    sample_on_board = cv2.perspectiveTransform(
+        sample_quad.reshape(1, -1, 2), board_M
+    ).reshape(-1, 2)
 
     # ── 4. 构建遮罩 (去除边框 + 手写/贴纸/反光) ──
     board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
@@ -304,44 +304,33 @@ def analyze_photo(
     board_mask &= ~board_invalid
 
     # 遮罩掉标样所在区域 (如果标样放在大货上)
-    if has_sample:
-        board_mask_u8 = board_mask.astype(np.uint8)
-        cv2.fillConvexPoly(board_mask_u8, sample_on_board.astype(np.int32), 0)
-        board_mask = board_mask_u8.astype(bool)
+    board_mask_u8 = board_mask.astype(np.uint8)
+    cv2.fillConvexPoly(board_mask_u8, sample_on_board.astype(np.int32), 0)
+    board_mask = board_mask_u8.astype(bool)
 
     sample_mask = None
-    if has_sample and sample_warp is not None:
-        sample_mask = build_material_mask(sample_warp.shape[:2], border_ratio=0.06)
-        sample_invalid = build_invalid_mask(sample_warp)
-        sample_mask &= ~sample_invalid
+    sample_mask = build_material_mask(sample_warp.shape[:2], border_ratio=0.06)
+    sample_invalid = build_invalid_mask(sample_warp)
+    sample_mask &= ~sample_invalid
 
     # ── 5. 白平衡 + 光照均匀性校正 ──
     board_wb, board_gains = apply_gray_world(board_warp, board_mask)
     if enable_shading_correction:
         board_wb = apply_shading_correction(board_wb, board_mask)
 
-    if has_sample and sample_warp is not None and sample_mask is not None:
-        sample_wb, sample_gains = apply_gray_world(sample_warp, sample_mask)
-        if enable_shading_correction:
-            sample_wb = apply_shading_correction(sample_wb, sample_mask)
-    else:
-        sample_wb = None
-        sample_gains = [1.0, 1.0, 1.0]
+    sample_wb, sample_gains = apply_gray_world(sample_warp, sample_mask)
+    if enable_shading_correction:
+        sample_wb = apply_shading_correction(sample_wb, sample_mask)
 
     # ── 6. 纹理抑制 (木纹膜关键: 对底色不对纹理) ──
     board_tone = texture_suppress(board_wb)
     board_lab = bgr_to_lab_float(board_tone)
     board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
 
-    if has_sample and sample_wb is not None and sample_mask is not None:
-        sample_tone = texture_suppress(sample_wb)
-        sample_lab = bgr_to_lab_float(sample_tone)
-        sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
-    else:
-        sample_lab = board_lab
-        sample_mean = board_mean
-        sample_std = board_std
-        sample_used = 0
+    # sample is guaranteed present (validated above)
+    sample_tone = texture_suppress(sample_wb)
+    sample_lab = bgr_to_lab_float(sample_tone)
+    sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
 
     # ── 7. 材质自动识别 ──
     inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
@@ -389,7 +378,7 @@ def analyze_photo(
     # ── 10. 置信度 ──
     lighting_range = coarse_lighting_range(board_lab, board_mask)
     board_valid_ratio = float(np.count_nonzero(board_mask) / board_mask.size)
-    sample_valid_ratio = float(np.count_nonzero(sample_mask) / sample_mask.size) if sample_mask is not None else 0.5
+    sample_valid_ratio = float(np.count_nonzero(sample_mask) / sample_mask.size)
     confidence = compute_confidence(det_diag, lighting_range, board_valid_ratio, sample_valid_ratio)
 
     # ══════════════════════════════════════════════════════
@@ -429,8 +418,7 @@ def analyze_photo(
 
     # 大货/标样校正后图片
     cv2.imwrite(str(output_dir / "board_corrected.png"), board_warp)
-    if has_sample and sample_warp is not None:
-        cv2.imwrite(str(output_dir / "sample_corrected.png"), sample_warp)
+    cv2.imwrite(str(output_dir / "sample_corrected.png"), sample_warp)
 
     elapsed = time.perf_counter() - start_time
 
@@ -470,7 +458,7 @@ def analyze_photo(
         "detection": {
             **det_diag,
             "sample_source": sample_source,
-            "has_sample": has_sample,
+            "has_sample": True,
         },
         "result": {
             "pass_legacy": pass_color,  # 原有二元判定 (向后兼容)
@@ -494,7 +482,7 @@ def analyze_photo(
             "heatmap": str(heatmap_path),
             "detection_overlay": str(overlay_path),
             "board_corrected": str(output_dir / "board_corrected.png"),
-            "sample_corrected": str(output_dir / "sample_corrected.png") if has_sample else None,
+            "sample_corrected": str(output_dir / "sample_corrected.png"),
         },
     }
 
