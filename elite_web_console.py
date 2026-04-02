@@ -13,6 +13,7 @@ HOME_PAGE_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SENIA Elite Smart Console</title>
   <style>
+    /* Google Fonts — loads async; system fonts below are used as fallback if CDN is unreachable */
     @import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
     :root {
       --bg-0: #091322;
@@ -33,7 +34,7 @@ HOME_PAGE_TEMPLATE = """
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Sora", "Noto Sans SC", "PingFang SC", sans-serif;
+      font-family: "Sora", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Micro Hei", system-ui, sans-serif;
       color: var(--ink-0);
       background:
         radial-gradient(1200px 600px at 85% -10%, rgba(0, 183, 168, 0.16), transparent 55%),
@@ -593,19 +594,47 @@ HOME_PAGE_TEMPLATE = """
       target.innerHTML = `<div class="err">${esc(message || "请求失败")}</div>`;
     }
 
+    function colorClass(de, avgTarget) {
+      if (typeof de !== "number" || Number.isNaN(de) || typeof avgTarget !== "number") return "";
+      if (de <= avgTarget) return "color:#2ac670";
+      if (de <= avgTarget * 1.5) return "color:#ffb145";
+      return "color:#ff5d73";
+    }
+
     function renderResult(target, title, data) {
       const process = data.process_advice || {};
       const decision = data.decision_center || {};
       const innovation = data.innovation_engine || {};
+      const summary = (data.result || {}).summary || {};
+      const profile = (data.profile || {});
+      const avgTarget = (profile.targets_used || {}).avg_delta_e00 || (profile.targets || {}).avg_delta_e00;
+
+      // Support both single/dual (avg_delta_e00) and ensemble (median_avg_delta_e00)
+      const avgDE = summary.avg_delta_e00 ?? summary.median_avg_delta_e00;
+      const p95DE = summary.p95_delta_e00 ?? summary.median_p95_delta_e00;
+      const maxDE = summary.max_delta_e00 ?? summary.median_max_delta_e00;
+      const dL = summary.dL ?? summary.median_dL;
+      const dC = summary.dC ?? summary.median_dC;
+      const dH = summary.dH_deg ?? summary.median_dH_deg;
+
       target.innerHTML = `
-        <div><strong>${esc(title)}</strong> ${yesNo(data.pass)}</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <strong>${esc(title)}</strong> ${yesNo(data.pass)}
+          <span style="font-size:11px;color:#85a4c4;">profile: ${esc(profile.used || "--")}</span>
+        </div>
+        <div style="margin-top:8px;font-size:11px;font-weight:600;color:#85a4c4;letter-spacing:.3px;text-transform:uppercase;">色差指标</div>
+        <div class="metric-grid">
+          <div class="metric"><p class="k">ΔE₀₀ 平均</p><p class="v" style="${colorClass(avgDE, avgTarget)}">${fmt(avgDE, 3)}</p></div>
+          <div class="metric"><p class="k">ΔE₀₀ P95</p><p class="v">${fmt(p95DE, 3)}</p></div>
+          <div class="metric"><p class="k">ΔE₀₀ 最大</p><p class="v">${fmt(maxDE, 3)}</p></div>
+          <div class="metric"><p class="k">dL / dC / dH</p><p class="v" style="font-size:13px;">${fmt(dL,2)} / ${fmt(dC,2)} / ${fmt(dH,1)}°</p></div>
+        </div>
+        <div style="margin-top:8px;font-size:11px;font-weight:600;color:#85a4c4;letter-spacing:.3px;text-transform:uppercase;">决策与质量</div>
         <div class="metric-grid">
           <div class="metric"><p class="k">置信度</p><p class="v">${fmt(data.confidence, 3)}</p></div>
           <div class="metric"><p class="k">风险等级</p><p class="v">${esc(process.risk_level || "--")}</p></div>
-          <div class="metric"><p class="k">决策码</p><p class="v">${esc(decision.decision_code || "--")}</p></div>
-          <div class="metric"><p class="k">创新项数量</p><p class="v">${esc(innovation.innovation_count ?? "--")}</p></div>
+          <div class="metric"><p class="k">决策码</p><p class="v" style="font-size:12px;">${esc(decision.decision_code || "--")}</p></div>
           <div class="metric"><p class="k">老化风险</p><p class="v">${esc(innovation.aging_warranty_risk || "--")}</p></div>
-          <div class="metric"><p class="k">输出目录</p><p class="v">${esc(data.output_dir || "--")}</p></div>
         </div>
         <div class="link-row" style="margin-top:10px;">
           ${reportLink(data.html_path)}
@@ -617,13 +646,14 @@ HOME_PAGE_TEMPLATE = """
 
     async function refreshStatus() {
       try {
-        const h = await fetch("/health", { method: "GET", headers: authHeaders() });
-        const r = await fetch("/ready", { method: "GET", headers: authHeaders() });
-        const s = await fetch("/v1/system/status", { method: "GET", headers: authHeaders() });
+        const hdrs = authHeaders();
+        const [h, r, s] = await Promise.all([
+          fetch("/health", { headers: hdrs }),
+          fetch("/ready", { headers: hdrs }),
+          fetch("/v1/system/status", { headers: hdrs }),
+        ]);
         if (!h.ok || !r.ok || !s.ok) throw new Error("status endpoint unavailable");
-        const health = await h.json();
-        const ready = await r.json();
-        const status = await s.json();
+        const [health, ready, status] = await Promise.all([h.json(), r.json(), s.json()]);
         q("#svc-ok").textContent = (health.ok && ready.ok) ? "ONLINE" : "DEGRADED";
         q("#svc-uptime").textContent = uptimeText(status?.service?.uptime_sec);
         q("#svc-routes").textContent = String(status?.routes?.count ?? "--");
@@ -634,6 +664,24 @@ HOME_PAGE_TEMPLATE = """
         q("#svc-routes").textContent = "--";
         q("#svc-out").textContent = "--";
       }
+    }
+
+    const MAX_UPLOAD_MB = 20;
+    const ALLOWED_IMAGE_EXTS = /\.(jpe?g|png|bmp|tiff?|webp|gif)$/i;
+
+    function validateFiles(form, out) {
+      for (const [k, v] of new FormData(form).entries()) {
+        if (!(v instanceof File) || v.size === 0) continue;
+        if (v.size > MAX_UPLOAD_MB * 1024 * 1024) {
+          setError(out, `${k} 文件大小超过 ${MAX_UPLOAD_MB}MB 限制（当前 ${(v.size/1024/1024).toFixed(1)}MB）`);
+          return false;
+        }
+        if (!ALLOWED_IMAGE_EXTS.test(v.name)) {
+          setError(out, `${k} 格式不支持（${esc(v.name)}），请上传 JPEG/PNG/BMP/TIFF/WebP`);
+          return false;
+        }
+      }
+      return true;
     }
 
     function normalizeForm(form) {
@@ -649,6 +697,7 @@ HOME_PAGE_TEMPLATE = """
       const form = ev.currentTarget;
       const btn = q("#dual-btn");
       const out = q("#result-dual");
+      if (!validateFiles(form, out)) return;
       btn.disabled = true;
       btn.textContent = "分析中...";
       out.innerHTML = '<div class="note">正在运行 Dual 分析，请稍候...</div>';
@@ -659,9 +708,14 @@ HOME_PAGE_TEMPLATE = """
           body: normalizeForm(form),
         });
         const data = await resp.json();
-        if (!resp.ok) throw new Error(data?.detail || "Dual 分析失败");
+        if (!resp.ok) {
+          const msg = resp.status === 415
+            ? "图片格式不支持，请上传 JPEG/PNG/BMP/TIFF/WebP"
+            : (data?.detail || "Dual 分析失败");
+          throw new Error(msg);
+        }
         renderResult(out, "Dual 分析完成", data);
-        await refreshStatus();
+        refreshStatus();
       } catch (err) {
         setError(out, err?.message || "Dual 分析失败");
       } finally {
@@ -675,6 +729,7 @@ HOME_PAGE_TEMPLATE = """
       const form = ev.currentTarget;
       const btn = q("#single-btn");
       const out = q("#result-single");
+      if (!validateFiles(form, out)) return;
       btn.disabled = true;
       btn.textContent = "分析中...";
       out.innerHTML = '<div class="note">正在运行 Single 分析，请稍候...</div>';
@@ -685,9 +740,14 @@ HOME_PAGE_TEMPLATE = """
           body: normalizeForm(form),
         });
         const data = await resp.json();
-        if (!resp.ok) throw new Error(data?.detail || "Single 分析失败");
+        if (!resp.ok) {
+          const msg = resp.status === 415
+            ? "图片格式不支持，请上传 JPEG/PNG/BMP/TIFF/WebP"
+            : (data?.detail || "Single 分析失败");
+          throw new Error(msg);
+        }
         renderResult(out, "Single 分析完成", data);
-        await refreshStatus();
+        refreshStatus();
       } catch (err) {
         setError(out, err?.message || "Single 分析失败");
       } finally {
@@ -717,6 +777,7 @@ SMART_HOME_PAGE_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SENIA Elite 智能工作台</title>
   <style>
+    /* Google Fonts — loads async; system fonts below are used as fallback if CDN is unreachable */
     @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
     :root {
       --bg0: #091423;
@@ -733,7 +794,7 @@ SMART_HOME_PAGE_TEMPLATE = """
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Space Grotesk", "Noto Sans SC", sans-serif;
+      font-family: "Space Grotesk", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Micro Hei", system-ui, sans-serif;
       color: var(--ink);
       background:
         radial-gradient(900px 450px at 88% -10%, rgba(0, 191, 155, 0.16), transparent 60%),
@@ -1350,6 +1411,8 @@ SMART_HOME_PAGE_TEMPLATE = """
           <div class="intel-card"><p class="k">风险依据</p><p class="v" id="kpi_risk_basis">--</p></div>
         </div>
 
+        <div id="de_metrics_box" style="display:none;margin-top:8px;border:1px solid rgba(148,198,240,.24);border-radius:10px;padding:9px 10px;background:rgba(8,20,33,.8);"></div>
+
         <div class="field" style="margin-top:8px;">
           <label>风险与证据</label>
           <ul class="list" id="evidence_list">
@@ -1839,6 +1902,48 @@ SMART_HOME_PAGE_TEMPLATE = """
         : NaN;
       q("#kpi_stability").textContent = Number.isFinite(stability) ? `${fmtNum(stability, 1)}` : "--";
 
+      // Render delta-E color metrics panel
+      const summary = (data?.result || {}).summary || {};
+      const avgDE = num(summary.avg_delta_e00 ?? summary.median_avg_delta_e00);
+      const p95DE = num(summary.p95_delta_e00 ?? summary.median_p95_delta_e00);
+      const maxDE = num(summary.max_delta_e00 ?? summary.median_max_delta_e00);
+      const dL = num(summary.dL ?? summary.median_dL);
+      const dC = num(summary.dC ?? summary.median_dC);
+      const dH = num(summary.dH_deg ?? summary.median_dH_deg);
+      const avgTarget = num((data?.profile?.targets_used || data?.profile?.targets || {}).avg_delta_e00);
+      const deColor = (v, tgt) => {
+        if (!Number.isFinite(v) || !Number.isFinite(tgt)) return "";
+        return v <= tgt ? "color:var(--ok)" : v <= tgt * 1.5 ? "color:var(--warn)" : "color:var(--bad)";
+      };
+      const deBox = q("#de_metrics_box");
+      if (deBox && Number.isFinite(avgDE)) {
+        deBox.style.display = "";
+        deBox.innerHTML = `
+          <p class="t" style="margin:0 0 6px;font-size:10px;color:var(--sub);text-transform:uppercase;letter-spacing:.3px;">色差 ΔE₀₀ 详情</p>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">
+            <div style="border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:rgba(8,20,33,.8);">
+              <p style="margin:0;font-size:10px;color:var(--sub);">AVG</p>
+              <p style="margin:4px 0 0;font-size:17px;font-weight:700;font-family:'JetBrains Mono',monospace;${deColor(avgDE, avgTarget)}">${fmtNum(avgDE, 3)}</p>
+            </div>
+            <div style="border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:rgba(8,20,33,.8);">
+              <p style="margin:0;font-size:10px;color:var(--sub);">P95</p>
+              <p style="margin:4px 0 0;font-size:17px;font-weight:700;font-family:'JetBrains Mono',monospace;">${fmtNum(p95DE, 3)}</p>
+            </div>
+            <div style="border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:rgba(8,20,33,.8);">
+              <p style="margin:0;font-size:10px;color:var(--sub);">MAX</p>
+              <p style="margin:4px 0 0;font-size:17px;font-weight:700;font-family:'JetBrains Mono',monospace;">${fmtNum(maxDE, 3)}</p>
+            </div>
+          </div>
+          <p style="margin:6px 0 0;font-size:11px;color:var(--sub);">
+            dL&nbsp;<b style="color:var(--ink)">${fmtNum(dL,2)}</b>&nbsp;&nbsp;
+            dC&nbsp;<b style="color:var(--ink)">${fmtNum(dC,2)}</b>&nbsp;&nbsp;
+            dH&nbsp;<b style="color:var(--ink)">${fmtNum(dH,1)}°</b>
+            ${Number.isFinite(avgTarget) ? `&nbsp;&nbsp;<span style="opacity:.55">目标 ≤ ${fmtNum(avgTarget,2)}</span>` : ""}
+          </p>`;
+      } else if (deBox) {
+        deBox.style.display = "none";
+      }
+
       const actions = buildActions(data);
       q("#actions_list").innerHTML = actions.map((x) => `<li>${x}</li>`).join("");
       const evidences = buildEvidence(data);
@@ -1864,8 +1969,30 @@ SMART_HOME_PAGE_TEMPLATE = """
       refreshCockpitStats();
     }
 
+    const MAX_UPLOAD_BYTES_SMART = 20 * 1024 * 1024;
+    const ALLOWED_IMG_RE = /\.(jpe?g|png|bmp|tiff?|webp|gif)$/i;
+
+    function validateSmartFiles() {
+      const inputs = ["#single-image", "#dual-reference", "#dual-film"];
+      for (const sel of inputs) {
+        const el = q(sel);
+        if (!el) continue;
+        const f = el.files?.[0];
+        if (!f) continue;
+        if (f.size > MAX_UPLOAD_BYTES_SMART) {
+          return `文件 "${f.name}" 超过 20MB 上传限制（当前 ${(f.size/1024/1024).toFixed(1)}MB）`;
+        }
+        if (!ALLOWED_IMG_RE.test(f.name)) {
+          return `文件 "${f.name}" 格式不支持，请上传 JPEG/PNG/BMP/TIFF/WebP`;
+        }
+      }
+      return null;
+    }
+
     async function runAnalyze() {
       setError("");
+      const fileErr = validateSmartFiles();
+      if (fileErr) { setError(fileErr); return null; }
       const btn = q("#analyze_btn");
       btn.disabled = true;
       btn.textContent = "分析中…";
@@ -1875,7 +2002,12 @@ SMART_HOME_PAGE_TEMPLATE = """
         const req = buildAnalyzeForm();
         const resp = await fetch(req.path, { method: "POST", headers: authHeaders(), body: req.formData });
         const data = await resp.json();
-        if (!resp.ok) throw new Error(data?.detail || "分析失败");
+        if (!resp.ok) {
+          const msg = resp.status === 415
+            ? "图片格式不支持，请上传 JPEG/PNG/BMP/TIFF/WebP"
+            : (data?.detail || "分析失败");
+          throw new Error(msg);
+        }
         state.lastAnalyze = data;
         renderAnalyze(data);
         syncActionButtons();
@@ -2171,6 +2303,7 @@ SMART_HOME_PAGE_TEMPLATE = """
       q("#kpi_stability").textContent = "--";
       q("#kpi_evidence").textContent = "--";
       q("#kpi_risk_basis").textContent = "--";
+      const deBox = q("#de_metrics_box"); if (deBox) deBox.style.display = "none";
       q("#actions_list").innerHTML = "<li>等待分析结果…</li>";
       q("#evidence_list").innerHTML = "<li>等待分析结果…</li>";
       q("#result_json").textContent = '{"status":"ready"}';
@@ -2279,6 +2412,7 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SENIA Elite Executive Dashboard</title>
   <style>
+    /* Google Fonts — loads async; system fonts below are used as fallback if CDN is unreachable */
     @import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap");
     :root {
       --bg: #0c1828;
@@ -2294,7 +2428,7 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Sora", "Noto Sans SC", sans-serif;
+      font-family: "Sora", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Micro Hei", system-ui, sans-serif;
       color: var(--ink);
       background:
         radial-gradient(1000px 500px at 90% -10%, rgba(37, 188, 131, 0.15), transparent 60%),
@@ -2581,6 +2715,7 @@ EXECUTIVE_BRIEF_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SENIA Executive Brief</title>
   <style>
+    /* Google Fonts — loads async; system fonts below are used as fallback if CDN is unreachable */
     @import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
     :root {
       --bg0: #081425;
@@ -2808,6 +2943,7 @@ INNOVATION_V3_DASHBOARD_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SENIA Innovation v3 Dashboard</title>
   <style>
+    /* Google Fonts — loads async; system fonts below are used as fallback if CDN is unreachable */
     @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
     :root {
       --bg-0: #091523;
@@ -2824,7 +2960,7 @@ INNOVATION_V3_DASHBOARD_TEMPLATE = """
     body {
       margin: 0;
       color: var(--ink);
-      font-family: "Space Grotesk", "Noto Sans SC", sans-serif;
+      font-family: "Space Grotesk", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Micro Hei", system-ui, sans-serif;
       background:
         radial-gradient(900px 450px at 90% -10%, rgba(0, 194, 157, 0.18), transparent 56%),
         radial-gradient(1100px 650px at -10% -10%, rgba(63, 168, 255, 0.22), transparent 62%),

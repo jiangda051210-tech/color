@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from elite_decision_center import apply_policy_patch
@@ -45,19 +46,35 @@ DEFAULT_CUSTOMER_TIER: dict[str, Any] = {
 }
 
 
+_TIER_CACHE: dict[str, dict[str, Any]] = {}
+_TIER_CACHE_MTIME: dict[str, float] = {}
+_TIER_CACHE_LOCK = RLock()
+
+
 def load_customer_tier_config(config_path: Path | None) -> tuple[dict[str, Any], str]:
-    cfg = deepcopy(DEFAULT_CUSTOMER_TIER)
     if config_path is None:
-        return cfg, "builtin_default"
+        return deepcopy(DEFAULT_CUSTOMER_TIER), "builtin_default"
+    resolved = str(config_path.resolve())
+    try:
+        mtime = config_path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    with _TIER_CACHE_LOCK:
+        if resolved in _TIER_CACHE and _TIER_CACHE_MTIME.get(resolved) == mtime:
+            return deepcopy(_TIER_CACHE[resolved]), resolved
     raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise ValueError("customer tier config must be a JSON object")
+    cfg = deepcopy(DEFAULT_CUSTOMER_TIER)
     cfg.update(raw)
     if "tiers" in raw and isinstance(raw["tiers"], dict):
         cfg["tiers"] = raw["tiers"]
     if "customers" in raw and isinstance(raw["customers"], dict):
         cfg["customers"] = raw["customers"]
-    return cfg, str(config_path)
+    with _TIER_CACHE_LOCK:
+        _TIER_CACHE[resolved] = cfg
+        _TIER_CACHE_MTIME[resolved] = mtime
+    return deepcopy(cfg), resolved
 
 
 def resolve_customer_tier(
