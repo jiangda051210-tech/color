@@ -289,6 +289,57 @@ def test_state_machine_illegal_transition_blocked():
     assert out["error"] == "illegal_transition"
 
 
+def test_non_release_state_requires_waiver_hard_block():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-WAIVER-BLOCK"
+    _add_trace(sys, lot, complete=True)
+    sys.transition_state(lot_id=lot, to_state="hold_for_review", actor="QA", reason="manual hold", force=True)
+    payload = _good_assessment_payload(lot)
+    payload["meta"]["idempotency_key"] = f"idem-{lot}-001"
+    out = sys.integrated_assessment(**payload)
+    assert "release_waiver_missing_or_invalid" in out["boundary"]["hard_blocks"]
+    assert out["final_decision"]["mode"] == "manual_arbitration"
+    assert out["status"] in {"auto_blocked", "manual_arbitration_required"}
+
+
+def test_non_release_state_with_valid_waiver_allows_manual_review_only():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-WAIVER-REVIEW"
+    _add_trace(sys, lot, complete=True)
+    sys.transition_state(lot_id=lot, to_state="hold_for_review", actor="QA", reason="manual hold", force=True)
+    opened = sys.open_quality_case(
+        lot_id=lot,
+        case_type="risk_acceptance",
+        issue="customer agreed release under controlled risk",
+        severity="medium",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"waiver-{lot}",
+    )
+    cid = opened.get("case_id")
+    assert cid
+    wv = sys.add_case_waiver(
+        case_id=cid,
+        actor="QA",
+        approved_by="QA Manager",
+        reason="approved temporary concession",
+        approver_role="quality_manager",
+        customer_tier="standard",
+        waiver_type="release_with_risk",
+        expiry_ts=time.time() + 3600.0,
+    )
+    assert wv["ok"] is True
+
+    payload = _good_assessment_payload(lot)
+    payload["meta"]["idempotency_key"] = f"idem-{lot}-001"
+    out = sys.integrated_assessment(**payload)
+    assert "release_under_approved_waiver" in out["boundary"]["review_triggers"]
+    assert "release_waiver_missing_or_invalid" not in out["boundary"]["hard_blocks"]
+    assert out["final_decision"]["mode"] == "manual_review"
+    assert out["final_decision"]["auto_release_allowed"] is False
+    assert out["quality_fact_layer"]["release_waiver"]["scope_match"] is True
+
+
 def test_trace_revision_and_override_append_only():
     sys = UltimateColorFilmSystemV2Optimized()
     lot = "LOT-TRACE-REV"
@@ -752,6 +803,8 @@ def run_all():
     test_machine_transfer_compensation_risk()
     test_roll_tail_drift_blocks_auto_release()
     test_state_machine_illegal_transition_blocked()
+    test_non_release_state_requires_waiver_hard_block()
+    test_non_release_state_with_valid_waiver_allows_manual_review_only()
     test_trace_revision_and_override_append_only()
     test_trace_event_idempotency_deduplicates()
     test_replay_with_new_rule_or_meta()

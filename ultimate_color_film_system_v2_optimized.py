@@ -14,7 +14,6 @@ import sqlite3
 import statistics
 import time
 from collections import defaultdict
-from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -3286,6 +3285,9 @@ class LifecycleRuleCenter:
                 "roll_tail_risk_hard": 0.8,
                 "case_overdue_review": 1,
                 "case_overdue_hard": 2,
+                "auto_release_states": ["released", "in_run_monitoring"],
+                "waiver_required_states": ["hold_for_review", "retest", "arbitration"],
+                "waiver_enforced": True,
                 "release_allowed_states": ["released", "in_run_monitoring", "hold_for_review", "retest", "arbitration"],
             },
             notes="default production lifecycle rules",
@@ -3979,6 +3981,76 @@ class UltimateColorFilmSystemV2Optimized:
             meta=meta,
         )
 
+    @staticmethod
+    def _collect_release_waiver_context(
+        active_cases: List[Dict[str, Any]],
+        lifecycle_state: str,
+        now_ts: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        ts = float(now_ts if _is_number(now_ts) else time.time())
+        release_types = {"release_with_risk", "state_release_override", "customer_concession"}
+        role_allow = {"quality_manager", "qa_manager", "plant_manager", "director"}
+
+        active_rows: List[Dict[str, Any]] = []
+        matched_rows: List[Dict[str, Any]] = []
+        expired_rows: List[Dict[str, Any]] = []
+        invalid_rows: List[Dict[str, Any]] = []
+
+        for case in active_cases:
+            cid = str(case.get("case_id", ""))
+            for w in case.get("waivers", []) or []:
+                waiver_id = str(w.get("waiver_id", ""))
+                w_type = str(w.get("waiver_type", "release_with_risk")).strip().lower()
+                expiry = float(w["expiry_ts"]) if _is_number(w.get("expiry_ts")) else None
+                expired = bool(expiry is not None and expiry < ts)
+                approver_role = str(w.get("approver_role", "")).strip().lower()
+                role_ok = approver_role in role_allow
+
+                allowed_states_raw = w.get("allowed_states")
+                if isinstance(allowed_states_raw, str) and allowed_states_raw.strip():
+                    allowed_states = {x.strip() for x in allowed_states_raw.split(",") if x.strip()}
+                elif isinstance(allowed_states_raw, (list, tuple, set)):
+                    allowed_states = {str(x).strip() for x in allowed_states_raw if str(x).strip()}
+                elif w_type in release_types:
+                    allowed_states = {"hold_for_review", "retest", "arbitration"}
+                else:
+                    allowed_states = {"released", "in_run_monitoring"}
+
+                row = {
+                    "case_id": cid,
+                    "waiver_id": waiver_id,
+                    "waiver_type": w_type,
+                    "approver_role": approver_role,
+                    "allowed_states": sorted(allowed_states),
+                }
+                if expired:
+                    expired_rows.append(row)
+                    continue
+                if not role_ok:
+                    invalid_rows.append({**row, "reason": "approver_role_invalid"})
+                    continue
+                active_rows.append(row)
+                if lifecycle_state in allowed_states and w_type in release_types:
+                    matched_rows.append(row)
+
+        return {
+            "release_waiver_present": len(active_rows) > 0,
+            "release_waiver_scope_match": len(matched_rows) > 0,
+            "release_waiver_active_count": len(active_rows),
+            "release_waiver_expired_count": len(expired_rows),
+            "release_waiver_invalid_count": len(invalid_rows),
+            "release_waiver_scope_mismatch_count": max(0, len(active_rows) - len(matched_rows)),
+            "release_waiver_case_ids": sorted({x["case_id"] for x in active_rows}),
+            "release_waiver_ids": [x["waiver_id"] for x in active_rows],
+            "matched_release_waiver_ids": [x["waiver_id"] for x in matched_rows],
+            "release_waiver_summary": {
+                "active": active_rows,
+                "matched": matched_rows,
+                "expired": expired_rows,
+                "invalid": invalid_rows,
+            },
+        }
+
     def evaluate_auto_boundary(self, context: Dict[str, Any], meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         m = dict(meta or {})
         ts = m.get("decision_ts")
@@ -4010,6 +4082,9 @@ class UltimateColorFilmSystemV2Optimized:
         roll_tail_hard = float(p.get("roll_tail_risk_hard", 0.8))
         case_overdue_review = int(p.get("case_overdue_review", 1))
         case_overdue_hard = int(p.get("case_overdue_hard", 2))
+        auto_release_states = set(p.get("auto_release_states", ["released", "in_run_monitoring"]))
+        waiver_required_states = set(p.get("waiver_required_states", ["hold_for_review", "retest", "arbitration"]))
+        waiver_enforced = bool(p.get("waiver_enforced", True))
         release_allowed_states = set(p.get("release_allowed_states", ["released", "in_run_monitoring", "hold_for_review", "retest", "arbitration"]))
 
         hard_blocks: List[str] = []
@@ -4039,8 +4114,25 @@ class UltimateColorFilmSystemV2Optimized:
         if bool(context.get("rule_conflict", False)):
             arbitration_triggers.append("rule_conflict_detected")
         lifecycle_state = str(context.get("lifecycle_state", "created"))
+        waiver_present = bool(context.get("release_waiver_present", False))
+        waiver_scope_match = bool(context.get("release_waiver_scope_match", False))
+        waiver_expired_count = int(context.get("release_waiver_expired_count", 0) or 0)
+        waiver_invalid_count = int(context.get("release_waiver_invalid_count", 0) or 0)
         if lifecycle_state not in release_allowed_states:
             review_triggers.append(f"lifecycle_state_not_release_ready:{lifecycle_state}")
+        if lifecycle_state not in auto_release_states:
+            review_triggers.append(f"state_requires_manual_release:{lifecycle_state}")
+        if waiver_expired_count > 0:
+            review_triggers.append("expired_release_waiver_detected")
+        if waiver_invalid_count > 0:
+            hard_blocks.append("release_waiver_invalid_approval")
+        if waiver_enforced and lifecycle_state in waiver_required_states:
+            if waiver_scope_match:
+                review_triggers.append("release_under_approved_waiver")
+            else:
+                hard_blocks.append("release_waiver_missing_or_invalid")
+        elif waiver_present and lifecycle_state not in waiver_required_states:
+            review_triggers.append("waiver_present_outside_required_state")
 
         repeatability_std = float(context.get("repeatability_std", 0.0) or 0.0)
         if repeatability_std >= repeatability_hard:
@@ -4127,6 +4219,16 @@ class UltimateColorFilmSystemV2Optimized:
             "hard_blocks": sorted(set(hard_blocks)),
             "review_triggers": sorted(set(review_triggers)),
             "arbitration_triggers": sorted(set(arbitration_triggers)),
+            "release_gate": {
+                "lifecycle_state": lifecycle_state,
+                "auto_release_states": sorted(auto_release_states),
+                "waiver_required_states": sorted(waiver_required_states),
+                "waiver_enforced": waiver_enforced,
+                "waiver_present": waiver_present,
+                "waiver_scope_match": waiver_scope_match,
+                "waiver_expired_count": waiver_expired_count,
+                "waiver_invalid_count": waiver_invalid_count,
+            },
             "rule_trace": {
                 "lifecycle_rule_version": pack.get("version"),
                 "resolved_by": rr.get("resolved_by"),
@@ -4290,11 +4392,21 @@ class UltimateColorFilmSystemV2Optimized:
         open_critical_case = any(str(x.get("severity", "")).lower() == "critical" for x in active_cases)
         open_high_case_count = sum(1 for x in active_cases if str(x.get("severity", "")).lower() in {"high", "critical"})
         case_sla = self.get_case_sla_report(lot_id=lot_id)
+        lifecycle_state = str(state_snapshot.get("current_state", "created"))
+        waiver_context = self._collect_release_waiver_context(
+            active_cases=active_cases,
+            lifecycle_state=lifecycle_state,
+            now_ts=m.get("decision_ts"),
+        )
         case_governance = {
             "active_case_count": len(active_cases),
             "open_critical_case": open_critical_case,
             "open_high_case_count": open_high_case_count,
             "sla": case_sla,
+            "waiver_summary": waiver_context.get("release_waiver_summary", {}),
+            "release_waiver_active_count": waiver_context.get("release_waiver_active_count", 0),
+            "release_waiver_expired_count": waiver_context.get("release_waiver_expired_count", 0),
+            "release_waiver_scope_match": waiver_context.get("release_waiver_scope_match", False),
         }
 
         boundary_context = {
@@ -4326,8 +4438,12 @@ class UltimateColorFilmSystemV2Optimized:
             "open_critical_case": bool(open_critical_case),
             "open_high_case_count": int(open_high_case_count),
             "case_overdue_actions": int(case_sla.get("overdue_count", 0) or 0),
-            "lifecycle_state": state_snapshot.get("current_state", "created"),
+            "lifecycle_state": lifecycle_state,
             "confidence": float(confidence if _is_number(confidence) else bd.get("confidence", 1.0) or 1.0),
+            "release_waiver_present": bool(waiver_context.get("release_waiver_present", False)),
+            "release_waiver_scope_match": bool(waiver_context.get("release_waiver_scope_match", False)),
+            "release_waiver_expired_count": int(waiver_context.get("release_waiver_expired_count", 0) or 0),
+            "release_waiver_invalid_count": int(waiver_context.get("release_waiver_invalid_count", 0) or 0),
         }
         boundary = self.evaluate_auto_boundary(context=boundary_context, meta=m)
 
@@ -4484,6 +4600,14 @@ class UltimateColorFilmSystemV2Optimized:
             "traceability_integrity": trace.get("integrity", False),
             "roll_context": {"roll_id": roll_id, "status": roll_report.get("status")},
             "case_governance": case_governance,
+            "release_waiver": {
+                "present": bool(waiver_context.get("release_waiver_present", False)),
+                "scope_match": bool(waiver_context.get("release_waiver_scope_match", False)),
+                "active_count": int(waiver_context.get("release_waiver_active_count", 0) or 0),
+                "expired_count": int(waiver_context.get("release_waiver_expired_count", 0) or 0),
+                "invalid_count": int(waiver_context.get("release_waiver_invalid_count", 0) or 0),
+                "waiver_ids": list(waiver_context.get("release_waiver_ids", [])),
+            },
         }
         business_suggestion_layer = {
             "disposition_plan": disposition,
