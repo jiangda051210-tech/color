@@ -119,6 +119,9 @@ REQUEST_TOTAL_COUNT = 0
 REQUEST_ERROR_COUNT = 0
 RATE_LIMIT_LOCK = RLock()
 RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
+RATE_LIMIT_MAX_BUCKETS = 5000
+RATE_LIMIT_CLEANUP_BATCH = 2000
+RATE_LIMIT_STALE_SECONDS = 300
 ROLE_RANK = {"viewer": 1, "operator": 2, "admin": 3}
 TENANT_HEADER_NAME = SETTINGS.tenant_header_name.strip() or "x-tenant-id"
 ALLOWED_TENANTS = {x.strip() for x in SETTINGS.allowed_tenants_csv.split(",") if x.strip()}
@@ -432,9 +435,9 @@ def _consume_rate_limit_token(bucket_key: str) -> tuple[bool, int]:
             retry_after = max(1, int(60 - (now_ts - bucket[0])))
             return False, retry_after
         bucket.append(now_ts)
-        if len(RATE_LIMIT_BUCKETS) > 5000:
-            stale_keys = [k for k, v in RATE_LIMIT_BUCKETS.items() if not v or (now_ts - v[-1]) > 300]
-            for k in stale_keys[:2000]:
+        if len(RATE_LIMIT_BUCKETS) > RATE_LIMIT_MAX_BUCKETS:
+            stale_keys = [k for k, v in RATE_LIMIT_BUCKETS.items() if not v or (now_ts - v[-1]) > RATE_LIMIT_STALE_SECONDS]
+            for k in stale_keys[:RATE_LIMIT_CLEANUP_BATCH]:
                 RATE_LIMIT_BUCKETS.pop(k, None)
     return True, 0
 
@@ -649,7 +652,10 @@ def _write_audit_event(event: dict[str, Any]) -> None:
             with AUDIT_LOG_PATH.open("a", encoding="utf-8") as fp:
                 fp.write(line + "\n")
     except Exception:
-        # Audit logging must not block the business request path.
+        # Audit logging must not block the business request path,
+        # but we still log the failure to stderr for operational visibility.
+        import sys
+        print("[WARN] audit log write failed", file=sys.stderr)
         return
 
 

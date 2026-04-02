@@ -3814,7 +3814,9 @@ def get_precision_observatory_module_js() -> str:
         if build_error:
             return f"/* observatory build warning: {build_error} */\n{body}"
         return body
-    fallback_error = (build_error or "observatory module unavailable").replace("</script>", "<\\/script>")
+    fallback_error = (build_error or "observatory module unavailable")
+    # Escape for safe embedding in JS string context
+    fallback_error = html.escape(fallback_error, quote=True).replace("</script>", "<\\/script>")
     return OBSERVATORY_FALLBACK_MODULE.replace("__BUILD_ERROR__", fallback_error)
 
 

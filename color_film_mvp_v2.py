@@ -858,7 +858,7 @@ class RecipeAdvisorV2:
             try:
                 if rule['cond'](dL, da, db):
                     matched.append(rule)
-            except:
+            except Exception:
                 continue
 
         if not matched:

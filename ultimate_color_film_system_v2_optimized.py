@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import statistics
 import time
@@ -2526,8 +2527,20 @@ class QualityCaseCenterV2:
         except Exception:
             return fallback
 
-    @staticmethod
-    def _ensure_db_column(conn: sqlite3.Connection, table: str, col: str, ddl_type: str) -> None:
+    _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    @classmethod
+    def _validate_identifier(cls, name: str) -> str:
+        """Validate that *name* is a safe SQL identifier (alphanumeric + underscore)."""
+        if not cls._SAFE_IDENTIFIER_RE.match(name):
+            raise ValueError(f"Unsafe SQL identifier rejected: {name!r}")
+        return name
+
+    @classmethod
+    def _ensure_db_column(cls, conn: sqlite3.Connection, table: str, col: str, ddl_type: str) -> None:
+        table = cls._validate_identifier(table)
+        col = cls._validate_identifier(col)
+        ddl_type = cls._validate_identifier(ddl_type)
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         existing = {str(x[1]) for x in rows}
         if col not in existing:
