@@ -457,13 +457,15 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
 
 def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> RectCandidate | None:
     """
-    二次检测: 在 board 区域内部用更敏感的方法找 sample.
-    用于标样颜色和大货相近、主检测找不到的情况.
+    二次检测: 在 board 区域内部找 sample.
 
-    方法: 裁切 board 区域 → 锐化 → 高灵敏度 Canny → 找内部矩形.
+    策略 (按优先级):
+      A. 局部颜色差异检测: 标样和大货虽然相似但不完全一样,
+         用滑动窗口找"局部平均色和全局平均色最不一样"的矩形区域
+      B. 边缘+阴影检测: 标样放在大货上会有微小投影/厚度差
+      C. 高对比度文字/贴纸附近区域: 手写字通常写在标样上
     """
     h, w = image_bgr.shape[:2]
-    # Warp board to rectangle
     quad = order_quad(board_quad)
     widths = [np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[3])]
     heights = [np.linalg.norm(quad[3] - quad[0]), np.linalg.norm(quad[2] - quad[1])]
@@ -473,52 +475,100 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
     dst = np.array([[0, 0], [bw, 0], [bw, bh], [0, bh]], dtype=np.float32)
     M = cv2.getPerspectiveTransform(quad, dst)
     warped = cv2.warpPerspective(image_bgr, M, (bw, bh))
-
-    # 在 warped board 内部做高灵敏度边缘检测
-    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-    # 锐化: Laplacian 增强微弱边缘
-    sharp = cv2.Laplacian(gray, cv2.CV_16S, ksize=3)
-    sharp = cv2.convertScaleAbs(sharp)
-    # 低阈值 Canny (捕捉微弱边界)
-    edges = cv2.Canny(gray, 20, 60)
-    edges = cv2.bitwise_or(edges, sharp)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     board_area = float(bw * bh)
 
+    # === 策略 A: 局部颜色差异 (最可靠) ===
+    # 把 board 分成粗网格, 找颜色和全局均值偏差最大的矩形区域
+    lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab[..., 0] *= (100.0 / 255.0)
+    lab[..., 1] -= 128.0
+    lab[..., 2] -= 128.0
+
+    global_mean = lab.reshape(-1, 3).mean(axis=0)
+
+    # 滑动窗口搜索: 不同尺寸的矩形
     best: RectCandidate | None = None
-    best_score = -1.0
-    for cnt in contours:
-        area = float(cv2.contourArea(cnt))
-        ratio = area / board_area
-        if not (0.01 <= ratio <= 0.50):
-            continue
-        rect = cv2.minAreaRect(cnt)
-        rw2, rh2 = rect[1]
-        if rw2 < 20 or rh2 < 20:
-            continue
-        rect_area = float(rw2 * rh2)
-        if rect_area <= 0:
-            continue
-        rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
-        if rectangularity < 0.5:
-            continue
-        score = area * rectangularity
-        if score > best_score:
-            best_score = score
-            box = cv2.boxPoints(rect).astype(np.float32)
-            # 把坐标映射回原图
-            M_inv = cv2.getPerspectiveTransform(dst, quad)
-            box_orig = cv2.perspectiveTransform(box.reshape(1, -1, 2), M_inv).reshape(-1, 2)
-            center_orig = box_orig.mean(axis=0)
-            best = RectCandidate(
-                quad=box_orig.astype(np.float32),
-                area=area * (h * w / board_area),  # 近似缩放
-                rect_area=rect_area * (h * w / board_area),
-                rectangularity=rectangularity,
-                center=(float(center_orig[0]), float(center_orig[1])),
-            )
+    best_diff = -1.0
+
+    for scale_h in [0.15, 0.20, 0.25, 0.30]:
+        for scale_w in [0.20, 0.30, 0.40]:
+            win_h = int(bh * scale_h)
+            win_w = int(bw * scale_w)
+            if win_h < 40 or win_w < 40:
+                continue
+            step_h = max(win_h // 3, 10)
+            step_w = max(win_w // 3, 10)
+
+            for y in range(0, bh - win_h, step_h):
+                for x in range(0, bw - win_w, step_w):
+                    region = lab[y:y + win_h, x:x + win_w]
+                    region_mean = region.reshape(-1, 3).mean(axis=0)
+                    diff = float(np.sqrt(np.sum((region_mean - global_mean) ** 2)))
+
+                    area_ratio = (win_h * win_w) / board_area
+                    if not (0.02 <= area_ratio <= 0.45):
+                        continue
+
+                    # 标样区域的颜色应该比全局均值有可检测的差异
+                    if diff > best_diff and diff > 0.8:
+                        best_diff = diff
+                        box_warp = np.array([
+                            [x, y], [x + win_w, y],
+                            [x + win_w, y + win_h], [x, y + win_h]
+                        ], dtype=np.float32)
+                        M_inv = cv2.getPerspectiveTransform(dst, quad)
+                        box_orig = cv2.perspectiveTransform(
+                            box_warp.reshape(1, -1, 2), M_inv
+                        ).reshape(-1, 2)
+                        center = box_orig.mean(axis=0)
+                        best = RectCandidate(
+                            quad=box_orig.astype(np.float32),
+                            area=float(win_h * win_w) * (h * w / board_area),
+                            rect_area=float(win_h * win_w) * (h * w / board_area),
+                            rectangularity=0.95,
+                            center=(float(center[0]), float(center[1])),
+                        )
+
+    # === 策略 B: 边缘检测 (备选) ===
+    if best is None:
+        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        sharp = cv2.Laplacian(gray, cv2.CV_16S, ksize=3)
+        sharp = cv2.convertScaleAbs(sharp)
+        edges = cv2.Canny(gray, 15, 50)
+        edges = cv2.bitwise_or(edges, sharp)
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=3)
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        best_score = -1.0
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            ratio = area / board_area
+            if not (0.02 <= ratio <= 0.45):
+                continue
+            rect = cv2.minAreaRect(cnt)
+            rw2, rh2 = rect[1]
+            if rw2 < 30 or rh2 < 30:
+                continue
+            rect_area = float(rw2 * rh2)
+            if rect_area <= 0:
+                continue
+            rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
+            if rectangularity < 0.45:
+                continue
+            score = area * rectangularity
+            if score > best_score:
+                best_score = score
+                box = cv2.boxPoints(rect).astype(np.float32)
+                M_inv = cv2.getPerspectiveTransform(dst, quad)
+                box_orig = cv2.perspectiveTransform(box.reshape(1, -1, 2), M_inv).reshape(-1, 2)
+                center = box_orig.mean(axis=0)
+                best = RectCandidate(
+                    quad=box_orig.astype(np.float32),
+                    area=area * (h * w / board_area),
+                    rect_area=rect_area * (h * w / board_area),
+                    rectangularity=rectangularity,
+                    center=(float(center[0]), float(center[1])),
+                )
     return best
 
 
