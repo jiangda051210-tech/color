@@ -26,8 +26,6 @@ import numpy as np
 
 # 复用现有能力
 from elite_color_match import (
-    ROI,
-    RectCandidate,
     PROFILES,
     bgr_to_lab_float,
     build_invalid_mask,
@@ -437,6 +435,15 @@ def analyze_photo(
         tier=tier_result["tier"],
     )
 
+    # ── Next-Gen 自动嵌入 ──
+    try:
+        from senia_next_gen import metamerism_risk, delta_e_to_cost
+        metamerism = metamerism_risk((float(board_mean[0]), float(board_mean[1]), float(board_mean[2])))
+        cost = delta_e_to_cost(avg_de)
+    except Exception:
+        metamerism = {"risk_level": "unknown"}
+        cost = {}
+
     # ══════════════════════════════════════════════════════
     # 输出可视化
     # ══════════════════════════════════════════════════════
@@ -487,6 +494,8 @@ def analyze_photo(
             "scores": preflight.get("scores", {}),
         },
         "surface_check": wet_film if wet_film.get("detected") else {"detected": False},
+        "metamerism": metamerism,
+        "cost_risk": cost,
 
         # 详细数据
         "profile": {

@@ -26,8 +26,6 @@ SENIA Dual-Shot — 拍两张照片, 精度飙升
 
 from __future__ import annotations
 
-import json
-import math
 import time
 from pathlib import Path
 from typing import Any
@@ -39,8 +37,6 @@ from elite_color_match import (
     bgr_to_lab_float,
     build_invalid_mask,
     build_material_mask,
-    robust_mean_lab,
-    texture_suppress,
     apply_gray_world,
     apply_shading_correction,
     coarse_lighting_range,
@@ -49,8 +45,6 @@ from elite_color_match import (
     ciede2000 as ciede2000_np,
     draw_heatmap_on_board,
     build_recommendations,
-    make_quality_flags,
-    build_capture_guidance,
     resolve_targets,
     PROFILES,
 )
