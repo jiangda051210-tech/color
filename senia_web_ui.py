@@ -558,9 +558,62 @@ function renderResult(d) {{
     </div>`;
   }}
 
+  // ── 操作员反馈 (自学习) ──
+  html += `<div class="insights-row">
+    <div class="insight-card" style="text-align:center">
+      <div class="insight-title">&#x1f4ac; Operator Feedback &middot; 你同意这个判定吗?</div>
+      <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px">你的反馈会让系统越来越准</p>
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+        <button onclick="sendFeedback('${{d.lot_id||""}}','${{tier}}','PASS',${{summary.avg_delta_e00||0}},'${{d.profile?.used||"auto"}}')"
+          style="padding:8px 24px;border-radius:8px;border:1px solid var(--pass);background:var(--pass-bg);color:var(--pass);cursor:pointer;font-size:14px;font-weight:600">
+          &#x1f44d; 应该合格</button>
+        <button onclick="sendFeedback('${{d.lot_id||""}}','${{tier}}','MARGINAL',${{summary.avg_delta_e00||0}},'${{d.profile?.used||"auto"}}')"
+          style="padding:8px 24px;border-radius:8px;border:1px solid var(--marginal);background:var(--marginal-bg);color:var(--marginal);cursor:pointer;font-size:14px;font-weight:600">
+          &#x26a0; 应该临界</button>
+        <button onclick="sendFeedback('${{d.lot_id||""}}','${{tier}}','FAIL',${{summary.avg_delta_e00||0}},'${{d.profile?.used||"auto"}}')"
+          style="padding:8px 24px;border-radius:8px;border:1px solid var(--fail);background:var(--fail-bg);color:var(--fail);cursor:pointer;font-size:14px;font-weight:600">
+          &#x1f44e; 应该不合格</button>
+      </div>
+      <div id="feedbackResult" style="margin-top:10px;font-size:12px;color:var(--text-dim)"></div>
+    </div>
+    <div class="insight-card">
+      <div class="insight-title">&#x1f4c8; Lot History &middot; 批次趋势</div>
+      <div id="lotHistory" style="font-size:13px;color:var(--text-secondary)">
+        ${{d.history?.has_baseline
+          ? `<div style="margin-bottom:8px">
+               <span style="color:var(--text-primary);font-weight:600">${{d.history.vs_baseline === 'better' ? '&#x2b06; 优于' : d.history.vs_baseline === 'worse' ? '&#x2b07; 劣于' : '&#x2194; 持平'}}历史基线</span>
+               (历史均值 ΔE=${{d.history.baseline_avg?.toFixed(2)}})
+             </div>
+             <div>趋势: ${{d.history.trend === 'improving' ? '&#x2705; 改善中' : d.history.trend === 'degrading' ? '&#x26a0; 恶化中' : '&#x2796; 稳定'}}</div>
+             ${{d.history.drift_detected ? '<div style="color:var(--fail);margin-top:4px">&#x26a0; 检测到色差漂移!</div>' : ''}}`
+          : '<div style="color:var(--text-dim)">暂无历史数据, 后续分析将自动积累</div>'
+        }}
+      </div>
+    </div>
+  </div>`;
+
   resultArea.innerHTML = html;
   resultArea.classList.add('active');
   window.scrollTo({{ top: resultArea.offsetTop - 20, behavior: 'smooth' }});
+}}
+
+// ── 反馈提交 ──
+async function sendFeedback(lotId, systemTier, operatorTier, dE, profile) {{
+  const fb = $('feedbackResult');
+  fb.textContent = 'Submitting...';
+  try {{
+    const form = new FormData();
+    form.append('run_id', `fb_${{Date.now()}}`);
+    form.append('system_tier', systemTier);
+    form.append('operator_tier', operatorTier);
+    form.append('dE00', dE.toString());
+    form.append('profile', profile);
+    const r = await fetch('/v1/senia/feedback', {{method:'POST', body:form}});
+    const j = await r.json();
+    fb.innerHTML = `<span style="color:var(--pass)">&#x2705; 反馈已记录! 系统正在学习你的判断标准 (累计 ${{j.total_feedbacks}} 条)</span>`;
+  }} catch(e) {{
+    fb.innerHTML = `<span style="color:var(--fail)">&#x274c; 提交失败: ${{e.message}}</span>`;
+  }}
 }}
 </script>
 </body>

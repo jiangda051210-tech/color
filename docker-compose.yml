@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  senia:
+    build: .
+    ports:
+      - "8877:8877"
+    volumes:
+      - senia-data:/app/data
+      - senia-runs:/app/service_runs
+      - senia-logs:/app/logs
+    environment:
+      - ELITE_API_HOST=0.0.0.0
+      - ELITE_API_PORT=8877
+      - ELITE_LOG_LEVEL=info
+      - ELITE_ENABLE_AUDIT_LOG=true
+      - ELITE_ENABLE_SECURITY_HEADERS=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8877/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  senia-data:
+  senia-runs:
+  senia-logs:
