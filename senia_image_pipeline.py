@@ -262,11 +262,11 @@ def analyze_photo(
         board_quad = aruco_quad
         sample_source = "aruco"
         cands = contour_candidates(image_bgr)
-        _, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape)
+        _, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape, image_bgr)
         sample_quad = order_quad(sample_cand.quad) if sample_cand else None
     else:
         cands = contour_candidates(image_bgr)
-        board_cand, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape)
+        board_cand, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape, image_bgr)
         if board_cand is None:
             raise RuntimeError("未检测到大货区域, 请确保整版膜在画面中居中且与背景有对比度")
         board_quad = order_quad(board_cand.quad)
@@ -305,12 +305,18 @@ def analyze_photo(
     sample_mask &= ~sample_invalid
 
     # ── 5. 白平衡 + 光照均匀性校正 ──
+    # 关键: 大货和标样必须用相同的WB增益, 否则相对色差被破坏.
+    # 在工厂荧光灯/LED灯下, 绝对色值可能偏, 但相对色差是准的.
     board_wb, board_gains = apply_gray_world(board_warp, board_mask)
+    # 对标样用大货的WB增益 (保持相对一致性, 比各自独立WB更可靠)
+    sample_wb = sample_warp.copy().astype(np.float32)
+    for ch in range(3):
+        sample_wb[..., ch] = np.clip(sample_warp[..., ch].astype(np.float32) * board_gains[ch], 0, 255)
+    sample_wb = sample_wb.astype(np.uint8)
+    sample_gains = board_gains  # 记录: 用了相同增益
+
     if enable_shading_correction:
         board_wb = apply_shading_correction(board_wb, board_mask)
-
-    sample_wb, sample_gains = apply_gray_world(sample_warp, sample_mask)
-    if enable_shading_correction:
         sample_wb = apply_shading_correction(sample_wb, sample_mask)
 
     # ── 6. 纹理抑制 (木纹膜关键: 对底色不对纹理) ──

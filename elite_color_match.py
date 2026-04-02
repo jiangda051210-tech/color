@@ -312,7 +312,17 @@ def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarra
 
 
 def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
-    return cv2.bilateralFilter(image_bgr, d=9, sigmaColor=45, sigmaSpace=9)
+    """
+    纹理抑制: 消除木纹/石纹细节, 提取底色.
+    对地板装饰膜特别重要 — 对色比的是底色不是纹理.
+
+    双重滤波: 先双边保边缘, 再中值去残余纹理.
+    """
+    # 第一轮: 强力双边滤波 (d=15, 比原来d=9更强)
+    filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=60, sigmaSpace=15)
+    # 第二轮: 中值滤波去残余纹理颗粒
+    filtered = cv2.medianBlur(filtered, 5)
+    return filtered
 
 
 def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray, strength: float = 0.65) -> np.ndarray:
@@ -386,23 +396,41 @@ def grabcut_foreground_mask(image_bgr: np.ndarray) -> np.ndarray:
     return np.ones((h, w), dtype=bool)
 
 def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
+    """
+    检测图像中的矩形区域 (大货/标样).
+
+    针对木纹/石纹地板膜优化:
+      1. 强力双边滤波消除纹理细节, 只保留板子与背景的边界
+      2. 多尺度边缘检测 (粗+细两轮)
+      3. 大核形态学闭合, 桥接因纹理断开的边缘
+      4. 面积+矩形度双重过滤
+    """
     h, w = image_bgr.shape[:2]
     image_area = h * w
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edge = cv2.Canny(blur, 45, 150)
-    thr = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 41, 8)
 
-    combined = cv2.bitwise_or(edge, thr)
+    # 轻度模糊: 只消除噪点, 保留板子/标样边缘 (包括标样和大货之间的边界)
+    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # 多尺度边缘检测: 粗 (找板子外边界) + 细 (找标样边界)
+    edge_coarse = cv2.Canny(smooth, 30, 100)
+    edge_fine = cv2.Canny(gray, 40, 120)  # 用原始灰度, 更敏感
+    thr = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                cv2.THRESH_BINARY_INV, 41, 8)
+
+    combined = cv2.bitwise_or(edge_coarse, cv2.bitwise_or(edge_fine, thr))
+    # 形态学闭合桥接断边, 但核不要太大 (否则标样边界被闭合掉)
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
 
-    contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # RETR_TREE: 检测嵌套轮廓 (标样在大货上面 → 子轮廓)
+    contours, hierarchy = cv2.findContours(combined, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     results: list[RectCandidate] = []
 
-    for cnt in contours:
+    for idx, cnt in enumerate(contours):
         area = float(cv2.contourArea(cnt))
-        if area < image_area * 0.005:
+        if area < image_area * 0.003:
             continue
 
         rect = cv2.minAreaRect(cnt)
@@ -414,15 +442,88 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
             continue
 
         rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
+        # 地板膜矩形度要求: 降低到 0.45 (大板子可能有轻微弯曲)
+        if rectangularity < 0.40:
+            continue
+
         box = cv2.boxPoints(rect).astype(np.float32)
         center = (float(rect[0][0]), float(rect[0][1]))
-        results.append(RectCandidate(quad=box, area=area, rect_area=rect_area, rectangularity=rectangularity, center=center))
+        results.append(RectCandidate(quad=box, area=area, rect_area=rect_area,
+                                     rectangularity=rectangularity, center=center))
 
     results.sort(key=lambda c: c.rect_area, reverse=True)
     return results
 
 
-def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, int, int]) -> tuple[RectCandidate | None, RectCandidate | None, dict[str, Any]]:
+def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> RectCandidate | None:
+    """
+    二次检测: 在 board 区域内部用更敏感的方法找 sample.
+    用于标样颜色和大货相近、主检测找不到的情况.
+
+    方法: 裁切 board 区域 → 锐化 → 高灵敏度 Canny → 找内部矩形.
+    """
+    h, w = image_bgr.shape[:2]
+    # Warp board to rectangle
+    quad = order_quad(board_quad)
+    widths = [np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[3])]
+    heights = [np.linalg.norm(quad[3] - quad[0]), np.linalg.norm(quad[2] - quad[1])]
+    bw, bh = int(max(widths)), int(max(heights))
+    if bw < 100 or bh < 100:
+        return None
+    dst = np.array([[0, 0], [bw, 0], [bw, bh], [0, bh]], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(quad, dst)
+    warped = cv2.warpPerspective(image_bgr, M, (bw, bh))
+
+    # 在 warped board 内部做高灵敏度边缘检测
+    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+    # 锐化: Laplacian 增强微弱边缘
+    sharp = cv2.Laplacian(gray, cv2.CV_16S, ksize=3)
+    sharp = cv2.convertScaleAbs(sharp)
+    # 低阈值 Canny (捕捉微弱边界)
+    edges = cv2.Canny(gray, 20, 60)
+    edges = cv2.bitwise_or(edges, sharp)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    board_area = float(bw * bh)
+
+    best: RectCandidate | None = None
+    best_score = -1.0
+    for cnt in contours:
+        area = float(cv2.contourArea(cnt))
+        ratio = area / board_area
+        if not (0.01 <= ratio <= 0.50):
+            continue
+        rect = cv2.minAreaRect(cnt)
+        rw2, rh2 = rect[1]
+        if rw2 < 20 or rh2 < 20:
+            continue
+        rect_area = float(rw2 * rh2)
+        if rect_area <= 0:
+            continue
+        rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
+        if rectangularity < 0.5:
+            continue
+        score = area * rectangularity
+        if score > best_score:
+            best_score = score
+            box = cv2.boxPoints(rect).astype(np.float32)
+            # 把坐标映射回原图
+            M_inv = cv2.getPerspectiveTransform(dst, quad)
+            box_orig = cv2.perspectiveTransform(box.reshape(1, -1, 2), M_inv).reshape(-1, 2)
+            center_orig = box_orig.mean(axis=0)
+            best = RectCandidate(
+                quad=box_orig.astype(np.float32),
+                area=area * (h * w / board_area),  # 近似缩放
+                rect_area=rect_area * (h * w / board_area),
+                rectangularity=rectangularity,
+                center=(float(center_orig[0]), float(center_orig[1])),
+            )
+    return best
+
+
+def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, int, int],
+                            image_bgr: np.ndarray | None = None) -> tuple[RectCandidate | None, RectCandidate | None, dict[str, Any]]:
     h, w = image_shape[:2]
     image_area = float(h * w)
 
@@ -454,12 +555,17 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
                 best_score = score
                 sample = c
 
+    # 二次检测: 如果主检测没找到标样, 用更敏感的方法在 board 内部找
+    if sample is None and board is not None and image_bgr is not None:
+        sample = _find_sample_inside_board(image_bgr, board.quad)
+
     diag = {
         "candidates": len(cands),
         "board_area_ratio": float(board.rect_area / image_area) if board is not None else 0.0,
         "board_rectangularity": float(board.rectangularity) if board is not None else 0.0,
         "sample_area_ratio_to_board": float(sample.rect_area / board.rect_area) if (board is not None and sample is not None) else 0.0,
         "sample_rectangularity": float(sample.rectangularity) if sample is not None else 0.0,
+        "sample_detection_method": "secondary" if (sample is not None and id(sample) not in {id(c) for c in cands}) else "primary",
     }
     return board, sample, diag
 
