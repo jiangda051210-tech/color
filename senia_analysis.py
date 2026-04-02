@@ -97,16 +97,23 @@ class DefectResult:
     details: list[str] = field(default_factory=list)
 
 
-def detect_mottling(cell_L_values: list[float], threshold_std: float = 2.5) -> tuple[bool, float]:
+def detect_mottling(cell_L_values: list[float], threshold_std: float = 2.5,
+                    profile: str = "solid") -> tuple[bool, float]:
     """
     发花检测: L通道网格标准差过大 = 发花.
-    原理: 均匀涂布 → L通道空间分布一致; 发花 → L通道标准差上升.
+    注意: 木纹/石纹膜天然有 L 值变化, 阈值需放宽.
     """
     if len(cell_L_values) < 4:
         return False, 0.0
+    # 按材质调整阈值: 纹理材质允许更大的 L 方差
+    profile_multiplier = {
+        "wood": 2.5, "stone": 2.2, "metallic": 1.3,
+        "solid": 1.0, "high_gloss": 0.9,
+    }.get(profile, 1.0)
+    adjusted_threshold = threshold_std * profile_multiplier
     std = statistics.stdev(cell_L_values)
-    severity = min(1.0, std / (threshold_std * 2))
-    return std > threshold_std, round(severity, 3)
+    severity = min(1.0, max(0.0, (std - adjusted_threshold * 0.5) / (adjusted_threshold * 1.5)))
+    return std > adjusted_threshold, round(severity, 3)
 
 
 def detect_streaks_fft(row_means: list[float], col_means: list[float],
@@ -116,16 +123,20 @@ def detect_streaks_fft(row_means: list[float], col_means: list[float],
     条纹表现为某个空间频率的异常峰值.
     """
     def _ac_energy(values: list[float]) -> float:
+        """AC能量比: 高频分量能量 / 总能量. 条纹 → 高频峰值 → 比值高."""
         n = len(values)
         if n < 4:
             return 0.0
         mean = sum(values) / n
-        centered = [v - mean for v in values]
-        # 简化 DFT: 计算 AC 分量总能量 / DC 分量能量
-        dc = abs(sum(centered))
-        ac = sum(c ** 2 for c in centered)
-        total = dc ** 2 + ac
-        return ac / max(total, 1e-12)
+        total_var = sum((v - mean) ** 2 for v in values)
+        if total_var < 1e-6:
+            return 0.0  # 完全均匀, 无条纹
+        # 相邻差分能量 (捕捉周期性交替变化 = 条纹特征)
+        diff_energy = sum((values[i] - values[i - 1]) ** 2 for i in range(1, n))
+        # 归一化: diff_energy / total_var, 均匀随机噪声约 2.0, 条纹 >> 2.0
+        ratio = diff_energy / (total_var + 1e-12)
+        # 映射到 0~1: ratio < 1.5 → 正常, > 3.0 → 明显条纹
+        return min(1.0, max(0.0, (ratio - 1.5) / 3.0))
 
     row_e = _ac_energy(row_means)
     col_e = _ac_energy(col_means)
@@ -165,12 +176,13 @@ def run_defect_pipeline(
     row_L_means: list[float],
     col_L_means: list[float],
     cell_dE_values: list[float],
+    profile: str = "solid",
 ) -> DefectResult:
     """运行完整缺陷检测管线B."""
     result = DefectResult()
 
-    # 发花
-    result.has_mottling, result.mottling_severity = detect_mottling(cell_L_values)
+    # 发花 (按材质调整阈值)
+    result.has_mottling, result.mottling_severity = detect_mottling(cell_L_values, profile=profile)
     if result.has_mottling:
         result.details.append(f"检测到发花 (L通道不均匀, 严重度={result.mottling_severity:.2f})")
 
@@ -298,6 +310,7 @@ def analyze_spatial_uniformity(
     grid_dE_values: list[float],
     grid_defects: DefectResult,
     cv_threshold: float = 0.25,
+    profile: str = "solid",
 ) -> UniformityResult:
     """
     核心判据:
@@ -306,6 +319,13 @@ def analyze_spatial_uniformity(
       - 两者兼有 → 混合问题
     """
     result = UniformityResult(zone_deviations=grid_dE_values)
+
+    # 按材质调整 CV 阈值: 纹理材质允许更高的空间变异
+    profile_cv = {
+        "wood": 0.40, "stone": 0.35, "metallic": 0.20,
+        "solid": 0.25, "high_gloss": 0.18,
+    }
+    cv_threshold = profile_cv.get(profile, cv_threshold)
 
     if len(grid_dE_values) < 2:
         return result
@@ -405,6 +425,7 @@ def run_full_analysis(
     grid_cols: int = 8,
     thresholds: ThresholdConfig | None = None,
     capture_confidence: float = 1.0,
+    profile: str = "solid",
 ) -> FullAnalysisResult:
     """
     运行完整双管线分析.
@@ -440,13 +461,13 @@ def run_full_analysis(
         col_cells = [cell_L[r * n_cols + c] for r in range(n_rows) if r * n_cols + c < len(cell_L)]
         col_L_means.append(statistics.mean(col_cells) if col_cells else 0.0)
 
-    defects = run_defect_pipeline(cell_L, row_L_means, col_L_means, grid_dE_values)
+    defects = run_defect_pipeline(cell_L, row_L_means, col_L_means, grid_dE_values, profile=profile)
 
     # M4: 三级判定
     judgment = judge_three_tier(color_dev, defects, thresholds, capture_confidence)
 
     # M6: 空间均匀性
-    uniformity = analyze_spatial_uniformity(grid_dE_values, defects)
+    uniformity = analyze_spatial_uniformity(grid_dE_values, defects, profile=profile)
     judgment.uniformity = "uniform" if uniformity.is_uniform else "non_uniform"
     judgment.root_cause_hint = uniformity.root_cause
 

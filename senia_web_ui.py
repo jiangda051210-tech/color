@@ -267,6 +267,22 @@ body::after {{
 }}
 
 /* ── 动画 ── */
+/* ── 移动端适配 ── */
+@media (max-width: 640px) {{
+  .hero h1 {{ font-size: 26px; }}
+  .hero p {{ font-size: 14px; }}
+  .verdict-header {{ flex-direction: column; gap: 10px; }}
+  .verdict-badge {{ font-size: 24px; padding: 6px 16px; }}
+  .verdict-de strong {{ font-size: 22px; }}
+  .verdict-card {{ padding: 18px 14px; }}
+  .metrics-grid {{ grid-template-columns: repeat(2, 1fr); }}
+  .insights-row {{ grid-template-columns: 1fr; }}
+  .settings-row {{ flex-direction: column; }}
+  .field {{ min-width: 100%; }}
+  .btn-analyze {{ width: 100%; }}
+  .topbar {{ flex-direction: column; gap: 8px; }}
+}}
+
 @keyframes fadeInUp {{
   from {{ opacity: 0; transform: translateY(20px); }}
   to {{ opacity: 1; transform: translateY(0); }}
@@ -508,7 +524,7 @@ function renderResult(d) {{
       <div class="metric-value" style="font-size:16px">${{esc(d.profile?.used || 'auto')}}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Confidence</div>
+      <div class="metric-label">Capture Quality</div>
       <div class="metric-value">${{((d.result?.confidence?.overall||0)*100).toFixed(0)}}%</div>
     </div>
   </div>`;
@@ -537,7 +553,8 @@ function renderResult(d) {{
     html += `<div class="heatmap-section">
       <div class="insight-title" style="text-align:left;margin-bottom:16px">&#x1f5fa; Color Deviation Heatmap</div>
       <img src="/v1/senia/artifact?path=${{encodeURIComponent(heatmapUrl)}}" alt="heatmap"
-           onerror="this.parentElement.style.display='none'">
+           onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <p style="display:none;color:var(--text-dim);font-size:13px">Heatmap image unavailable. Check report.json for raw data.</p>
     </div>`;
   }}
 

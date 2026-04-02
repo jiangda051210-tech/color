@@ -3575,14 +3575,19 @@ def home_classic() -> str:
 @app.get("/v1/senia/artifact")
 def serve_senia_artifact(path: str = "") -> Response:
     """Serve generated analysis artifacts (heatmap, detection overlay, etc.)."""
-    p = Path(path)
+    p = Path(path).resolve()
+    allowed_root = DEFAULT_OUTPUT_ROOT.resolve()
+    # Security: only serve files under the output directory
+    if not str(p).startswith(str(allowed_root)):
+        raise HTTPException(status_code=403, detail="forbidden: path outside output directory")
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
-    # Security: only serve from output dirs
-    if ".." in str(p):
-        raise HTTPException(status_code=403, detail="forbidden")
     suffix = p.suffix.lower()
-    media_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".json": "application/json"}
+    allowed_suffixes = {".png", ".jpg", ".jpeg", ".json", ".html"}
+    if suffix not in allowed_suffixes:
+        raise HTTPException(status_code=403, detail="forbidden: unsupported file type")
+    media_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                   ".json": "application/json", ".html": "text/html"}
     return FileResponse(str(p), media_type=media_types.get(suffix, "application/octet-stream"))
 
 
@@ -6810,11 +6815,50 @@ async def senia_analyze_endpoint(
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    _log.info("senia_analyze",
-              tier=report["tier"],
-              dE00=report["result"]["summary"]["avg_delta_e00"],
-              profile=report["profile"]["used"],
-              lot_id=lot_id)
+    summary = report.get("result", {}).get("summary", {})
+    tier = report.get("tier", "UNKNOWN")
+    avg_de = summary.get("avg_delta_e00", 0.0)
+    used_profile = report.get("profile", {}).get("used", "auto")
+
+    _log.info("senia_analyze", tier=tier, dE00=avg_de, profile=used_profile, lot_id=lot_id)
+
+    # ── 持久化: 写入质量历史数据库 ──
+    try:
+        run_id = f"senia_{int(time.time())}_{lot_id or 'auto'}"
+        record_run(
+            db_path=DEFAULT_HISTORY_DB,
+            run_id=run_id,
+            report=report,
+            line_id=report.get("detection", {}).get("sample_source", ""),
+            product_code=product_code,
+            lot_id=lot_id,
+        )
+    except Exception:
+        _log.warning("senia_record_run_failed", lot_id=lot_id)
+
+    # ── 事件总线: 通知 MES/ERP ──
+    try:
+        EVENT_BUS.publish(QualityDecisionEvent(
+            lot_id=lot_id,
+            product_code=product_code,
+            decision=tier,
+            avg_delta_e=avg_de,
+            profile=used_profile,
+        ))
+    except Exception:
+        pass
+
+    # ── 图片存储: 注册原图到 ImageStore ──
+    try:
+        IMAGE_STORE.save(
+            data=raw,
+            lot_id=lot_id,
+            category="senia_analysis",
+            product_code=product_code,
+            filename=image.filename or "upload.jpg",
+        )
+    except Exception:
+        pass
 
     return report
 
