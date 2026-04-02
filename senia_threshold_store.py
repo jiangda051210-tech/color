@@ -159,9 +159,10 @@ class ThresholdStore:
                 "overrides": self._overrides,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
-            self._config_path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            content = json.dumps(data, indent=2, ensure_ascii=False)
+            # Atomic write: write to temp file then rename
+            tmp = self._config_path.with_suffix(".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(self._config_path)
         except OSError:
             pass

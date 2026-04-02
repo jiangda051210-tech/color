@@ -153,21 +153,19 @@ class OnlineLearner:
 
         adj = self._adjustments[profile]
 
+        MAX_ADJ = 0.5  # 累积调整上限: ±0.5 ΔE
+
         if fb.system_tier == "MARGINAL" and fb.operator_tier == "PASS":
-            # 系统太严: 上调 pass 阈值
-            adj["pass_dE_adj"] += lr * 0.3
+            adj["pass_dE_adj"] = min(MAX_ADJ, adj["pass_dE_adj"] + lr * 0.3)
             return {"action": "relax_pass", "delta": round(lr * 0.3, 4)}
         elif fb.system_tier == "PASS" and fb.operator_tier in ("MARGINAL", "FAIL"):
-            # 系统太松: 下调 pass 阈值
-            adj["pass_dE_adj"] -= lr * 0.3
+            adj["pass_dE_adj"] = max(-MAX_ADJ, adj["pass_dE_adj"] - lr * 0.3)
             return {"action": "tighten_pass", "delta": round(-lr * 0.3, 4)}
         elif fb.system_tier == "FAIL" and fb.operator_tier in ("PASS", "MARGINAL"):
-            # 系统太严在 fail 边界: 上调 marginal 阈值
-            adj["marginal_dE_adj"] += lr * 0.3
+            adj["marginal_dE_adj"] = min(MAX_ADJ, adj["marginal_dE_adj"] + lr * 0.3)
             return {"action": "relax_marginal", "delta": round(lr * 0.3, 4)}
         elif fb.system_tier == "MARGINAL" and fb.operator_tier == "FAIL":
-            # 系统太松在 marginal 边界: 下调 marginal 阈值
-            adj["marginal_dE_adj"] -= lr * 0.3
+            adj["marginal_dE_adj"] = max(-MAX_ADJ, adj["marginal_dE_adj"] - lr * 0.3)
             return {"action": "tighten_marginal", "delta": round(-lr * 0.3, 4)}
 
         return {"action": "unknown_case"}
@@ -401,19 +399,19 @@ class RecipeDigitalTwin:
 
     @staticmethod
     def _solve_least_squares(X: list[list[float]], y: list[float], dim: int) -> list[float]:
-        """Solve X @ c = y via normal equations."""
+        """Solve X @ c = y via normal equations. Raises ValueError if singular."""
         n = len(X)
-        # X^T X
         ata = [[sum(X[k][i] * X[k][j] for k in range(n)) for j in range(dim)] for i in range(dim)]
-        # X^T y
         atb = [sum(X[k][i] * y[k] for k in range(n)) for i in range(dim)]
 
-        # Gaussian elimination
+        # Gaussian elimination with partial pivoting
         m = [row[:] + [atb[i]] for i, row in enumerate(ata)]
+        singular_count = 0
         for i in range(dim):
             max_row = max(range(i, dim), key=lambda r: abs(m[r][i]))
             m[i], m[max_row] = m[max_row], m[i]
-            if abs(m[i][i]) < 1e-12:
+            if abs(m[i][i]) < 1e-10:
+                singular_count += 1
                 continue
             for j in range(i + 1, dim):
                 factor = m[j][i] / m[i][i]
@@ -421,9 +419,12 @@ class RecipeDigitalTwin:
                     m[j][k] -= factor * m[i][k]
 
         # Back substitution
+        if singular_count > dim // 2:
+            raise ValueError(f"Matrix too singular ({singular_count}/{dim} zero pivots), need more diverse data")
+
         result = [0.0] * dim
         for i in range(dim - 1, -1, -1):
-            if abs(m[i][i]) < 1e-12:
+            if abs(m[i][i]) < 1e-10:
                 continue
             result[i] = (m[i][dim] - sum(m[i][j] * result[j] for j in range(i + 1, dim))) / m[i][i]
         return result

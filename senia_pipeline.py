@@ -118,13 +118,21 @@ def run_pipeline(
 
     返回 SessionRecord 含完整结果.
     """
+    # 输入验证
+    if not ref_rgb_cells:
+        raise ValueError("ref_rgb_cells is empty — need at least 1 reference color sample")
+    if not sample_rgb_cells:
+        raise ValueError("sample_rgb_cells is empty — need at least 1 sample color sample")
+
     start = time.perf_counter()
     session_id = f"{time.strftime('%Y%m%d%H%M%S')}_{hashlib.md5(f'{lot_id}{time.time()}'.encode()).hexdigest()[:8]}"
 
     # ── Step 1: 色彩校正 (M1) ──
     # 如果有 CCM, 应用; 否则直接用原始值 (假设已校准或无色卡)
+    # 注意: CCM 只在此处应用一次, 不要在下游再次应用
+    ccm_applied = ccm is not None
     def to_lab(r: int, g: int, b: int) -> tuple[float, float, float]:
-        if ccm:
+        if ccm_applied and ccm:
             from senia_calibration import apply_ccm
             r, g, b = apply_ccm(ccm, r, g, b)
         return srgb_to_lab_d50(r, g, b)

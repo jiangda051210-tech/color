@@ -187,6 +187,10 @@ def gray_world_correction(
     b_avg = sum(v[2] for v in rgb_values) / n
     gray = (r_avg + g_avg + b_avg) / 3.0
 
+    # 全黑图像: 灰世界无法校正, 直接返回原值
+    if gray < 1.0:
+        return rgb_values
+
     if r_avg < 1:
         r_avg = 1
     if g_avg < 1:

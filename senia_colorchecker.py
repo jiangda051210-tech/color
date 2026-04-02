@@ -153,8 +153,8 @@ def _extract_24_patches(
     假设色卡为 4行×6列排列.
     """
     h, w = card_bgr.shape[:2]
-    if h < 40 or w < 60:
-        return None
+    if h < 60 or w < 90:
+        return None  # Too small for reliable patch extraction
 
     cell_h = h / rows
     cell_w = w / cols
@@ -172,8 +172,7 @@ def _extract_24_patches(
             x1 = min(w, cx + patch_w // 2)
             patch = card_bgr[y0:y1, x0:x1]
             if patch.size == 0:
-                patches.append((128, 128, 128))
-                continue
+                return None  # Empty patch region → extraction failed
             mean_bgr = patch.mean(axis=(0, 1))
             patches.append((int(mean_bgr[2]), int(mean_bgr[1]), int(mean_bgr[0])))
 

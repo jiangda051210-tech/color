@@ -275,8 +275,8 @@ def fit_ccm_least_squares(
         det = (ata[0][0] * (ata[1][1] * ata[2][2] - ata[1][2] * ata[2][1])
                - ata[0][1] * (ata[1][0] * ata[2][2] - ata[1][2] * ata[2][0])
                + ata[0][2] * (ata[1][0] * ata[2][1] - ata[1][1] * ata[2][0]))
-        if abs(det) < 1e-12:
-            # 退化矩阵: 使用单位矩阵
+        if abs(det) < 1e-8:
+            # 退化或近退化矩阵: 回退到单位矩阵 (输入色块颜色差异不足)
             ccm[ch] = [1.0 if j == ch else 0.0 for j in range(3)]
             continue
 

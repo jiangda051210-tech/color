@@ -255,9 +255,9 @@ def judge_three_tier(
     reasons: list[str] = []
 
     # Step 1: 色差基础分档
-    if color.dE00 < t.pass_dE:
+    if color.dE00 <= t.pass_dE:
         tier = "PASS"
-        reasons.append(f"ΔE00={color.dE00:.2f} < {t.pass_dE} → 合格")
+        reasons.append(f"ΔE00={color.dE00:.2f} ≤ {t.pass_dE} → 合格")
     elif color.dE00 < t.marginal_dE:
         tier = "MARGINAL"
         reasons.append(f"ΔE00={color.dE00:.2f} 在 {t.pass_dE}~{t.marginal_dE} 之间 → 临界")
@@ -432,6 +432,8 @@ def run_full_analysis(
     """
     运行完整双管线分析.
 
+    Raises ValueError if grid dimensions don't match input data.
+
     参数:
       ref_lab: 标样整体平均 Lab
       sample_lab: 打样整体平均 Lab
@@ -442,6 +444,15 @@ def run_full_analysis(
       capture_confidence: 拍摄质量置信度 (0~1)
     """
     import time as _time
+
+    # 输入验证
+    expected = grid_rows * grid_cols
+    if len(grid_ref_labs) != expected or len(grid_sample_labs) != expected:
+        n_ref, n_smp = len(grid_ref_labs), len(grid_sample_labs)
+        raise ValueError(
+            f"Grid size mismatch: expected {grid_rows}x{grid_cols}={expected} cells, "
+            f"got ref={n_ref}, sample={n_smp}"
+        )
 
     # 管线 A: 整体色偏
     color_dev = compute_color_deviation(ref_lab, sample_lab)
