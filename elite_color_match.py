@@ -480,40 +480,34 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
     warped = cv2.warpPerspective(image_bgr, M, (bw, bh))
     board_area = float(bw * bh)
 
-    # === 策略 A: 局部颜色差异 (最可靠) ===
+    # === 策略 A: 局部颜色差异 ===
     # 把 board 分成粗网格, 找颜色和全局均值偏差最大的矩形区域
     lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB).astype(np.float32)
     lab[..., 0] *= (100.0 / 255.0)
     lab[..., 1] -= 128.0
     lab[..., 2] -= 128.0
-
     global_mean = lab.reshape(-1, 3).mean(axis=0)
 
-    # 滑动窗口搜索: 不同尺寸的矩形
     best: RectCandidate | None = None
     best_diff = -1.0
 
-    for scale_h in [0.15, 0.20, 0.25, 0.30]:
-        for scale_w in [0.20, 0.30, 0.40]:
+    for scale_h in [0.15, 0.20, 0.25, 0.30, 0.35]:
+        for scale_w in [0.15, 0.25, 0.35, 0.45]:
             win_h = int(bh * scale_h)
             win_w = int(bw * scale_w)
             if win_h < 40 or win_w < 40:
                 continue
             step_h = max(win_h // 3, 10)
             step_w = max(win_w // 3, 10)
-
             for y in range(0, bh - win_h, step_h):
                 for x in range(0, bw - win_w, step_w):
                     region = lab[y:y + win_h, x:x + win_w]
                     region_mean = region.reshape(-1, 3).mean(axis=0)
                     diff = float(np.sqrt(np.sum((region_mean - global_mean) ** 2)))
-
                     area_ratio = (win_h * win_w) / board_area
                     if not (0.02 <= area_ratio <= 0.45):
                         continue
-
-                    # 标样区域的颜色应该比全局均值有可检测的差异
-                    if diff > best_diff and diff > 0.8:
+                    if diff > best_diff and diff > 0.5:
                         best_diff = diff
                         box_warp = np.array([
                             [x, y], [x + win_w, y],
@@ -521,8 +515,7 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
                         ], dtype=np.float32)
                         M_inv = cv2.getPerspectiveTransform(dst, quad)
                         box_orig = cv2.perspectiveTransform(
-                            box_warp.reshape(1, -1, 2), M_inv
-                        ).reshape(-1, 2)
+                            box_warp.reshape(1, -1, 2), M_inv).reshape(-1, 2)
                         center = box_orig.mean(axis=0)
                         best = RectCandidate(
                             quad=box_orig.astype(np.float32),
