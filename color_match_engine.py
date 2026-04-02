@@ -276,12 +276,23 @@ def build_recommendations(d_l: np.ndarray, d_c: np.ndarray, d_h_deg: np.ndarray,
     return recs
 
 
-def score_label(value: float) -> str:
-    if value <= 0.8:
+DEFAULT_SCORE_THRESHOLDS: dict[str, float] = {
+    "PERFECT": 0.8,
+    "GOOD": 1.5,
+    "WARNING": 2.5,
+}
+
+
+def score_label(
+    value: float,
+    thresholds: dict[str, float] | None = None,
+) -> str:
+    t = thresholds or DEFAULT_SCORE_THRESHOLDS
+    if value <= t.get("PERFECT", 0.8):
         return "PERFECT"
-    if value <= 1.5:
+    if value <= t.get("GOOD", 1.5):
         return "GOOD"
-    if value <= 2.5:
+    if value <= t.get("WARNING", 2.5):
         return "WARNING"
     return "FAIL"
 

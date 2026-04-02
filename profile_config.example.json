@@ -10,6 +10,11 @@
         "dL": 0.35,
         "dC": 0.40,
         "dH_deg": 2.2
+      },
+      "score_thresholds": {
+        "PERFECT": 1.0,
+        "GOOD": 1.8,
+        "WARNING": 2.8
       }
     },
     "solid": {
@@ -17,6 +22,47 @@
         "avg_delta_e00": 0.9,
         "p95_delta_e00": 1.6,
         "max_delta_e00": 2.2
+      },
+      "score_thresholds": {
+        "PERFECT": 0.6,
+        "GOOD": 1.2,
+        "WARNING": 2.0
+      }
+    },
+    "stone": {
+      "targets": {
+        "avg_delta_e00": 1.8,
+        "p95_delta_e00": 3.0,
+        "max_delta_e00": 4.0
+      },
+      "score_thresholds": {
+        "PERFECT": 1.2,
+        "GOOD": 2.0,
+        "WARNING": 3.2
+      }
+    },
+    "metallic": {
+      "targets": {
+        "avg_delta_e00": 1.0,
+        "p95_delta_e00": 1.8,
+        "max_delta_e00": 2.5
+      },
+      "score_thresholds": {
+        "PERFECT": 0.7,
+        "GOOD": 1.4,
+        "WARNING": 2.2
+      }
+    },
+    "high_gloss": {
+      "targets": {
+        "avg_delta_e00": 0.8,
+        "p95_delta_e00": 1.4,
+        "max_delta_e00": 2.0
+      },
+      "score_thresholds": {
+        "PERFECT": 0.5,
+        "GOOD": 1.0,
+        "WARNING": 1.8
       }
     }
   }

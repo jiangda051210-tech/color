@@ -82,6 +82,14 @@ from elite_innovation_state import (
     save_color_passport,
     upsert_acceptance_profile,
 )
+from elite_backup import BackupManager
+from elite_batch_parallel import run_parallel_batch
+from elite_config_reload import ConfigStore
+from elite_event_bus import EventBus, FileQueueSubscriber, QualityDecisionEvent
+from elite_i18n import get_locale, set_locale, t
+from elite_image_store import ImageStore
+from elite_logging import get_logger, setup_logging
+from elite_report_pdf import generate_report
 from elite_runtime import load_runtime_settings
 from elite_web_console import (
     render_executive_brief_page,
@@ -94,7 +102,9 @@ from elite_web_console import (
 
 ROOT_DIR = Path(__file__).resolve().parent
 SETTINGS = load_runtime_settings(ROOT_DIR)
-APP_VERSION = "2.3.0"
+setup_logging(level=SETTINGS.log_level)
+_log = get_logger("elite_api")
+APP_VERSION = "2.4.0"
 DEFAULT_OUTPUT_ROOT = SETTINGS.default_output_root
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 DEFAULT_GLOB = "*.jpg,*.jpeg,*.png,*.bmp,*.tif,*.tiff,*.webp"
@@ -136,6 +146,28 @@ ALERT_DEAD_LETTER_PATH = SETTINGS.alert_dead_letter_path
 ALERT_DEAD_LETTER_LOCK = RLock()
 OPS_SUMMARY_CACHE_LOCK = RLock()
 OPS_SUMMARY_CACHE: dict[str, dict[str, Any]] = {}
+
+# ── New production modules ─────────────────────────────────
+CONFIG_STORE = ConfigStore(check_interval_sec=3.0)
+CONFIG_STORE.register("decision_policy", DEFAULT_DECISION_POLICY_CONFIG)
+CONFIG_STORE.register("customer_tier", DEFAULT_CUSTOMER_TIER_CONFIG)
+CONFIG_STORE.register("action_rules", DEFAULT_ACTION_RULES_CONFIG)
+
+IMAGE_STORE = ImageStore(root=DEFAULT_OUTPUT_ROOT / "image_archive")
+
+EVENT_BUS = EventBus(async_delivery=True)
+EVENT_BUS.add_subscriber(FileQueueSubscriber(DEFAULT_OUTPUT_ROOT / "event_queue"))
+
+BACKUP_MANAGER = BackupManager(
+    backup_dir=DEFAULT_OUTPUT_ROOT / "backups",
+    sources=[DEFAULT_HISTORY_DB, DEFAULT_INNOVATION_DB],
+    config_files=[DEFAULT_DECISION_POLICY_CONFIG, DEFAULT_CUSTOMER_TIER_CONFIG, DEFAULT_ACTION_RULES_CONFIG],
+)
+
+_log.info("modules_initialized", version=APP_VERSION,
+          config_count=len(CONFIG_STORE.status()),
+          image_root=str(IMAGE_STORE._root))
+
 SENSITIVE_QUERY_KEYS = {
     "api_key",
     "apikey",
@@ -6544,6 +6576,168 @@ def get_history_runs(
         limit=max(1, int(limit)),
     )
     return {"count": len(rows), "rows": rows}
+
+
+# ══════════════════════════════════════════════════════════
+# New Production Endpoints
+# ══════════════════════════════════════════════════════════
+
+
+@app.get("/v1/config/status")
+def get_config_status() -> dict[str, Any]:
+    """Return hot-reload status for all registered policy configs."""
+    return {"ok": True, "configs": CONFIG_STORE.status()}
+
+
+@app.post("/v1/config/reload")
+def reload_config(name: str | None = None) -> dict[str, Any]:
+    """Force-reload a specific config or all configs."""
+    if name:
+        data = CONFIG_STORE.reload(name)
+        return {"ok": True, "name": name, "keys": len(data)}
+    CONFIG_STORE.reload_all()
+    return {"ok": True, "reloaded": "all"}
+
+
+@app.get("/v1/images/usage")
+def get_image_usage() -> dict[str, Any]:
+    """Return image storage disk usage statistics."""
+    return IMAGE_STORE.disk_usage()
+
+
+@app.get("/v1/images/by-lot")
+def get_images_by_lot(lot_id: str, limit: int = 100) -> dict[str, Any]:
+    """List stored images for a given lot."""
+    rows = IMAGE_STORE.list_by_lot(lot_id, limit=max(1, min(limit, 500)))
+    return {"lot_id": lot_id, "count": len(rows), "images": rows}
+
+
+@app.post("/v1/images/cleanup")
+def cleanup_old_images(max_age_days: int = 180) -> dict[str, Any]:
+    """Delete images older than max_age_days."""
+    days = max(30, min(max_age_days, 730))
+    deleted = IMAGE_STORE.cleanup(max_age_days=days)
+    return {"ok": True, "deleted": deleted, "max_age_days": days}
+
+
+@app.post("/v1/report/pdf")
+def generate_pdf_report(
+    db_path: str = "",
+    run_id: str = "",
+    company_name: str = "SENIA",
+    language: str = "zh",
+) -> Response:
+    """Generate a PDF/HTML inspection report for a specific run."""
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    # Try to load the report from quality history
+    report_data: dict[str, Any] = {}
+    if db_path:
+        from elite_quality_history import load_run_report
+        try:
+            report_data = load_run_report(Path(db_path), run_id) or {}
+        except Exception:
+            pass
+    if not report_data:
+        report_data = {"run_id": run_id, "result": {"summary": {}}, "decision": {}, "profile": {}}
+    out_dir = _ensure_output_dir("reports")
+    output_path = out_dir / f"report_{run_id}"
+    result_path = generate_report(report_data, output_path, company_name, language)
+    media = "application/pdf" if result_path.suffix == ".pdf" else "text/html"
+    return FileResponse(str(result_path), media_type=media, filename=result_path.name)
+
+
+@app.get("/v1/events/dead-letters")
+def get_event_dead_letters() -> dict[str, Any]:
+    """Return events that failed delivery to all subscribers."""
+    letters = EVENT_BUS.get_dead_letters()
+    return {"count": len(letters), "dead_letters": letters[-100:]}
+
+
+@app.get("/v1/events/status")
+def get_event_bus_status() -> dict[str, Any]:
+    """Return event bus status."""
+    return {
+        "subscriber_count": EVENT_BUS.subscriber_count(),
+        "dead_letter_count": len(EVENT_BUS.get_dead_letters()),
+    }
+
+
+@app.post("/v1/backup/create")
+def create_backup() -> dict[str, Any]:
+    """Create a new backup of all databases and configs."""
+    result = BACKUP_MANAGER.backup()
+    _log.info("backup_created", path=str(result.backup_path),
+              size_mb=round(result.size_bytes / 1048576, 2))
+    return {
+        "ok": True,
+        "path": str(result.backup_path),
+        "size_bytes": result.size_bytes,
+        "sha256": result.sha256,
+        "duration_sec": result.duration_sec,
+        "sources": result.sources,
+    }
+
+
+@app.post("/v1/backup/rotate")
+def rotate_backups(keep: int = 7) -> dict[str, Any]:
+    """Rotate old backups, keeping only the most recent N."""
+    safe_keep = max(1, min(keep, 30))
+    deleted = BACKUP_MANAGER.rotate(keep=safe_keep)
+    return {"ok": True, "deleted": deleted, "kept": safe_keep}
+
+
+@app.get("/v1/backup/list")
+def list_backups() -> dict[str, Any]:
+    """List all available backups."""
+    backups = BACKUP_MANAGER.list_backups()
+    return {"count": len(backups), "backups": backups}
+
+
+@app.get("/v1/backup/status")
+def get_backup_status() -> dict[str, Any]:
+    """Return backup system status."""
+    return BACKUP_MANAGER.status()
+
+
+@app.get("/v1/i18n/locales")
+def get_available_locales() -> dict[str, Any]:
+    """Return supported locales."""
+    from elite_i18n import available_locales, all_keys
+    return {"locales": available_locales(), "message_count": len(all_keys())}
+
+
+@app.post("/v1/batch/parallel")
+async def run_parallel_batch_endpoint(
+    batch_dir: str = Form(""),
+    profile: str = Form("auto"),
+    max_workers: int = Form(4),
+    glob_pattern: str = Form("*.jpg"),
+) -> dict[str, Any]:
+    """Run parallel batch analysis on a directory of images."""
+    if not batch_dir:
+        raise HTTPException(status_code=400, detail="batch_dir is required")
+    dir_path = Path(batch_dir)
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"directory not found: {batch_dir}")
+    image_paths = sorted(dir_path.glob(glob_pattern))
+    if not image_paths:
+        return {"ok": True, "total": 0, "message": "no images found"}
+    safe_workers = max(1, min(max_workers, 16))
+    result = run_parallel_batch(
+        image_paths=image_paths,
+        mode="single",
+        profile=profile,
+        max_workers=safe_workers,
+    )
+    _log.info("batch_complete", total=result.total, success=result.success,
+              failed=result.failed, elapsed=result.elapsed_sec)
+    return {
+        "ok": True,
+        **result.summary(),
+        "results": result.results[:50],
+        "errors": result.errors[:20],
+    }
 
 
 if __name__ == "__main__":
