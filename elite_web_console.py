@@ -667,7 +667,7 @@ HOME_PAGE_TEMPLATE = """
     }
 
     const MAX_UPLOAD_MB = 20;
-    const ALLOWED_IMAGE_EXTS = /\.(jpe?g|png|bmp|tiff?|webp|gif)$/i;
+    const ALLOWED_IMAGE_EXTS = /\\.(jpe?g|png|bmp|tiff?|webp|gif)$/i;
 
     function validateFiles(form, out) {
       for (const [k, v] of new FormData(form).entries()) {
@@ -1970,7 +1970,7 @@ SMART_HOME_PAGE_TEMPLATE = """
     }
 
     const MAX_UPLOAD_BYTES_SMART = 20 * 1024 * 1024;
-    const ALLOWED_IMG_RE = /\.(jpe?g|png|bmp|tiff?|webp|gif)$/i;
+    const ALLOWED_IMG_RE = /\\.(jpe?g|png|bmp|tiff?|webp|gif)$/i;
 
     function validateSmartFiles() {
       const inputs = ["#single-image", "#dual-reference", "#dual-film"];

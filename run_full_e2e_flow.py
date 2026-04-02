@@ -178,7 +178,6 @@ def main(argv: list[str] | None = None) -> int:
     ref = (root / "demo_data" / "sample_reference.png").resolve()
     film = (root / "demo_data" / "film_capture.png").resolve()
     out_dir = (root / "out_e2e_flow").resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
     history_db = (root / "quality_history.sqlite").resolve()
     innovation_db = (root / "innovation_state.sqlite").resolve()
 
@@ -203,6 +202,16 @@ def main(argv: list[str] | None = None) -> int:
 
     status, body = _get(base, "/v1/system/status")
     _assert_200("system_status", status, body)
+    if isinstance(body, dict):
+        output_root_raw = (
+            body.get("paths", {}).get("output_root")
+            if isinstance(body.get("paths"), dict)
+            else None
+        )
+        if output_root_raw:
+            output_root = Path(str(output_root_raw)).resolve()
+            out_dir = (output_root / "out_e2e_flow").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
     print("system status ok")
 
     status, body = _get(base, "/v1/system/self-test", headers_extra=admin_headers)
