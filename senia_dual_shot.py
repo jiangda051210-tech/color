@@ -98,7 +98,11 @@ def analyze_dual_shot(
         if not pf["ok"]:
             raise RuntimeError(f"{name}照片质量不合格: " + "; ".join(pf["errors"]))
 
-    # ── 处理标样 ──
+    # ── 高精度处理 (使用 precision engine) ──
+    from senia_advanced_color import (
+        adaptive_texture_suppress, weighted_robust_mean, precision_dual_analysis,
+    )
+
     ref_mask = build_material_mask(ref_bgr.shape[:2], border_ratio=0.05)
     ref_invalid = build_invalid_mask(ref_bgr)
     ref_mask &= ~ref_invalid
@@ -106,16 +110,15 @@ def analyze_dual_shot(
     ref_wb, ref_gains = apply_gray_world(ref_bgr, ref_mask)
     if enable_shading_correction:
         ref_wb = apply_shading_correction(ref_wb, ref_mask)
-    ref_tone = texture_suppress(ref_wb)
+    ref_tone = adaptive_texture_suppress(ref_wb, ref_mask)  # 自适应纹理抑制
     ref_lab = bgr_to_lab_float(ref_tone)
-    ref_mean, ref_std, ref_used = robust_mean_lab(ref_lab, ref_mask)
+    ref_mean, ref_conf = weighted_robust_mean(ref_lab, ref_mask)  # 加权稳健统计
 
-    # ── 处理大货 ──
     smp_mask = build_material_mask(smp_bgr.shape[:2], border_ratio=0.05)
     smp_invalid = build_invalid_mask(smp_bgr)
     smp_mask &= ~smp_invalid
 
-    # Paired WB: 用标样的 WB 增益应用到大货 (保持相对一致)
+    # Paired WB
     smp_wb = smp_bgr.copy().astype(np.float32)
     for ch in range(3):
         smp_wb[..., ch] = np.clip(smp_bgr[..., ch].astype(np.float32) * ref_gains[ch], 0, 255)
@@ -123,15 +126,18 @@ def analyze_dual_shot(
 
     if enable_shading_correction:
         smp_wb = apply_shading_correction(smp_wb, smp_mask)
-    smp_tone = texture_suppress(smp_wb)
+    smp_tone = adaptive_texture_suppress(smp_wb, smp_mask)  # 自适应纹理抑制
     smp_lab = bgr_to_lab_float(smp_tone)
-    smp_mean, smp_std, smp_used = robust_mean_lab(smp_lab, smp_mask)
+    smp_mean, smp_conf = weighted_robust_mean(smp_lab, smp_mask)  # 加权稳健统计
 
     # ── 材质识别 ──
     inferred_profile, profile_metrics = infer_profile(smp_tone, smp_mask, profile_name)
     profile = PROFILES[inferred_profile]
 
-    # ── 网格分析 ──
+    # ── 精度引擎: 多光源色差 + 指纹 ──
+    precision = precision_dual_analysis(ref_bgr, smp_bgr, inferred_profile, grid_rows, grid_cols)
+
+    # ── 网格分析 (用加权统计) ──
     grid: list[dict[str, Any]] = []
     de_values: list[float] = []
     h, w = smp_mask.shape
@@ -148,7 +154,7 @@ def analyze_dual_shot(
             if not used:
                 grid.append({"row": r+1, "col": c+1, "used": False, "delta_e00": None, "cell_L": None})
                 continue
-            cell_mean, _, _ = robust_mean_lab(smp_lab[y0:y1, x0:x1], cell_mask)
+            cell_mean, _ = weighted_robust_mean(smp_lab[y0:y1, x0:x1], cell_mask)
             de = float(ciede2000_np(cell_mean.reshape(1, 3), ref_vec)[0])
             de_values.append(de)
             grid.append({
@@ -210,6 +216,15 @@ def analyze_dual_shot(
     # ── 调色建议 ──
     from senia_recipe import generate_recipe_advice
     recipe = generate_recipe_advice(d_l, da, db, d_c, root_cause)
+
+    # ── Next-Gen 分析 (自动附加) ──
+    from senia_next_gen import (
+        metamerism_risk, delta_e_to_cost, batch_consistency_index,
+        compute_surface_fingerprint,
+    )
+    metamerism = metamerism_risk((float(ref_mean[0]), float(ref_mean[1]), float(ref_mean[2])))
+    cost = delta_e_to_cost(avg_de)
+    fingerprint = compute_surface_fingerprint(de_values, [float(g.get("cell_L", 50)) for g in grid if g.get("used")], grid_rows, grid_cols) if de_values else None
 
     # ── 热图 ──
     heatmap_path = output_dir / "heatmap.png"
@@ -280,6 +295,15 @@ def analyze_dual_shot(
             "capture_guidance": ["双拍模式: 精度最高, 置信度 0.95"],
             "grid": grid,
         },
+        # ── 高级分析 (自动嵌入) ──
+        "precision": precision,
+        "metamerism": metamerism,
+        "cost_risk": cost,
+        "surface_fingerprint": {
+            "uniformity_index": fingerprint.uniformity_index if fingerprint else 0,
+            "edge_effect_dE": fingerprint.edge_effect_dE if fingerprint else 0,
+            "hot_spots": fingerprint.hot_spots if fingerprint else 0,
+        } if fingerprint else None,
         "artifacts": {
             "heatmap": str(heatmap_path),
         },

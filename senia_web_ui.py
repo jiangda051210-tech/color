@@ -334,8 +334,16 @@ body::after {{
     </div>
   </div>
 
-  <!-- 上传区 -->
-  <div class="upload-zone" id="uploadZone">
+  <!-- 模式选择 -->
+  <div style="display:flex;gap:8px;margin-bottom:16px;justify-content:center">
+    <button id="modeBtn1" onclick="setMode('single')" style="padding:8px 20px;border-radius:8px;border:1px solid var(--accent);background:rgba(78,168,255,.1);color:var(--accent);cursor:pointer;font-size:14px;font-weight:600">
+      📷 一张照片 (快速)</button>
+    <button id="modeBtn2" onclick="setMode('dual')" style="padding:8px 20px;border-radius:8px;border:1px solid var(--border);background:var(--bg-glass);color:var(--text-secondary);cursor:pointer;font-size:14px;font-weight:600">
+      📷📷 两张照片 (精准)</button>
+  </div>
+
+  <!-- 单拍上传 -->
+  <div id="singleUpload" class="upload-zone" onclick="document.getElementById('fileInput').click()">
     <div class="upload-placeholder">
       <div class="upload-icon">📷</div>
       <div class="upload-title">点击选择照片，或拖拽到此处</div>
@@ -343,6 +351,28 @@ body::after {{
     </div>
     <img class="upload-preview" id="uploadPreview">
     <input type="file" id="fileInput" accept="image/*" style="display:none">
+  </div>
+
+  <!-- 双拍上传 -->
+  <div id="dualUpload" style="display:none;display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div class="upload-zone" onclick="document.getElementById('refInput').click()" style="padding:24px 16px">
+      <div class="upload-placeholder">
+        <div style="font-size:32px;margin-bottom:8px">📋</div>
+        <div style="font-size:15px;font-weight:600">标样照片</div>
+        <div style="font-size:12px;color:var(--text-secondary)">只拍标样，占满画面</div>
+      </div>
+      <img class="upload-preview" id="refPreview" style="max-height:180px">
+      <input type="file" id="refInput" accept="image/*" style="display:none">
+    </div>
+    <div class="upload-zone" onclick="document.getElementById('smpInput').click()" style="padding:24px 16px">
+      <div class="upload-placeholder">
+        <div style="font-size:32px;margin-bottom:8px">🔲</div>
+        <div style="font-size:15px;font-weight:600">大货照片</div>
+        <div style="font-size:12px;color:var(--text-secondary)">只拍大货，占满画面</div>
+      </div>
+      <img class="upload-preview" id="smpPreview" style="max-height:180px">
+      <input type="file" id="smpInput" accept="image/*" style="display:none">
+    </div>
   </div>
 
   <!-- 设置行 (简化: 只显示必填, 其余折叠) -->
@@ -388,32 +418,62 @@ body::after {{
 
 <script>
 const $ = id => document.getElementById(id);
-const uploadZone = $('uploadZone');
-const fileInput = $('fileInput');
-const preview = $('uploadPreview');
 const btnAnalyze = $('btnAnalyze');
 const progressBar = $('progressBar');
 const resultArea = $('resultArea');
 let selectedFile = null;
+let refFile = null, smpFile = null;
+let currentMode = 'single';
 
-// ── 上传处理 ──
-uploadZone.addEventListener('click', () => fileInput.click());
-uploadZone.addEventListener('dragover', e => {{ e.preventDefault(); uploadZone.classList.add('dragging'); }});
-uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragging'));
-uploadZone.addEventListener('drop', e => {{
-  e.preventDefault(); uploadZone.classList.remove('dragging');
-  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
-}});
-fileInput.addEventListener('change', () => {{ if (fileInput.files.length) handleFile(fileInput.files[0]); }});
-
-function handleFile(file) {{
-  selectedFile = file;
-  const reader = new FileReader();
-  reader.onload = e => {{ preview.src = e.target.result; }};
-  reader.readAsDataURL(file);
-  uploadZone.classList.add('has-file');
-  btnAnalyze.disabled = false;
+function setMode(mode) {{
+  currentMode = mode;
+  $('singleUpload').style.display = mode === 'single' ? 'block' : 'none';
+  $('dualUpload').style.display = mode === 'dual' ? 'grid' : 'none';
+  $('modeBtn1').style.borderColor = mode === 'single' ? 'var(--accent)' : 'var(--border)';
+  $('modeBtn1').style.background = mode === 'single' ? 'rgba(78,168,255,.1)' : 'var(--bg-glass)';
+  $('modeBtn1').style.color = mode === 'single' ? 'var(--accent)' : 'var(--text-secondary)';
+  $('modeBtn2').style.borderColor = mode === 'dual' ? 'var(--accent)' : 'var(--border)';
+  $('modeBtn2').style.background = mode === 'dual' ? 'rgba(78,168,255,.1)' : 'var(--bg-glass)';
+  $('modeBtn2').style.color = mode === 'dual' ? 'var(--accent)' : 'var(--text-secondary)';
+  checkReady();
 }}
+
+function checkReady() {{
+  if (currentMode === 'single') btnAnalyze.disabled = !selectedFile;
+  else btnAnalyze.disabled = !(refFile && smpFile);
+}}
+
+// ── 单拍上传 ──
+$('fileInput').addEventListener('change', () => {{
+  if ($('fileInput').files.length) {{
+    selectedFile = $('fileInput').files[0];
+    const reader = new FileReader();
+    reader.onload = e => {{ $('uploadPreview').src = e.target.result; }};
+    reader.readAsDataURL(selectedFile);
+    $('singleUpload').classList.add('has-file');
+    checkReady();
+  }}
+}});
+
+// ── 双拍上传 ──
+$('refInput').addEventListener('change', () => {{
+  if ($('refInput').files.length) {{
+    refFile = $('refInput').files[0];
+    const r = new FileReader();
+    r.onload = e => {{ $('refPreview').src = e.target.result; $('refPreview').style.display='block'; }};
+    r.readAsDataURL(refFile);
+    checkReady();
+  }}
+}});
+$('smpInput').addEventListener('change', () => {{
+  if ($('smpInput').files.length) {{
+    smpFile = $('smpInput').files[0];
+    const r = new FileReader();
+    r.onload = e => {{ $('smpPreview').src = e.target.result; $('smpPreview').style.display='block'; }};
+    r.readAsDataURL(smpFile);
+    checkReady();
+  }}
+}});
 
 // ── 分析进度动画 ──
 // 首次访问显示拍摄指引
@@ -456,13 +516,21 @@ btnAnalyze.addEventListener('click', async () => {{
   try {{
     showProgress(0);
     const form = new FormData();
-    form.append('image', selectedFile);
+    let url;
+    if (currentMode === 'dual') {{
+      form.append('reference', refFile);
+      form.append('sample', smpFile);
+      url = '/v1/senia/dual-shot';
+    }} else {{
+      form.append('image', selectedFile);
+      url = '/v1/senia/analyze';
+    }}
     form.append('profile', $('profile').value);
     form.append('lot_id', $('lotId').value);
     form.append('product_code', $('productCode').value);
-    form.append('grid', $('grid').value);
+    if (currentMode === 'single') form.append('grid', $('grid').value);
 
-    const resp = await fetch('/v1/senia/analyze', {{ method: 'POST', body: form }});
+    const resp = await fetch(url, {{ method: 'POST', body: form }});
     clearInterval(timer);
     showProgress(STEPS.length);
 
@@ -583,6 +651,45 @@ function renderResult(d) {{
       ${{reasons.map(r => `<p style="color:var(--text-dim);font-size:12px;margin-top:6px">&bull; ${{esc(r)}}</p>`).join('')}}
     </div>
   </div>`;
+
+  // ── 高级分析 (多光源 + 成本 + 指纹) ──
+  const prec = d.precision || {{}};
+  const mi = prec.multi_illuminant_dE || {{}};
+  const costR = d.cost_risk || {{}};
+  const met = d.metamerism || {{}};
+  if (Object.keys(mi).length > 0 || costR.total_risk) {{
+    html += `<div class="insights-row">`;
+    if (Object.keys(mi).length > 0) {{
+      html += `<div class="insight-card">
+        <div class="insight-title">💡 多光源色差预测</div>
+        ${{Object.entries(mi).map(([k,v]) =>
+          `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
+            <span>${{k==='A'?'暖色灯(A)':k==='F11'?'商场灯(TL84)':k==='F2'?'荧光灯(F2)':k==='LED'?'LED灯':k}}</span>
+            <span style="font-family:var(--mono);color:${{v>2?'var(--fail)':v>1.5?'var(--marginal)':'var(--pass)'}}">${{v.toFixed(2)}}</span>
+          </div>`).join('')}}
+        <div style="margin-top:8px;font-size:12px;color:var(--text-dim)">最差: ${{prec.worst_case_illuminant||'?'}} (ΔE=${{(prec.worst_case_dE||0).toFixed(2)}})</div>
+      </div>`;
+    }}
+    if (costR.total_risk !== undefined) {{
+      html += `<div class="insight-card">
+        <div class="insight-title">💰 色差风险量化</div>
+        <div style="font-size:24px;font-weight:700;font-family:var(--mono);color:${{costR.total_risk>1000?'var(--fail)':costR.total_risk>100?'var(--marginal)':'var(--pass)'}};margin:8px 0">
+          ¥${{costR.total_risk?.toLocaleString() || '0'}}</div>
+        <div style="font-size:12px;color:var(--text-secondary)">预估退货率: ${{costR.return_rate||0}}% | 投诉率: ${{costR.complaint_rate||0}}%</div>
+        <div style="margin-top:8px;padding:6px 12px;border-radius:6px;background:var(--bg-glass);font-size:13px">${{esc(costR.decision||'')}} — ${{esc(costR.reason||'')}}</div>
+      </div>`;
+    }}
+    html += `</div>`;
+  }}
+
+  // 同色异谱警告
+  if (met.risk_level === 'high' || met.risk_level === 'medium') {{
+    html += `<div style="background:var(--marginal-bg);border:1px solid rgba(255,193,77,.3);border-radius:var(--radius);padding:16px;margin-bottom:16px">
+      <div style="font-weight:600;color:var(--marginal);margin-bottom:6px">⚠️ 同色异谱风险: ${{met.risk_level === 'high' ? '高' : '中'}}</div>
+      ${{(met.risk_factors||[]).map(f => `<div style="font-size:13px;color:var(--text-secondary);margin-top:4px">· ${{esc(f)}}</div>`).join('')}}
+      <div style="font-size:12px;color:var(--text-dim);margin-top:8px">${{esc(met.recommendation||'')}}</div>
+    </div>`;
+  }}
 
   // 热图
   if (heatmapUrl) {{
