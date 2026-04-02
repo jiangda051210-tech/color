@@ -9,7 +9,7 @@ from typing import Any
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return default
 
 
@@ -67,8 +67,50 @@ def _safe_eval(expr: str, variables: dict[str, float]) -> bool:
         if isinstance(node, ast.Name):
             if node.id not in variables and node.id not in allowed_funcs:
                 raise ValueError(f"Unknown variable in condition: {node.id}")
-    value = eval(compile(tree, "<condition>", "eval"), {"__builtins__": {}}, {**allowed_funcs, **variables})  # noqa: S307
-    return bool(value)
+    return bool(_ast_eval_node(tree.body, {**allowed_funcs, **variables}))
+
+
+def _ast_eval_node(node: ast.AST, env: dict[str, Any]) -> Any:
+    """Recursively evaluate a validated AST node without using eval()."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return env[node.id]
+    if isinstance(node, ast.UnaryOp):
+        operand = _ast_eval_node(node.operand, env)
+        if isinstance(node.op, ast.USub):
+            return -operand
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        if isinstance(node.op, ast.Not):
+            return not operand
+    if isinstance(node, ast.BinOp):
+        left = _ast_eval_node(node.left, env)
+        right = _ast_eval_node(node.right, env)
+        ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
+               ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b,
+               ast.Mod: lambda a, b: a % b, ast.Pow: lambda a, b: a ** b}
+        return ops[type(node.op)](left, right)
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            return all(_ast_eval_node(v, env) for v in node.values)
+        return any(_ast_eval_node(v, env) for v in node.values)
+    if isinstance(node, ast.Compare):
+        left = _ast_eval_node(node.left, env)
+        cmp_ops = {ast.Lt: lambda a, b: a < b, ast.LtE: lambda a, b: a <= b,
+                   ast.Gt: lambda a, b: a > b, ast.GtE: lambda a, b: a >= b,
+                   ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b}
+        for op, comparator in zip(node.ops, node.comparators):
+            right = _ast_eval_node(comparator, env)
+            if not cmp_ops[type(op)](left, right):
+                return False
+            left = right
+        return True
+    if isinstance(node, ast.Call):
+        func = env[node.func.id]  # type: ignore[union-attr]
+        args = [_ast_eval_node(a, env) for a in node.args]
+        return func(*args)
+    raise ValueError(f"Unsupported AST node: {type(node).__name__}")
 
 
 def _extract_metric_context(report: dict[str, Any]) -> dict[str, float]:

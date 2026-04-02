@@ -3812,7 +3812,8 @@ def get_precision_observatory_module_js() -> str:
     if OBSERVATORY_MODULE_PATH.exists():
         body = OBSERVATORY_MODULE_PATH.read_text(encoding="utf-8", errors="replace")
         if build_error:
-            return f"/* observatory build warning: {build_error} */\n{body}"
+            safe_warning = build_error.replace("*/", "* /")
+            return f"/* observatory build warning: {safe_warning} */\n{body}"
         return body
     fallback_error = (build_error or "observatory module unavailable")
     # Escape for safe embedding in JS string context

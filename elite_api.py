@@ -6,7 +6,9 @@ import hmac
 import json
 import math
 import os
+import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
@@ -175,7 +177,7 @@ def _sanitize_query_string(query: str) -> str:
         return ""
     try:
         pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
-    except Exception:
+    except ValueError:
         return raw
     safe_pairs: list[tuple[str, str]] = []
     for key, value in pairs:
@@ -256,7 +258,7 @@ def _parse_optional_dict_json(payload_text: str | None, field_name: str) -> dict
         return None
     try:
         data = json.loads(raw)
-    except Exception as exc:  # noqa: BLE001
+    except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"{field_name} must be valid JSON") from exc
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON object")
@@ -292,7 +294,7 @@ def _parse_api_keys_map(raw: str) -> dict[str, str]:
                     key_to_role[key_text] = role_key
             if key_to_role:
                 return key_to_role
-    except Exception:
+    except (json.JSONDecodeError, KeyError, ValueError, AttributeError):
         pass
 
     # fallback format: "viewer:key1,operator:key2,admin:key3"
@@ -654,7 +656,6 @@ def _write_audit_event(event: dict[str, Any]) -> None:
     except Exception:
         # Audit logging must not block the business request path,
         # but we still log the failure to stderr for operational visibility.
-        import sys
         print("[WARN] audit log write failed", file=sys.stderr)
         return
 
@@ -670,7 +671,7 @@ def _parse_alert_webhook_map(raw_text: str, default_webhook: str) -> dict[str, s
         return mapping
     try:
         payload = json.loads(text)
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return mapping
     if not isinstance(payload, dict):
         return mapping
@@ -718,7 +719,7 @@ def _rotate_alert_dead_letter_if_needed() -> None:
     try:
         if ALERT_DEAD_LETTER_PATH.stat().st_size < max_bytes:
             return
-    except Exception:
+    except OSError:
         return
 
     backups = max(1, int(SETTINGS.alert_dead_letter_backups))
@@ -861,7 +862,7 @@ def _dispatch_alert_once(webhook: str, body: dict[str, Any]) -> bool:
         if provider in {"wecom", "dingtalk"} and raw:
             try:
                 parsed = json.loads(raw)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 return True
             if isinstance(parsed, dict):
                 code = parsed.get("errcode")
@@ -899,7 +900,7 @@ def _emit_alert(level: str, key: str, title: str, payload: dict[str, Any]) -> bo
     for idx in range(retries + 1):
         try:
             return _dispatch_alert_once(webhook=webhook, body=body)
-        except Exception as exc:  # noqa: BLE001
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = str(exc)
             if idx >= retries:
                 dead_event = {
@@ -987,7 +988,7 @@ def _decode_image_b64(raw: str) -> np.ndarray:
         payload = payload.split(",", 1)[1]
     try:
         buf = base64.b64decode(payload, validate=True)
-    except Exception as exc:  # noqa: BLE001
+    except (base64.binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid image b64: {exc}") from exc
     arr = np.frombuffer(buf, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1207,7 +1208,7 @@ def _policy_recommendation_brief(report: dict[str, Any]) -> dict[str, Any]:
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return default
 
 
@@ -3055,7 +3056,7 @@ def _build_cockpit_snapshot_payload(
         try:
             number = float(value)
             return number if math.isfinite(number) else default
-        except Exception:
+        except (TypeError, ValueError):
             return default
 
     auto_release_rate = _safe_float(executive_dict.get("auto_release_rate"), 0.0)
@@ -3175,7 +3176,7 @@ def _build_next_best_action_payload(
         try:
             number = float(value)
             return number if math.isfinite(number) else default
-        except Exception:
+        except (TypeError, ValueError):
             return default
 
     warning_level = str(cockpit_dict.get("warning_level") or risk_dict.get("warning_level") or "").strip().lower()

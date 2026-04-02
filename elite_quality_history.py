@@ -109,7 +109,7 @@ def init_db(db_path: Path) -> None:
 def _to_float(v: Any, default: float = 0.0) -> float:
     try:
         return float(v)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return default
 
 
