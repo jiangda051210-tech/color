@@ -409,18 +409,21 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
     image_area = h * w
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-
-    # 轻度模糊: 只消除噪点, 保留板子/标样边缘 (包括标样和大货之间的边界)
     smooth = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # 多尺度边缘检测: 粗 (找板子外边界) + 细 (找标样边界)
-    edge_coarse = cv2.Canny(smooth, 30, 100)
-    edge_fine = cv2.Canny(gray, 40, 120)  # 用原始灰度, 更敏感
-    thr = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                cv2.THRESH_BINARY_INV, 41, 8)
+    # 多策略边缘检测 (确保在各种背景下都能找到板子边界)
+    # 策略1: Canny 边缘 (擅长高对比度边界)
+    edge_canny = cv2.Canny(smooth, 30, 100)
 
-    combined = cv2.bitwise_or(edge_coarse, cv2.bitwise_or(edge_fine, thr))
-    # 形态学闭合桥接断边, 但核不要太大 (否则标样边界被闭合掉)
+    # 策略2: Otsu 全局阈值 (擅长分离板子和背景, 对真实工厂照片最有效)
+    _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # 策略3: 自适应阈值 (擅长局部对比度不均匀)
+    adapt = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY_INV, 51, 6)
+
+    # 合并三种策略
+    combined = cv2.bitwise_or(edge_canny, cv2.bitwise_or(otsu, adapt))
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
     combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
 
@@ -580,10 +583,13 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
     board = None
     for c in cands:
         ratio = c.rect_area / image_area
-        if 0.14 <= ratio <= 0.98 and c.rectangularity >= 0.52:
+        if 0.14 <= ratio <= 0.95 and c.rectangularity >= 0.45:
             board = c
             break
 
+    # 退回策略: 真实工厂照片中大货可能占满整个画面
+    # 如果没有 14%-95% 的候选, 取最大的候选作为 board
+    # (操作员拍照时总是对准大货, 所以最大区域=大货)
     if board is None and cands:
         board = cands[0]
 

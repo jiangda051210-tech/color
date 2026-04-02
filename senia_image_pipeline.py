@@ -223,6 +223,7 @@ def analyze_photo(
     enable_shading_correction: bool = True,
     lot_id: str = "",
     product_code: str = "",
+    sample_rect: tuple[int, int, int, int] | None = None,  # (x, y, w, h) 手动框选标样区域
 ) -> dict[str, Any]:
     """
     ★ 完整自动对色入口 — 从一张原始照片到最终判定+调色建议.
@@ -268,19 +269,38 @@ def analyze_photo(
     wet_film = detect_wet_or_film(image_bgr)
 
     # ── 2. 检测大货和标样区域 ──
-    # 先尝试 ArUco, 再退回轮廓检测
-    aruco_quad, aruco_info = detect_aruco_board_quad(image_bgr)
-    if aruco_quad is not None:
-        board_quad = aruco_quad
-        sample_source = "aruco"
-        cands = contour_candidates(image_bgr)
-        _, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape, image_bgr)
-        sample_quad = order_quad(sample_cand.quad) if sample_cand else None
+    # 优先级: 手动框选 > ArUco > 轮廓检测
+
+    # 如果操作员手动框选了标样区域, 直接使用
+    if sample_rect is not None:
+        sx, sy, sw, sh = sample_rect
+        sample_quad = np.array([
+            [sx, sy], [sx + sw, sy], [sx + sw, sy + sh], [sx, sy + sh]
+        ], dtype=np.float32)
+        # Board = 整张图减去标样
+        h_img, w_img = image_bgr.shape[:2]
+        board_quad = np.array([
+            [0, 0], [w_img, 0], [w_img, h_img], [0, h_img]
+        ], dtype=np.float32)
+        sample_source = "manual"
+        det_diag = {"candidates": 0, "board_area_ratio": 1.0, "sample_area_ratio_to_board": (sw * sh) / (w_img * h_img)}
     else:
-        cands = contour_candidates(image_bgr)
-        board_cand, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape, image_bgr)
-        if board_cand is None:
-            raise RuntimeError("未检测到大货区域, 请确保整版膜在画面中居中且与背景有对比度")
+        sample_quad = None
+
+    if sample_quad is None:
+        # 自动检测: 先尝试 ArUco, 再退回轮廓检测
+        aruco_quad, aruco_info = detect_aruco_board_quad(image_bgr)
+        if aruco_quad is not None:
+            board_quad = aruco_quad
+            sample_source = "aruco"
+            cands = contour_candidates(image_bgr)
+            _, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape, image_bgr)
+            sample_quad = order_quad(sample_cand.quad) if sample_cand else None
+        else:
+            cands = contour_candidates(image_bgr)
+            board_cand, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape, image_bgr)
+            if board_cand is None:
+                raise RuntimeError("未检测到大货区域, 请确保整版膜在画面中居中且与背景有对比度")
         board_quad = order_quad(board_cand.quad)
         sample_quad = order_quad(sample_cand.quad) if sample_cand is not None else None
         sample_source = "contour"
