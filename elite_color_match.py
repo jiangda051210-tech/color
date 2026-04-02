@@ -591,16 +591,25 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
     if board is not None:
         board_poly = order_quad(board.quad).reshape(-1, 1, 2)
         best_score = -1.0
+        # 计算 board 对角线长度 (用于判断"附近")
+        bq = order_quad(board.quad)
+        board_diag = float(np.linalg.norm(bq[2] - bq[0]))
+        near_threshold = board_diag * 0.15  # 15% 对角线距离内算"附近"
+
         for c in cands:
             if c is board:
                 continue
             rel = c.rect_area / max(board.rect_area, 1.0)
-            if not (0.015 <= rel <= 0.50):
+            if not (0.008 <= rel <= 0.60):  # 放宽: 0.8%~60% (支持更小标样)
                 continue
-            inside = cv2.pointPolygonTest(board_poly, c.center, measureDist=False) >= 0
-            if not inside:
+            # 允许标样在 board 内部 或 附近 (解决"标样在旁边"的场景)
+            dist = cv2.pointPolygonTest(board_poly, c.center, measureDist=True)
+            inside_or_near = dist >= -near_threshold  # 负值=在外面, 但距离在阈值内
+            if not inside_or_near:
                 continue
-            score = c.rect_area * (0.45 + 0.55 * c.rectangularity)
+            # 优先选内部的, 其次选附近的
+            inside_bonus = 1.0 if dist >= 0 else 0.7
+            score = c.rect_area * (0.45 + 0.55 * c.rectangularity) * inside_bonus
             if score > best_score:
                 best_score = score
                 sample = c

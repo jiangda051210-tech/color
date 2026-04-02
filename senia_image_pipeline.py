@@ -255,6 +255,18 @@ def analyze_photo(
     if image_bgr is None:
         raise FileNotFoundError(f"无法读取图像: {image_path}")
 
+    # ── 1.5 图像质量预检 ──
+    from senia_preflight import preflight_check, detect_wet_or_film
+    preflight = preflight_check(image_bgr)
+    if not preflight["ok"]:
+        error_text = "照片质量不合格，无法分析:\n" + "\n".join(f"• {e}" for e in preflight["errors"])
+        if preflight["warnings"]:
+            error_text += "\n" + "\n".join(f"• {w}" for w in preflight["warnings"])
+        raise RuntimeError(error_text)
+
+    # 湿板/保护膜检测
+    wet_film = detect_wet_or_film(image_bgr)
+
     # ── 2. 检测大货和标样区域 ──
     # 先尝试 ArUco, 再退回轮廓检测
     aruco_quad, aruco_info = detect_aruco_board_quad(image_bgr)
@@ -285,19 +297,23 @@ def analyze_photo(
     board_warp, board_M, board_rect = warp_quad(image_bgr, board_quad)
 
     sample_warp, sample_M, sample_rect = warp_quad(image_bgr, sample_quad)
-    sample_on_board = cv2.perspectiveTransform(
-        sample_quad.reshape(1, -1, 2), board_M
-    ).reshape(-1, 2)
 
     # ── 4. 构建遮罩 (去除边框 + 手写/贴纸/反光) ──
     board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
     board_invalid = build_invalid_mask(board_warp)
     board_mask &= ~board_invalid
 
-    # 遮罩掉标样所在区域 (如果标样放在大货上)
-    board_mask_u8 = board_mask.astype(np.uint8)
-    cv2.fillConvexPoly(board_mask_u8, sample_on_board.astype(np.int32), 0)
-    board_mask = board_mask_u8.astype(bool)
+    # 遮罩掉标样所在区域 (仅当标样在大货上面时)
+    board_poly = board_quad.reshape(-1, 1, 2).astype(np.float32)
+    sample_center = sample_quad.mean(axis=0)
+    sample_inside_board = cv2.pointPolygonTest(board_poly, tuple(sample_center), measureDist=False) >= 0
+    if sample_inside_board:
+        sample_on_board = cv2.perspectiveTransform(
+            sample_quad.reshape(1, -1, 2), board_M
+        ).reshape(-1, 2)
+        board_mask_u8 = board_mask.astype(np.uint8)
+        cv2.fillConvexPoly(board_mask_u8, sample_on_board.astype(np.int32), 0)
+        board_mask = board_mask_u8.astype(bool)
 
     sample_mask = None
     sample_mask = build_material_mask(sample_warp.shape[:2], border_ratio=0.06)
@@ -443,6 +459,14 @@ def analyze_photo(
         "deviation": deviation,                   # 偏差方向
         "recipe_advice": recipe,                  # 调色建议
         "uniformity": uniformity,                 # 配方 vs 工艺
+
+        # 质量预检
+        "preflight": {
+            "quality": preflight.get("quality", "unknown"),
+            "warnings": preflight.get("warnings", []),
+            "scores": preflight.get("scores", {}),
+        },
+        "surface_check": wet_film if wet_film.get("detected") else {"detected": False},
 
         # 详细数据
         "profile": {
