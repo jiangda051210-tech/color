@@ -39,12 +39,25 @@ const num = (v, d = NaN) => {
 };
 const mean = (arr) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0);
 const grade = (v) => (v < 0.5 ? ["Perfect", "#0ff0b4"] : v < 1 ? ["Excellent", "#34d399"] : v < 2 ? ["Good", "#a3e635"] : v < 3 ? ["Acceptable", "#fbbf24"] : v < 5 ? ["Need Tune", "#fb923c"] : ["Out", "#ef4444"]);
-const T = { bg: "#05060b", p: "#0a0b12", b: "#14151f", tx: "#d4d4e0", dim: "#76798d", m: "#2a2b3a", a: "#38bdf8", w: "#fb923c", r: "#f472b6", g: "#34d399", rd: "#ef4444", mono: "'IBM Plex Mono','JetBrains Mono',monospace", font: "'Outfit','Noto Sans SC',system-ui,sans-serif" };
+const T = { bg: "#060913", p: "#0f1628", b: "#24384f", tx: "#e7f2ff", dim: "#8ea3c0", m: "#4f6380", a: "#4cc9ff", w: "#f6ad55", r: "#ff7ab8", g: "#4ade80", rd: "#ff5d73", mono: "'IBM Plex Mono','JetBrains Mono',monospace", font: "'Outfit','Noto Sans SC',system-ui,sans-serif" };
 const glow = (c, s = 10) => `0 0 ${s}px ${c}30,0 0 ${2 * s}px ${c}10`;
 const tabs = [{ id: "overview", n: "Overview", c: T.a }, { id: "spc", n: "SPC", c: "#22d3ee" }, { id: "texture", n: "Texture", c: T.w }, { id: "spectral", n: "Spectral", c: "#a78bfa" }, { id: "aging", n: "Aging", c: T.r }, { id: "ink", n: "Ink", c: "#818cf8" }, { id: "observer", n: "Observer", c: "#f472b6" }, { id: "drift", n: "Drift", c: T.w }, { id: "blend", n: "Blend", c: "#22d3ee" }, { id: "supplier", n: "Supplier", c: "#fbbf24" }, { id: "shift", n: "Shift", c: T.g }, { id: "passport", n: "Passport", c: "#a78bfa" }];
+const roleProfiles = {
+  operator: { key: "operator", name: "操作工", color: T.g, tabs: ["overview", "ink", "drift", "passport"], mission: "先稳住产线，再做最小动作修正。" },
+  process: { key: "process", name: "工艺", color: T.w, tabs: ["overview", "spc", "texture", "aging", "ink", "drift", "blend"], mission: "优先判断工艺耦合，不盲目调配方。" },
+  quality: { key: "quality", name: "质量", color: "#22d3ee", tabs: ["overview", "spc", "spectral", "observer", "supplier", "shift", "passport"], mission: "先确认风险与证据，再决定放行策略。" },
+  executive: { key: "executive", name: "老板", color: T.a, tabs: ["overview", "spc", "aging", "drift", "supplier", "shift", "passport"], mission: "关注放行风险、客诉概率与经营后果。" },
+};
+const focusTabsByRole = {
+  operator: ["overview", "ink", "drift"],
+  process: ["overview", "spc", "drift"],
+  quality: ["overview", "spc", "spectral"],
+  executive: ["overview", "spc", "aging"],
+};
+const NETWORK_TIMEOUT_MS = 14000;
 const fallbackSpc = Array.from({ length: 24 }, (_, i) => 1.55 + Math.sin(i / 3) * 0.3 + i * 0.01);
 const fallbackDrift = Array.from({ length: 28 }, (_, i) => 1.2 + i * 0.05);
-const Panel = ({ t, c, children }) => <section style={{ background: T.p, border: `1px solid ${T.b}`, borderRadius: 14, marginBottom: 14, overflow: "hidden" }}>{t ? <div style={{ padding: "10px 14px", borderBottom: `1px solid ${T.b}`, display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 6, height: 6, borderRadius: 99, background: c || T.a, boxShadow: glow(c || T.a, 6) }} /><span style={{ fontSize: 11, color: T.dim, letterSpacing: 1, fontWeight: 700, textTransform: "uppercase" }}>{t}</span></div> : null}<div style={{ padding: "14px 16px" }}>{children}</div></section>;
+const Panel = ({ t, c, children }) => <section style={{ background: `linear-gradient(180deg,${T.p},${T.bg})`, border: `1px solid ${T.b}`, borderRadius: 14, marginBottom: 14, overflow: "hidden", boxShadow: "inset 0 1px 0 rgba(255,255,255,.03), 0 14px 30px rgba(0,0,0,.24)" }}>{t ? <div style={{ padding: "10px 14px", borderBottom: `1px solid ${T.b}`, display: "flex", alignItems: "center", gap: 8, background: "rgba(6,12,22,.62)" }}><span style={{ width: 6, height: 6, borderRadius: 99, background: c || T.a, boxShadow: glow(c || T.a, 6) }} /><span style={{ fontSize: 11, color: T.dim, letterSpacing: 1, fontWeight: 700, textTransform: "uppercase" }}>{t}</span></div> : null}<div style={{ padding: "14px 16px" }}>{children}</div></section>;
 const Tag = ({ t, c }) => <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 7, border: `1px solid ${(c || T.a)}35`, background: `${c || T.a}12`, color: c || T.a, fontSize: 10, fontWeight: 700 }}>{t}</span>;
 const Spark = ({ d, th, c = T.a, h = 90 }) => {
   const arr = Array.isArray(d) && d.length > 1 ? d : [0, 1], mn = Math.min(...arr), mx = Math.max(...arr, Number.isFinite(th) ? th : mn + 1), rg = Math.max(0.0001, mx - mn), w = 320;
@@ -60,9 +73,35 @@ const Radar = ({ l, c, h, s = 166 }) => {
   return <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>{[.33, .66, 1].map((lv) => { const ring = ax.map((x) => p(x.a, mx * lv)); return <polygon key={lv} points={ring.map((v) => `${v.x},${v.y}`).join(" ")} fill="none" stroke={T.b} strokeWidth=".8" />; })}{ax.map((x) => { const e = p(x.a, mx); return <line key={`a_${x.n}`} x1={cx} y1={cy} x2={e.x} y2={e.y} stroke={T.b} strokeWidth=".8" />; })}<polygon points={pts.map((v) => `${v.x},${v.y}`).join(" ")} fill={`${T.a}22`} stroke={T.a} strokeWidth="2" />{pts.map((v, i) => <circle key={i} cx={v.x} cy={v.y} r="4" fill={T.a} stroke={T.bg} strokeWidth="2" />)}</svg>;
 };
 const bootDefaults = () => {
-  if (typeof window === "undefined") return { dbPath: "", lineId: "", productCode: "" };
+  if (typeof window === "undefined") return { dbPath: "", lineId: "", productCode: "", uiRole: "operator", focusMode: true, advancedMode: false };
   const b = window.__SENIA_OBS_DEFAULTS__ || {}, q = new URLSearchParams(window.location.search || "");
-  return { dbPath: q.get("db_path") || b.dbPath || "", lineId: q.get("line_id") || b.lineId || "", productCode: q.get("product_code") || b.productCode || "" };
+  const role = String(q.get("ui_role") || "operator").toLowerCase();
+  const uiRole = roleProfiles[role] ? role : "operator";
+  const adv = String(q.get("advanced") || "").toLowerCase();
+  const focus = String(q.get("focus") || "").toLowerCase();
+  const persistedRaw = (() => {
+    try {
+      return window.localStorage.getItem("senia_observatory_ui_v1");
+    } catch (_err) {
+      return "";
+    }
+  })();
+  let persisted = {};
+  try {
+    persisted = persistedRaw ? JSON.parse(persistedRaw) : {};
+  } catch (_err) {
+    persisted = {};
+  }
+  const advancedMode = adv ? adv === "1" || adv === "true" : Boolean(persisted.advancedMode);
+  const focusMode = focus ? focus === "1" || focus === "true" : (persisted.focusMode !== undefined ? Boolean(persisted.focusMode) : uiRole === "operator");
+  return {
+    dbPath: q.get("db_path") || b.dbPath || "",
+    lineId: q.get("line_id") || b.lineId || "",
+    productCode: q.get("product_code") || b.productCode || "",
+    uiRole,
+    focusMode,
+    advancedMode,
+  };
 };
 const agingMat = (m) => (m === "wood" ? "melamine" : m === "stone" ? "hpl" : m === "metallic" ? "uv_coating" : "pvc_film");
 const agingEnv = (e) => (e === "outdoor_exposed" ? "outdoor_exposed" : e === "indoor_window" ? "indoor_window" : "indoor_normal");
@@ -81,6 +120,9 @@ export default function EliteObservatory() {
   const [env, setEnv] = useState("indoor_window");
   const [showCfg, setShowCfg] = useState(false);
   const [auto, setAuto] = useState(true);
+  const [advancedMode, setAdvancedMode] = useState(Boolean(dft.advancedMode));
+  const [focusMode, setFocusMode] = useState(Boolean(dft.focusMode));
+  const [uiRole, setUiRole] = useState(dft.uiRole);
   const [cfg, setCfg] = useState({ dbPath: dft.dbPath, lineId: dft.lineId, productCode: dft.productCode, apiKey: "", window: 160, subgroup: 5, driftTh: 3 });
   const [live, setLive] = useState({ hBusy: false, aBusy: false, hErr: "", aErr: "", hAt: "", aAt: "", cockpit: null, nba: null, spc: null, drift: null, shift: null, supplier: null, texture: null, spectral: null, observer: null, aging: null, ink: null, blend: null, passport: null });
   const hs = useRef(0), as = useRef(0);
@@ -89,16 +131,48 @@ export default function EliteObservatory() {
   const fLab = useMemo(() => rgbToLab(film.r, film.g, film.b), [film]);
   const de = useMemo(() => de2000(sLab, fLab), [sLab, fLab]);
   const [gl, gc] = useMemo(() => grade(de.total), [de.total]);
+  const roleProfile = useMemo(() => roleProfiles[uiRole] || roleProfiles.operator, [uiRole]);
   const headers = useMemo(() => ({ Accept: "application/json", ...(cfg.apiKey.trim() ? { "x-api-key": cfg.apiKey.trim() } : {}) }), [cfg.apiKey]);
+  const visibleTabs = useMemo(
+    () => {
+      if (advancedMode) return tabs;
+      const base = focusMode ? (focusTabsByRole[uiRole] || roleProfile.tabs) : roleProfile.tabs;
+      return tabs.filter((x) => base.includes(x.id));
+    },
+    [advancedMode, focusMode, roleProfile, uiRole]
+  );
 
   const request = useCallback(async (path, opts = {}) => {
-    const h = { ...headers }; let body;
+    const h = { ...headers };
+    let body;
     if (opts.body !== undefined) { h["Content-Type"] = "application/json"; body = JSON.stringify(opts.body); }
-    const resp = await fetch(path, { method: opts.method || "GET", headers: h, body });
-    const txt = await resp.text(); let p = {};
-    try { p = txt ? JSON.parse(txt) : {}; } catch (_e) { throw new Error(`bad json ${path}`); }
-    if (!resp.ok) throw new Error(typeof p.detail === "string" ? p.detail : `${resp.status} ${resp.statusText}`);
-    return p;
+    const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Math.max(3000, Number(opts.timeoutMs)) : NETWORK_TIMEOUT_MS;
+    const runOnce = async () => {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), timeoutMs);
+      try {
+        const resp = await fetch(path, { method: opts.method || "GET", headers: h, body, signal: ctl.signal });
+        const txt = await resp.text();
+        let p = {};
+        try {
+          p = txt ? JSON.parse(txt) : {};
+        } catch (_e) {
+          throw new Error(`bad json ${path}`);
+        }
+        if (!resp.ok) throw new Error(typeof p.detail === "string" ? p.detail : `${resp.status} ${resp.statusText}`);
+        return p;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    try {
+      return await runOnce();
+    } catch (err) {
+      const msg = String(err?.message || err || "");
+      const retryable = msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("aborted");
+      if (!retryable || opts.noRetry) throw err;
+      return runOnce();
+    }
   }, [headers]);
 
   const q = useCallback((extra = {}) => {
@@ -131,6 +205,29 @@ export default function EliteObservatory() {
 
   const refreshAll = useCallback(() => { refreshHistory(); refreshAlgo(); }, [refreshAlgo, refreshHistory]);
   useEffect(() => { refreshAll(); }, [refreshAll]);
+  useEffect(() => {
+    if (!visibleTabs.some((x) => x.id === tab)) {
+      setTab((visibleTabs[0] || { id: "overview" }).id);
+    }
+  }, [tab, visibleTabs]);
+  useEffect(() => {
+    const payload = { uiRole, focusMode, advancedMode };
+    try {
+      window.localStorage.setItem("senia_observatory_ui_v1", JSON.stringify(payload));
+    } catch (_err) {
+    }
+    if (typeof window !== "undefined") {
+      const qs = new URLSearchParams(window.location.search || "");
+      qs.set("ui_role", uiRole);
+      qs.set("focus", focusMode ? "1" : "0");
+      qs.set("advanced", advancedMode ? "1" : "0");
+      window.history.replaceState({}, "", `${window.location.pathname}?${qs.toString()}`);
+    }
+  }, [advancedMode, focusMode, uiRole]);
+  useEffect(() => {
+    if (advancedMode) return;
+    if (uiRole === "operator" && !focusMode) setFocusMode(true);
+  }, [advancedMode, focusMode, uiRole]);
   useEffect(() => { if (!auto) return undefined; const t = setInterval(() => refreshHistory(true), 20000); return () => clearInterval(t); }, [auto, refreshHistory]);
   useEffect(() => { const t = setTimeout(() => refreshAlgo(true), 500); return () => clearTimeout(t); }, [refreshAlgo]);
 
@@ -151,17 +248,108 @@ export default function EliteObservatory() {
   const ink = live.ink || {}, adj = ink.adjustments || { C: +clamp(-de.dL * .35, -5, 5).toFixed(2), M: +clamp(-de.dC * .25, -5, 5).toFixed(2), Y: +clamp(-de.dH * .18, -5, 5).toFixed(2), K: +clamp(-de.dL * .32, -5, 5).toFixed(2) }, iRes = num(ink.predicted_residual_deltaE, de.total * .3), iSafe = ink.safety_check && typeof ink.safety_check.safe === "boolean" ? ink.safety_check.safe : true;
   const blend = Array.isArray(live.blend?.groups) && live.blend.groups.length ? live.blend.groups : [{ group: 1, customer_tier: "VIP", batches: ["B001", "B003"], max_intra_deltaE: 1.41, total_quantity: 1900 }, { group: 2, customer_tier: "Standard", batches: ["B002", "B004", "B005"], max_intra_deltaE: 2.53, total_quantity: 2550 }];
   const pass = live.passport?.passport || { passport_id: "CP-LOCAL-SIM", lot_id: cfg.productCode || "LOCAL", fingerprint: `${sample.r.toString(16)}${sample.g.toString(16)}${sample.b.toString(16)}${film.r.toString(16)}${film.g.toString(16)}${film.b.toString(16)}`.slice(0, 16), created_at: new Date().toISOString(), deltaE: +de.total.toFixed(3), decision_code: nba.code || "AUTO_RELEASE", confidence: num(nba.confidence, .9), verification_hash: "local-preview", conditions: { illuminant: "D65", camera_id: "preview" }, lab_values: { sample: { L: +sLab.L.toFixed(2), a: +sLab.a.toFixed(2), b: +sLab.b.toFixed(2) } } };
+  const canShowScope = advancedMode || uiRole === "process" || uiRole === "quality";
+  const roleActions = useMemo(() => {
+    if (uiRole === "operator") {
+      return {
+        primary: warn === "GREEN" ? "继续生产并按节拍抽检" : "先复测并暂停自动放行",
+        secondary: `建议先执行 ${nba.code || "RUN_OPS_CHECK"}，再决定是否调墨`,
+        avoid: "不要连续多次加减墨，先确认采样与光源一致。",
+      };
+    }
+    if (uiRole === "process") {
+      return {
+        primary: risk >= 70 ? "先查工艺耦合，再评估配方动作" : "先做SPC趋势判断，再优化工艺窗口",
+        secondary: `当前Cpk ${cpk.toFixed(2)}，优先处理漂移斜率 ${slope >= 0 ? "+" : ""}${slope.toFixed(4)}`,
+        avoid: "不要只看单点色差，避免忽略过程波动。",
+      };
+    }
+    if (uiRole === "quality") {
+      return {
+        primary: warn === "GREEN" ? "维持放行监控并抽样复核" : "触发人工复核并保留争议证据链",
+        secondary: `投诉风险 ${(complaint * 100).toFixed(2)}%，建议同步客诉敏感维度`,
+        avoid: "不要在证据不足时直接给最终放行结论。",
+      };
+    }
+    return {
+      primary: autoRelease > 0.82 ? "可推进自动放行扩面" : "优先收敛风险再扩大放行",
+      secondary: `风险指数 ${risk.toFixed(1)}，预估年化收益 ¥${Math.round(saving).toLocaleString()}`,
+      avoid: "不要用业务紧急度覆盖质量事实。",
+    };
+  }, [uiRole, warn, nba.code, risk, cpk, slope, complaint, autoRelease, saving]);
+  const laneSignals = useMemo(() => {
+    const rows = [];
+    if (warn !== "GREEN") rows.push({ code: "warning_not_green", level: "review", text: `Warning=${warn}` });
+    if (risk >= 78) rows.push({ code: "risk_high", level: "block", text: `Risk ${risk.toFixed(1)} >= 78` });
+    else if (risk >= 60) rows.push({ code: "risk_medium", level: "review", text: `Risk ${risk.toFixed(1)} >= 60` });
+    if (cpk < 1.0) rows.push({ code: "cpk_low", level: "review", text: `Cpk ${cpk.toFixed(2)} < 1.00` });
+    if (mi >= 0.8) rows.push({ code: "metamerism_high", level: "block", text: `Metamerism ${mi.toFixed(3)} high` });
+    else if (mi >= 0.5) rows.push({ code: "metamerism_mid", level: "review", text: `Metamerism ${mi.toFixed(3)} medium` });
+    if (urg === "HIGH") rows.push({ code: "drift_high", level: "review", text: "Drift urgency HIGH" });
+    if (String(agRisk.level || "").toLowerCase() === "high") rows.push({ code: "aging_high", level: "review", text: "Aging warranty risk HIGH" });
+    if (err) rows.push({ code: "pipeline_degraded", level: "review", text: "Pipeline degraded mode" });
+    return rows;
+  }, [agRisk.level, cpk, err, mi, risk, urg, warn]);
+  const laneState = useMemo(() => {
+    const blocks = laneSignals.filter((x) => x.level === "block");
+    const reviews = laneSignals.filter((x) => x.level === "review");
+    if (blocks.length) return { key: "MANUAL_ARBITRATION", color: T.rd, text: "Manual Arbitration", desc: "存在硬风险，禁止自动放行。" };
+    if (reviews.length >= 2) return { key: "REVIEW_REQUIRED", color: T.w, text: "Review Required", desc: "存在多项风险，建议人工复核。" };
+    if (warn === "GREEN" && cpk >= 1.33 && mi < 0.4 && autoRelease > 0.82 && !err) return { key: "AUTO_RELEASE", color: T.g, text: "Auto Release", desc: "风险可控，可自动放行。" };
+    return { key: "MONITOR", color: T.a, text: "Monitor", desc: "持续监控并保持采样节拍。" };
+  }, [autoRelease, cpk, err, laneSignals, mi, warn]);
+  const exportSnapshot = useCallback(() => {
+    const payload = {
+      exported_at: new Date().toISOString(),
+      ui_role: uiRole,
+      lane: laneState,
+      warnings: laneSignals,
+      metrics: {
+        warning: warn,
+        risk_index: Number(risk.toFixed(3)),
+        cpk: Number(cpk.toFixed(3)),
+        metamerism_index: Number(mi.toFixed(4)),
+        auto_release_rate: Number(autoRelease.toFixed(4)),
+        complaint_rate: Number(complaint.toFixed(5)),
+        delta_e: Number(de.total.toFixed(4)),
+      },
+      next_action: nba,
+      cockpit,
+      module_errors: { history: live.hErr || null, algorithm: live.aErr || null },
+      raw_modules: {
+        spc: live.spc,
+        drift: live.drift,
+        aging: live.aging,
+        spectral: live.spectral,
+        ink: live.ink,
+        blend: live.blend,
+        passport: live.passport,
+      },
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    const lotCode = String(cfg.productCode || "OBS").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 18) || "OBS";
+    link.download = `observatory_snapshot_${lotCode}_${Date.now()}.json`;
+    link.href = URL.createObjectURL(blob);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }, [autoRelease, cfg.productCode, cpk, cockpit, complaint, de.total, laneSignals, laneState, live.aErr, live.aging, live.blend, live.drift, live.hErr, live.ink, live.passport, live.spc, live.spectral, mi, nba, risk, uiRole, warn]);
 
-  const inp = { width: "100%", border: `1px solid ${T.b}`, background: T.bg, color: T.tx, borderRadius: 6, padding: "6px 8px", fontSize: 11, fontFamily: T.mono };
+  const inp = { width: "100%", border: `1px solid ${T.b}`, background: "rgba(8,14,26,.86)", color: T.tx, borderRadius: 6, padding: "6px 8px", fontSize: 11, fontFamily: T.mono, boxShadow: "inset 0 1px 0 rgba(255,255,255,.03)" };
   const setRgb = (which, ch, v) => which === "s" ? setSample((x) => ({ ...x, [ch]: clamp(num(v, 0), 0, 255) })) : setFilm((x) => ({ ...x, [ch]: clamp(num(v, 0), 0, 255) }));
   const setCfgF = (k, v) => setCfg((x) => ({ ...x, [k]: v }));
-  return <div style={{ minHeight: "100vh", background: T.bg, color: T.tx, fontFamily: T.font }}>
-    <header style={{ position: "sticky", top: 0, zIndex: 3, background: `linear-gradient(180deg,${T.p},${T.bg})`, padding: "14px 16px 10px", borderBottom: `1px solid ${T.b}` }}>
+  return <div style={{ minHeight: "100vh", background: `radial-gradient(1100px 560px at 12% -8%, rgba(76,201,255,.16), transparent 60%), radial-gradient(1000px 500px at 88% 0%, rgba(255,122,184,.12), transparent 60%), ${T.bg}`, color: T.tx, fontFamily: T.font }}>
+    <header style={{ position: "sticky", top: 0, zIndex: 3, background: `linear-gradient(180deg,rgba(13,22,38,.96),rgba(6,9,19,.88))`, backdropFilter: "blur(8px)", padding: "14px 16px 10px", borderBottom: `1px solid ${T.b}` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><div style={{ display: "flex", gap: 10, alignItems: "center" }}><div style={{ width: 34, height: 34, borderRadius: 8, background: `linear-gradient(135deg,${T.a},#818cf8,${T.r})`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: glow(T.a) }}><span style={{ fontWeight: 900, color: "#fff" }}>SE</span></div><div><div style={{ fontSize: 16, fontWeight: 800 }}>SENIA Elite Observatory</div><div style={{ fontSize: 8, color: T.m, letterSpacing: 2.4 }}>PRECISION COLOR INTELLIGENCE CONSOLE</div></div></div><Tag t={busy ? "SYNCING" : err ? "DEGRADED" : "LIVE"} c={busy ? T.w : err ? T.rd : T.g} /></div>
-      <div style={{ marginTop: 10, display: "flex", gap: 4, overflowX: "auto" }}>{tabs.map((x) => <button key={x.id} onClick={() => setTab(x.id)} style={{ padding: "6px 10px", borderRadius: 6, border: "none", background: tab === x.id ? `${x.c}15` : "transparent", color: tab === x.id ? x.c : T.dim, fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", cursor: "pointer" }}>{x.n}</button>)}</div>
+      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, overflowX: "auto" }}>{Object.keys(roleProfiles).map((k) => { const r = roleProfiles[k]; return <button key={k} onClick={() => setUiRole(k)} style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${uiRole === k ? `${r.color}75` : T.b}`, background: uiRole === k ? `${r.color}1f` : "rgba(9,13,22,.6)", color: uiRole === k ? r.color : T.dim, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>{r.name}</button>; })}<span style={{ marginLeft: "auto", fontSize: 10, color: T.dim, whiteSpace: "nowrap" }}>{roleProfile.mission}</span></div>
+      <div style={{ marginTop: 10, display: "flex", gap: 4, overflowX: "auto" }}>{visibleTabs.map((x) => <button key={x.id} onClick={() => setTab(x.id)} style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${tab === x.id ? `${x.c}65` : T.b}`, background: tab === x.id ? `${x.c}1e` : "rgba(9,13,22,.6)", color: tab === x.id ? x.c : T.dim, fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", cursor: "pointer" }}>{x.n}</button>)}<button onClick={() => setFocusMode((v) => !v)} disabled={advancedMode} style={{ marginLeft: "auto", padding: "6px 10px", borderRadius: 6, border: `1px solid ${focusMode ? `${T.a}65` : T.b}`, background: focusMode ? `${T.a}14` : "rgba(9,13,22,.6)", color: focusMode ? T.a : T.dim, fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", cursor: advancedMode ? "not-allowed" : "pointer", opacity: advancedMode ? .45 : 1 }}>{focusMode ? "Focused" : "Role Tabs"}</button><button onClick={() => setAdvancedMode((v) => !v)} style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${advancedMode ? `${T.w}65` : T.b}`, background: advancedMode ? `${T.w}18` : "rgba(9,13,22,.6)", color: advancedMode ? T.w : T.dim, fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", cursor: "pointer" }}>{advancedMode ? "Core Tabs" : "More Tabs"}</button></div>
     </header>
-    <main style={{ padding: "12px 16px 24px" }}>
-      <Panel t="Smart Control" c={busy ? T.w : err ? T.rd : T.g}><div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}><Tag t={`History: ${live.hAt || "--"}`} c={T.a} /><Tag t={`AI: ${live.aAt || "--"}`} c={T.r} /><button onClick={refreshAll} style={{ marginLeft: "auto", border: `1px solid ${T.a}35`, background: `${T.a}14`, color: T.a, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Refresh Full Pipeline</button><button onClick={() => setAuto((v) => !v)} style={{ border: `1px solid ${auto ? `${T.g}45` : T.b}`, background: auto ? `${T.g}14` : T.bg, color: auto ? T.g : T.dim, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Auto {auto ? "On" : "Off"}</button><button onClick={() => setShowCfg((v) => !v)} style={{ border: `1px solid ${T.b}`, background: T.bg, color: T.dim, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{showCfg ? "Hide Scope" : "Show Scope"}</button></div>{err ? <div style={{ fontSize: 10, color: T.rd, marginBottom: 8 }}>Degraded mode: {err}</div> : null}{showCfg ? <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8 }}><div style={{ gridColumn: "1 / span 2" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>History DB Path</div><input value={cfg.dbPath} onChange={(e) => setCfgF("dbPath", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Line ID</div><input value={cfg.lineId} onChange={(e) => setCfgF("lineId", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Product Code</div><input value={cfg.productCode} onChange={(e) => setCfgF("productCode", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>API Key</div><input value={cfg.apiKey} onChange={(e) => setCfgF("apiKey", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Window</div><input type="number" min={20} max={2000} value={cfg.window} onChange={(e) => setCfgF("window", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Subgroup</div><input type="number" min={2} max={10} value={cfg.subgroup} onChange={(e) => setCfgF("subgroup", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Drift Th</div><input type="number" min={0.5} max={10} step={0.1} value={cfg.driftTh} onChange={(e) => setCfgF("driftTh", e.target.value)} style={inp} /></div></div> : null}</Panel>
+    <main style={{ maxWidth: "1480px", margin: "0 auto", padding: "12px 16px 24px" }}>
+      <Panel t="Role Command" c={roleProfile.color}><div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr", gap: 8 }}><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Primary Action</div><div style={{ fontSize: 12, color: roleProfile.color, fontWeight: 700 }}>{roleActions.primary}</div></div><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Secondary</div><div style={{ fontSize: 11, color: T.tx }}>{roleActions.secondary}</div></div><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Do Not</div><div style={{ fontSize: 11, color: T.w }}>{roleActions.avoid}</div><div style={{ marginTop: 6, fontSize: 9, color: T.m }}>Scope panel: {canShowScope ? "enabled" : "hidden in this role"}</div></div></div></Panel>
+      <Panel t="Decision Lane" c={laneState.color}><div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 8 }}><div style={{ border: `1px solid ${laneState.color}35`, borderRadius: 8, background: `${laneState.color}10`, padding: "8px 10px" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 4 }}>Current Lane</div><div style={{ fontSize: 16, color: laneState.color, fontWeight: 800, fontFamily: T.mono }}>{laneState.text}</div><div style={{ marginTop: 4, fontSize: 10, color: T.tx }}>{laneState.desc}</div><div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>{laneSignals.length ? laneSignals.slice(0, 4).map((x) => <Tag key={x.code} t={x.code} c={x.level === "block" ? T.rd : T.w} />) : <Tag t="no-major-conflict" c={T.g} />}</div></div><div style={{ border: `1px solid ${T.b}`, borderRadius: 8, background: T.bg, padding: "8px 10px", display: "flex", flexDirection: "column", gap: 8 }}><button onClick={exportSnapshot} style={{ border: `1px solid ${T.a}35`, background: `${T.a}14`, color: T.a, borderRadius: 8, padding: "7px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Export Snapshot JSON</button><div style={{ fontSize: 10, color: T.dim }}>Top evidence: {(laneSignals[0] && laneSignals[0].text) || "No blocking signal"}</div><div style={{ fontSize: 9, color: T.m }}>Lane key: {laneState.key}</div></div></div></Panel>
+      <Panel t="Smart Control" c={busy ? T.w : err ? T.rd : T.g}><div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}><Tag t={`History: ${live.hAt || "--"}`} c={T.a} /><Tag t={`AI: ${live.aAt || "--"}`} c={T.r} /><button onClick={refreshAll} style={{ marginLeft: "auto", border: `1px solid ${T.a}35`, background: `${T.a}14`, color: T.a, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Refresh Full Pipeline</button><button onClick={() => setAuto((v) => !v)} style={{ border: `1px solid ${auto ? `${T.g}45` : T.b}`, background: auto ? `${T.g}14` : T.bg, color: auto ? T.g : T.dim, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Auto {auto ? "On" : "Off"}</button>{canShowScope ? <button onClick={() => setShowCfg((v) => !v)} style={{ border: `1px solid ${T.b}`, background: T.bg, color: T.dim, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{showCfg ? "Hide Scope" : "Show Scope"}</button> : null}</div>{err ? <div style={{ fontSize: 10, color: T.rd, marginBottom: 8 }}>Degraded mode: {err}</div> : null}{showCfg ? <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8 }}><div style={{ gridColumn: "1 / span 2" }}><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>History DB Path</div><input value={cfg.dbPath} onChange={(e) => setCfgF("dbPath", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Line ID</div><input value={cfg.lineId} onChange={(e) => setCfgF("lineId", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Product Code</div><input value={cfg.productCode} onChange={(e) => setCfgF("productCode", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>API Key</div><input value={cfg.apiKey} onChange={(e) => setCfgF("apiKey", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Window</div><input type="number" min={20} max={2000} value={cfg.window} onChange={(e) => setCfgF("window", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Subgroup</div><input type="number" min={2} max={10} value={cfg.subgroup} onChange={(e) => setCfgF("subgroup", e.target.value)} style={inp} /></div><div><div style={{ fontSize: 9, color: T.dim, marginBottom: 3 }}>Drift Th</div><input type="number" min={0.5} max={10} step={0.1} value={cfg.driftTh} onChange={(e) => setCfgF("driftTh", e.target.value)} style={inp} /></div></div> : null}</Panel>
       <Panel t="Sampling Cockpit" c={gc}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>{["s", "f"].map((k) => <div key={k} style={{ border: `1px solid ${T.b}`, borderRadius: 8, padding: 8, background: T.bg }}><div style={{ fontSize: 10, color: T.dim, marginBottom: 6 }}>{k === "s" ? "Sample RGB" : "Film RGB"}</div>{["r", "g", "b"].map((ch) => <div key={`${k}_${ch}`} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}><span style={{ width: 12, fontSize: 10, color: T.dim, textTransform: "uppercase" }}>{ch}</span><input type="number" min={0} max={255} value={(k === "s" ? sample : film)[ch]} onChange={(e) => setRgb(k, ch, e.target.value)} style={{ ...inp, padding: "4px 6px" }} /></div>)}</div>)}</div><div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16 }}><div style={{ width: 46, height: 46, borderRadius: 10, background: `rgb(${sample.r},${sample.g},${sample.b})`, border: `2px solid ${T.a}50`, boxShadow: `0 4px 20px rgba(${sample.r},${sample.g},${sample.b},.25)` }} /><div style={{ width: 34, height: 14, borderRadius: 8, background: `linear-gradient(90deg,rgb(${sample.r},${sample.g},${sample.b}),rgb(${film.r},${film.g},${film.b}))`, border: `1px solid ${T.b}` }} /><div style={{ width: 46, height: 46, borderRadius: 10, background: `rgb(${film.r},${film.g},${film.b})`, border: `2px solid ${T.r}50`, boxShadow: `0 4px 20px rgba(${film.r},${film.g},${film.b},.25)` }} /><div style={{ textAlign: "center", marginLeft: 6 }}><div style={{ fontSize: 34, fontWeight: 900, color: gc, fontFamily: T.mono, lineHeight: 1, textShadow: glow(gc, 7) }}>{de.total.toFixed(2)}</div><div style={{ fontSize: 9, color: T.dim }}>DeltaE - {gl}</div></div></div></Panel>
       {tab === "overview" ? <><Panel t="Decision Core" c={gc}><div style={{ display: "flex", gap: 14, alignItems: "center" }}><Radar l={de.dL} c={de.dC} h={de.dH} /><div style={{ flex: 1 }}><div style={{ marginBottom: 6, fontSize: 10, color: T.dim }}>Next Action</div><Tag t={nba.code || "RUN_OPS_CHECK"} c={warnC} /> <Tag t={`confidence ${num(nba.confidence, .8).toFixed(2)}`} c={T.a} /><div style={{ marginTop: 8, fontSize: 10, color: T.dim }}>{(Array.isArray(nba.reasons) && nba.reasons.length ? nba.reasons.slice(0, 2) : ["Balanced state detected, keep monitoring trend."]).join(" | ")}</div></div></div></Panel><Panel t="System Snapshot" c={T.a}><div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 6 }}>{[{ k: "Warning", v: warn, c: warnC }, { k: "Risk", v: risk.toFixed(1), c: risk < 45 ? T.g : risk < 70 ? T.w : T.rd }, { k: "Auto Release", v: `${(autoRelease * 100).toFixed(1)}%`, c: autoRelease > .82 ? T.g : T.w }, { k: "Complaint", v: `${(complaint * 100).toFixed(2)}%`, c: complaint < .03 ? T.g : T.w }, { k: "Annual Saving", v: `¥${Math.round(saving).toLocaleString()}`, c: T.g }, { k: "SPC Cpk", v: cpk.toFixed(2), c: cpk >= 1.33 ? T.g : cpk >= 1 ? "#a3e635" : T.rd }].map((x) => <div key={x.k} style={{ padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.b}`, background: T.bg }}><div style={{ fontSize: 8, color: T.m, marginBottom: 3 }}>{x.k}</div><div style={{ fontSize: 15, color: x.c, fontWeight: 800, fontFamily: T.mono }}>{x.v}</div></div>)}</div></Panel></> : null}
       {tab === "spc" ? <Panel t="SPC Control" c="#22d3ee"><div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 8, marginBottom: 10 }}><div><div style={{ fontSize: 22, color: cpk >= 1.33 ? T.g : cpk >= 1 ? "#a3e635" : T.rd, fontWeight: 800, fontFamily: T.mono }}>{cpk.toFixed(2)}</div><div style={{ fontSize: 9, color: T.dim }}>Cpk</div></div><div><div style={{ fontSize: 22, color: "#22d3ee", fontWeight: 800, fontFamily: T.mono }}>{cp.toFixed(2)}</div><div style={{ fontSize: 9, color: T.dim }}>Cp</div></div><div><div style={{ fontSize: 16, color: "#a3e635", fontWeight: 800, fontFamily: T.mono }}>{grd.toUpperCase()}</div><div style={{ fontSize: 9, color: T.dim }}>Grade</div></div><div><div style={{ fontSize: 16, color: T.dim, fontWeight: 800, fontFamily: T.mono }}>{Math.round(ppm)}</div><div style={{ fontSize: 9, color: T.dim }}>PPM</div></div></div><div style={{ background: T.bg, borderRadius: 8, padding: "8px 4px" }}><Spark d={spcV} th={spcU} c="#22d3ee" /><div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 8, color: T.m }}><span>UCL {spcU.toFixed(2)}</span><span style={{ color: T.g }}>Xbar {spcM.toFixed(2)}</span><span>LCL {spcL.toFixed(2)}</span></div></div><div style={{ marginTop: 8, fontSize: 10, color: spcR.in_control ? T.g : T.w }}>{spcR.in_control ? "In control. Capability improvement is now priority." : "Out-of-control trend. Check root cause and subgroup consistency."}</div></Panel> : null}

@@ -3489,14 +3489,6 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
       #precision-root { min-height: auto; }
     }
   </style>
-  <script type="importmap">
-  {
-    "imports": {
-      "react": "https://esm.sh/react@18.3.1",
-      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
-    }
-  }
-  </script>
 </head>
 <body>
   <div class="top-bar">
@@ -3509,7 +3501,12 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
       <span class="chip"><strong>Precision Observatory</strong> v__APP_VERSION__</span>
     </div>
   </div>
-  <div id="precision-root"></div>
+  <div
+    id="precision-root"
+    data-default-db-path="__DEFAULT_DB_PATH__"
+    data-default-line-id="__DEFAULT_LINE_ID__"
+    data-default-product-code="__DEFAULT_PRODUCT_CODE__"
+  ></div>
   <section class="live-pod" aria-label="Live Command Pod">
     <div class="live-head">
       <h2 class="live-title">Live Command Pod</h2>
@@ -3538,20 +3535,50 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
   </section>
 
   <script type="module">
-    import React from "react";
-    import { createRoot } from "react-dom/client";
-    import EliteObservatory from "/v1/web/assets/observatory-module.js?v=__APP_VERSION__";
-
     const mount = document.getElementById("precision-root");
-    const root = createRoot(mount);
-    root.render(React.createElement(EliteObservatory));
-
     const defaults = {
-      dbPath: "__DEFAULT_DB_PATH__",
-      lineId: "__DEFAULT_LINE_ID__",
-      productCode: "__DEFAULT_PRODUCT_CODE__",
+      dbPath: mount?.dataset?.defaultDbPath || "",
+      lineId: mount?.dataset?.defaultLineId || "",
+      productCode: mount?.dataset?.defaultProductCode || "",
     };
     window.__SENIA_OBS_DEFAULTS__ = { ...defaults };
+
+    function renderMountError(message) {
+      if (!mount) return;
+      mount.innerHTML = `
+        <section style="min-height:100vh;display:grid;place-items:center;padding:24px;background:#05060b;">
+          <div style="max-width:860px;width:min(100%,860px);border:1px solid #1f2430;border-radius:16px;background:#0a0b12;padding:20px 22px;color:#d4d4e0;font-family:'Outfit','Noto Sans SC',system-ui,sans-serif;">
+            <h2 style="margin:0;color:#38bdf8;font-size:20px;">Precision Observatory Loading Guard</h2>
+            <p style="margin:10px 0 0;color:#9aa4ba;line-height:1.6;">
+              页面核心模块未成功加载，系统已进入降级模式。请检查网络访问（esm.sh）或前端依赖可用性。
+            </p>
+            <pre style="margin-top:12px;padding:10px 12px;background:#05060b;border:1px solid #1f2430;border-radius:10px;color:#fb923c;white-space:pre-wrap;">${String(message || "module load failed")}</pre>
+          </div>
+        </section>
+      `;
+    }
+
+    async function mountPrecisionApp() {
+      if (!mount) return;
+      try {
+        const [reactMod, reactDomMod, observatoryMod] = await Promise.all([
+          import("https://esm.sh/preact@10.26.4/compat"),
+          import("https://esm.sh/preact@10.26.4/compat/client"),
+          import("/v1/web/assets/observatory-module.js?v=__APP_VERSION__"),
+        ]);
+        const React = reactMod?.default || reactMod?.React;
+        const createRoot = reactDomMod?.createRoot;
+        const EliteObservatory = observatoryMod?.default;
+        if (!React || !createRoot || !EliteObservatory) {
+          throw new Error("critical module export missing");
+        }
+        const root = createRoot(mount);
+        root.render(React.createElement(EliteObservatory));
+      } catch (err) {
+        renderMountError(err?.message || err || "module load failed");
+      }
+    }
+    mountPrecisionApp();
 
     const q = (id) => document.getElementById(id);
     const setStatus = (text) => { q("live_status").textContent = text; };
@@ -3638,13 +3665,27 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
       actionEl.textContent = rec?.code || "--";
 
       warningEl.classList.remove("good", "warn", "bad");
-      warningEl.classList.add(
-        warning === "GREEN" ? "good" : warning === "YELLOW" || warning === "ORANGE" ? "warn" : warning === "--" ? "" : "bad"
-      );
+      const warningClass =
+        warning === "GREEN"
+          ? "good"
+          : warning === "YELLOW" || warning === "ORANGE"
+          ? "warn"
+          : warning === "--"
+          ? null
+          : "bad";
+      if (warningClass) warningEl.classList.add(warningClass);
       applyLevelClass(riskEl, risk, true);
       applyLevelClass(autoEl, autoRelease, false);
       actionEl.classList.remove("good", "warn", "bad");
-      actionEl.classList.add(rec?.code === "HOLD_AND_ESCALATE" ? "bad" : rec?.code === "DEEP_INNOVATION_REVIEW" ? "warn" : "good");
+      const actionClass =
+        rec?.code === "HOLD_AND_ESCALATE"
+          ? "bad"
+          : rec?.code === "DEEP_INNOVATION_REVIEW"
+          ? "warn"
+          : rec?.code
+          ? "good"
+          : null;
+      if (actionClass) actionEl.classList.add(actionClass);
 
       const reasons = Array.isArray(rec?.reasons) ? rec.reasons.slice(0, 2) : [];
       q("live_reasons").textContent = reasons.length
@@ -3738,6 +3779,9 @@ def _sanitize_observatory_source(raw_text: str) -> str:
     text = raw_text.replace("\r\n", "\n")
     # The original formula contains "-x**2", which is invalid JS syntax.
     text = text.replace("Math.exp(-((hp-275)/25)**2)", "Math.exp(-(((hp-275)/25)**2))")
+    # Ensure React symbol exists for React.createElement output from JSX transform.
+    text = text.replace('import {', 'import React, {', 1)
+    text = text.replace("import {", "import React, {", 1)
     return text
 
 
@@ -3807,10 +3851,31 @@ def _build_observatory_module_if_needed() -> str:
         OBSERVATORY_BUILD_INPUT_PATH.unlink(missing_ok=True)
 
 
+def _rewrite_observatory_module_imports(module_js: str) -> str:
+    text = module_js
+    replacements = (
+        ('from "react";', 'from "https://esm.sh/preact@10.26.4/compat";'),
+        ("from 'react';", 'from "https://esm.sh/preact@10.26.4/compat";'),
+        ('from "react-dom/client";', 'from "https://esm.sh/preact@10.26.4/compat/client";'),
+        ("from 'react-dom/client';", 'from "https://esm.sh/preact@10.26.4/compat/client";'),
+    )
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+    if "React.createElement" in text and "import React" not in text:
+        marker = 'import {'
+        if marker in text:
+            text = text.replace(marker, "import React, {", 1)
+        else:
+            text = 'import React from "https://esm.sh/preact@10.26.4/compat";\n' + text
+    return text
+
+
 def get_precision_observatory_module_js() -> str:
     build_error = _build_observatory_module_if_needed()
     if OBSERVATORY_MODULE_PATH.exists():
-        body = OBSERVATORY_MODULE_PATH.read_text(encoding="utf-8", errors="replace")
+        body = _rewrite_observatory_module_imports(
+            OBSERVATORY_MODULE_PATH.read_text(encoding="utf-8", errors="replace")
+        )
         if build_error:
             return f"/* observatory build warning: {build_error} */\n{body}"
         return body
