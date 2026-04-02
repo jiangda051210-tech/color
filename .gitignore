@@ -33,6 +33,9 @@ senia_feedback.json
 senia_ambient.json
 senia_recipe_twin.json
 senia_batch_memory.json
+senia_predictor.json
+senia_device_fp.json
+senia_knowledge.json
 image_archive/
 aruco_markers/
 senia_output/

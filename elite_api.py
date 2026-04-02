@@ -86,6 +86,8 @@ from elite_innovation_state import (
 from elite_backup import BackupManager
 from senia_colorchecker import calibrate_from_photo
 from senia_instant import process_instant, InstantResult
+from senia_knowledge_crawler import KnowledgeEngine
+from senia_spa import render_senia_spa
 from senia_predictor import ProductionPredictor, DeviceFingerprint
 from senia_qr_passport import generate_passport, verify_passport, render_passport_html
 from senia_learning import (
@@ -190,6 +192,7 @@ THRESHOLD_STORE = ThresholdStore(config_path=ROOT_DIR / "senia_thresholds.json")
 SENIA_ANALYZE_SEMAPHORE = AsyncSemaphore(3)
 PRODUCTION_PREDICTOR = ProductionPredictor(store_path=DEFAULT_OUTPUT_ROOT / "senia_predictor.json")
 DEVICE_FINGERPRINT = DeviceFingerprint(store_path=DEFAULT_OUTPUT_ROOT / "senia_device_fp.json")
+KNOWLEDGE_ENGINE = KnowledgeEngine(store_path=DEFAULT_OUTPUT_ROOT / "senia_knowledge.json")
 ONLINE_LEARNER = OnlineLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_feedback.json")
 AMBIENT_LEARNER = AmbientLightLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_ambient.json")
 RECIPE_TWIN = RecipeDigitalTwin(store_path=DEFAULT_OUTPUT_ROOT / "senia_recipe_twin.json")
@@ -3599,6 +3602,12 @@ def home() -> str:
 @app.get("/v1/web/classic", response_class=HTMLResponse)
 def home_classic() -> str:
     return render_home_page(APP_VERSION)
+
+
+@app.get("/v1/web/dashboard", response_class=HTMLResponse)
+def web_senia_spa() -> str:
+    """SENIA 全功能 SPA 仪表盘 (暴露所有端点)."""
+    return render_senia_spa(APP_VERSION)
 
 
 @app.get("/v1/senia/artifact")
@@ -7216,6 +7225,42 @@ def senia_passport_view(passport_json: str = "") -> str:
     except (json.JSONDecodeError, ValueError):
         return "<h1>Invalid passport</h1>"
     return render_passport_html(data)
+
+
+# ── 管理 API ──────────────────────────────────────────
+
+# ── 知识引擎 ────────────────────────────────────────────
+
+@app.post("/v1/senia/knowledge/optimize")
+def senia_knowledge_optimize() -> dict[str, Any]:
+    """运行自动优化: 从公开知识库更新阈值/材质参数/老化模型."""
+    return KNOWLEDGE_ENGINE.auto_optimize()
+
+
+@app.get("/v1/senia/knowledge/status")
+def senia_knowledge_status() -> dict[str, Any]:
+    """知识引擎状态."""
+    return KNOWLEDGE_ENGINE.status()
+
+
+@app.get("/v1/senia/knowledge/material")
+def senia_knowledge_material(material: str = "wood_oak_gray") -> dict[str, Any]:
+    """查询材质参考数据."""
+    data = KNOWLEDGE_ENGINE.get_material_reference(material)
+    if data is None:
+        from senia_knowledge_crawler import MATERIAL_COLOR_PROFILES
+        return {"found": False, "available": list(MATERIAL_COLOR_PROFILES.keys())}
+    return {"found": True, "material": material, "data": data}
+
+
+@app.get("/v1/senia/knowledge/standard")
+def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str, Any]:
+    """查询行业标准."""
+    data = KNOWLEDGE_ENGINE.get_industry_standard(name)
+    if data is None:
+        from senia_knowledge_crawler import INDUSTRY_STANDARDS
+        return {"found": False, "available": list(INDUSTRY_STANDARDS.keys())}
+    return {"found": True, "standard": name, "data": data}
 
 
 # ── 管理 API ──────────────────────────────────────────
