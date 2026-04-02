@@ -1,0 +1,208 @@
+"""
+PDF report generation for SENIA Elite quality inspection.
+
+Generates compliance-ready PDF reports from analysis results.
+Uses only the Python standard library (no external PDF library needed)
+by generating a self-contained HTML report and providing a lightweight
+PDF conversion wrapper.
+
+If `weasyprint` is available, produces true PDF. Otherwise, falls back
+to an HTML file that can be printed to PDF via a browser.
+
+Usage:
+    from elite_report_pdf import generate_report
+
+    pdf_path = generate_report(
+        report_data=analysis_result,
+        output_path=Path("report.pdf"),
+        company_name="SENIA",
+    )
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+
+def _safe(value: Any) -> str:
+    return html.escape(str(value)) if value is not None else "-"
+
+
+def _fmt_float(value: Any, digits: int = 4) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _status_color(decision: str) -> str:
+    mapping = {
+        "AUTO_RELEASE": "#22c55e",
+        "MANUAL_REVIEW": "#f59e0b",
+        "RECAPTURE": "#ef4444",
+        "HOLD_AND_ESCALATE": "#dc2626",
+    }
+    return mapping.get(decision, "#6b7280")
+
+
+def _build_html(report: dict[str, Any], company_name: str, language: str) -> str:
+    """Build a self-contained HTML report suitable for PDF printing."""
+    result = report.get("result", {})
+    summary = result.get("summary", {})
+    confidence = result.get("confidence", {})
+    decision_block = report.get("decision", {})
+    profile = report.get("profile", {})
+    process_advice = report.get("process_advice", {})
+
+    decision = decision_block.get("action", decision_block.get("decision", "N/A"))
+    decision_color = _status_color(decision)
+
+    title = "Color Quality Inspection Report" if language == "en" else "色膜质量检测报告"
+    ts = report.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))
+
+    rows_summary = ""
+    for key in ("avg_delta_e00", "p95_delta_e00", "max_delta_e00", "dL", "dC", "dH_deg"):
+        val = summary.get(key)
+        if val is not None:
+            label = key.replace("_", " ").replace("delta e00", "ΔE00").replace("dL", "ΔL").replace("dC", "ΔC").replace("dH deg", "ΔH°")
+            rows_summary += f"<tr><td>{_safe(label)}</td><td>{_fmt_float(val)}</td></tr>\n"
+
+    rows_confidence = ""
+    for key in ("overall", "geometry", "lighting", "coverage"):
+        val = confidence.get(key)
+        if val is not None:
+            rows_confidence += f"<tr><td>{_safe(key.title())}</td><td>{_fmt_float(val, 2)}</td></tr>\n"
+
+    advice_html = ""
+    if process_advice.get("enabled"):
+        actions = process_advice.get("suggested_actions", [])
+        if actions:
+            advice_html = "<h2>Process Recommendations</h2><ul>"
+            for a in actions:
+                advice_html += f"<li>{_safe(a)}</li>"
+            advice_html += "</ul>"
+
+    return f"""<!DOCTYPE html>
+<html lang="{language}">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  @page {{ size: A4; margin: 20mm; }}
+  body {{ font-family: 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+         font-size: 11pt; color: #1a1a1a; line-height: 1.5; }}
+  h1 {{ font-size: 18pt; border-bottom: 2px solid #2563eb; padding-bottom: 8px; }}
+  h2 {{ font-size: 13pt; color: #2563eb; margin-top: 24px; }}
+  table {{ width: 100%; border-collapse: collapse; margin: 12px 0; }}
+  th, td {{ border: 1px solid #d1d5db; padding: 6px 12px; text-align: left; }}
+  th {{ background: #f3f4f6; font-weight: 600; }}
+  .decision-badge {{
+    display: inline-block; padding: 6px 18px; border-radius: 6px;
+    color: white; font-weight: bold; font-size: 14pt;
+    background: {decision_color};
+  }}
+  .meta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }}
+  .meta-grid span {{ font-size: 10pt; color: #6b7280; }}
+  .meta-grid strong {{ font-size: 11pt; }}
+  .footer {{ margin-top: 40px; font-size: 9pt; color: #9ca3af; text-align: center;
+             border-top: 1px solid #e5e7eb; padding-top: 8px; }}
+</style>
+</head>
+<body>
+<h1>{company_name} — {title}</h1>
+<div class="meta-grid">
+  <div><span>Report Time</span><br><strong>{_safe(ts)}</strong></div>
+  <div><span>Profile</span><br><strong>{_safe(profile.get('used', profile.get('name', 'auto')))}</strong></div>
+  <div><span>Lot ID</span><br><strong>{_safe(report.get('lot_id', report.get('session_id', '-')))}</strong></div>
+  <div><span>Product</span><br><strong>{_safe(report.get('product_code', '-'))}</strong></div>
+</div>
+
+<h2>Decision</h2>
+<p><span class="decision-badge">{_safe(decision)}</span></p>
+
+<h2>Color Metrics</h2>
+<table>
+  <tr><th>Metric</th><th>Value</th></tr>
+  {rows_summary}
+</table>
+
+<h2>Confidence</h2>
+<table>
+  <tr><th>Component</th><th>Score</th></tr>
+  {rows_confidence}
+</table>
+
+{advice_html}
+
+<div class="footer">
+  Generated by {company_name} SENIA Elite &mdash; {_safe(ts)}
+</div>
+</body>
+</html>"""
+
+
+def generate_report(
+    report_data: dict[str, Any],
+    output_path: Path,
+    company_name: str = "SENIA",
+    language: str = "zh",
+) -> Path:
+    """
+    Generate a quality inspection report.
+
+    Attempts PDF via weasyprint; falls back to HTML if unavailable.
+    Returns the actual output path (may have .html extension on fallback).
+    """
+    html_content = _build_html(report_data, company_name, language)
+
+    # Try true PDF generation
+    try:
+        from weasyprint import HTML  # type: ignore[import-untyped]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path = output_path.with_suffix(".pdf")
+        HTML(string=html_content).write_pdf(str(pdf_path))
+        return pdf_path
+    except ImportError:
+        pass
+
+    # Fallback: save as HTML (printable to PDF via browser)
+    html_path = output_path.with_suffix(".html")
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(html_content, encoding="utf-8")
+    return html_path
+
+
+def generate_batch_summary_report(
+    batch_results: list[dict[str, Any]],
+    output_path: Path,
+    company_name: str = "SENIA",
+) -> Path:
+    """Generate a summary report for a batch of analyses."""
+    combined = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "result": {"summary": {}, "confidence": {}},
+        "decision": {"action": "BATCH_SUMMARY"},
+        "profile": {"used": "batch"},
+        "lot_id": f"batch_{len(batch_results)}_items",
+        "process_advice": {"enabled": False},
+    }
+
+    if batch_results:
+        avg_keys = ("avg_delta_e00", "p95_delta_e00", "max_delta_e00")
+        for key in avg_keys:
+            values = []
+            for r in batch_results:
+                v = (r.get("result") or {}).get("summary", {}).get(key)
+                if v is not None:
+                    try:
+                        values.append(float(v))
+                    except (TypeError, ValueError):
+                        pass
+            if values:
+                combined["result"]["summary"][key] = sum(values) / len(values)
+
+    return generate_report(combined, output_path, company_name)

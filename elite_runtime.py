@@ -60,7 +60,7 @@ def _get_env_int(name: str, default: int, min_value: int, max_value: int) -> int
         return default
     try:
         value = int(raw)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return default
     return max(min_value, min(max_value, value))
 
