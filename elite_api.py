@@ -15,6 +15,7 @@ from collections import deque
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from asyncio import Semaphore as AsyncSemaphore
 from threading import RLock
 from typing import Any
 from uuid import uuid4
@@ -183,6 +184,7 @@ BACKUP_MANAGER = BackupManager(
 )
 
 THRESHOLD_STORE = ThresholdStore(config_path=ROOT_DIR / "senia_thresholds.json")
+SENIA_ANALYZE_SEMAPHORE = AsyncSemaphore(3)  # Max 3 concurrent heavy analyses
 ONLINE_LEARNER = OnlineLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_feedback.json")
 AMBIENT_LEARNER = AmbientLightLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_ambient.json")
 RECIPE_TWIN = RecipeDigitalTwin(store_path=DEFAULT_OUTPUT_ROOT / "senia_recipe_twin.json")
@@ -6803,39 +6805,53 @@ async def senia_analyze_endpoint(
     偏差方向: 偏红/偏黄/偏暗/偏灰/饱和度不足
     调色建议: 减红/减白/查刮刀... (区分配方问题 vs 工艺问题)
     """
+    # 文件类型验证
+    filename = (image.filename or "").lower()
+    allowed_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".dng"}
+    if filename and not any(filename.endswith(ext) for ext in allowed_exts):
+        raise HTTPException(status_code=400,
+                            detail=f"Unsupported file type. Allowed: {', '.join(sorted(allowed_exts))}")
+
     raw = await image.read()
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"image too large (max {MAX_UPLOAD_BYTES // 1024 // 1024}MB)")
+    if len(raw) < 1000:
+        raise HTTPException(status_code=400, detail="file too small, likely not a valid image")
+
     arr = np.frombuffer(raw, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
-        raise HTTPException(status_code=400, detail="invalid image")
+        raise HTTPException(status_code=400,
+                            detail="Cannot decode image. Supported formats: JPG, PNG, BMP, TIFF, WebP. "
+                                   "PDF and other document formats are not supported.")
 
+    # 网格参数验证
     rows, cols = 6, 8
     try:
         parts = grid.split("x")
-        rows, cols = int(parts[0]), int(parts[1])
+        rows = max(2, min(int(parts[0]), 12))
+        cols = max(2, min(int(parts[1]), 16))
     except (ValueError, IndexError):
         pass
 
-    out_dir = _ensure_output_dir(f"senia_{lot_id or 'auto'}_{int(time.time())}")
+    # 并发控制: 最多3个同时分析 (OpenCV/numpy 非线程安全)
+    async with SENIA_ANALYZE_SEMAPHORE:
+        out_dir = _ensure_output_dir(f"senia_{lot_id or 'auto'}_{int(time.time())}")
+        img_path = out_dir / (image.filename or "upload.jpg")
+        img_path.write_bytes(raw)
 
-    # 保存上传的图片
-    img_path = out_dir / (image.filename or "upload.jpg")
-    img_path.write_bytes(raw)
-
-    try:
-        report = senia_analyze_photo(
-            image_path=img_path,
-            profile_name=profile,
-            output_dir=out_dir,
-            grid_rows=rows,
-            grid_cols=cols,
-            lot_id=lot_id,
-            product_code=product_code,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            report = senia_analyze_photo(
+                image_path=img_path,
+                profile_name=profile,
+                output_dir=out_dir,
+                grid_rows=rows,
+                grid_cols=cols,
+                lot_id=lot_id,
+                product_code=product_code,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     summary = report.get("result", {}).get("summary", {})
     tier = report.get("tier", "UNKNOWN")
@@ -6848,44 +6864,30 @@ async def senia_analyze_endpoint(
     try:
         run_id = f"senia_{int(time.time())}_{lot_id or 'auto'}"
         record_run(
-            db_path=DEFAULT_HISTORY_DB,
-            run_id=run_id,
-            report=report,
+            db_path=DEFAULT_HISTORY_DB, run_id=run_id, report=report,
             line_id=report.get("detection", {}).get("sample_source", ""),
-            product_code=product_code,
-            lot_id=lot_id,
+            product_code=product_code, lot_id=lot_id,
         )
     except Exception:
         _log.warning("senia_record_run_failed", lot_id=lot_id)
 
-    # ── 事件总线: 通知 MES/ERP ──
+    # ── 事件总线 + 图片存储 ──
     try:
         EVENT_BUS.publish(QualityDecisionEvent(
-            lot_id=lot_id,
-            product_code=product_code,
-            decision=tier,
-            avg_delta_e=avg_de,
-            profile=used_profile,
+            lot_id=lot_id, product_code=product_code, decision=tier,
+            avg_delta_e=avg_de, profile=used_profile,
         ))
     except Exception:
         pass
-
-    # ── 图片存储: 注册原图到 ImageStore ──
     try:
-        IMAGE_STORE.save(
-            data=raw,
-            lot_id=lot_id,
-            category="senia_analysis",
-            product_code=product_code,
-            filename=image.filename or "upload.jpg",
-        )
+        IMAGE_STORE.save(data=raw, lot_id=lot_id, category="senia_analysis",
+                         product_code=product_code, filename=image.filename or "upload.jpg")
     except Exception:
         pass
 
-    # ── 历史对比: 与基线比较 ──
+    # ── 历史对比 ──
     try:
-        avg_de_val = summary.get("avg_delta_e00", 0.0)
-        baseline = compare_with_baseline(avg_de_val, DEFAULT_HISTORY_DB, lot_id, product_code)
+        baseline = compare_with_baseline(avg_de, DEFAULT_HISTORY_DB, lot_id, product_code)
         report["history"] = baseline
     except Exception:
         report["history"] = {"has_baseline": False}
@@ -7054,6 +7056,51 @@ def senia_aging_predict(
 ) -> dict[str, Any]:
     """预测色差随时间变化 + 老化感知验收建议."""
     return predict_aging_acceptance(current_dE, current_dL, current_db, profile, min(months, 60))
+
+
+# ── 管理 API ──────────────────────────────────────────
+
+@app.get("/v1/senia/admin/status")
+def senia_admin_status() -> dict[str, Any]:
+    """系统完整状态: 所有模块运行情况."""
+    return {
+        "version": APP_VERSION,
+        "learning": ONLINE_LEARNER.stats(),
+        "thresholds": THRESHOLD_STORE.status(),
+        "images": IMAGE_STORE.disk_usage(),
+        "backup": BACKUP_MANAGER.status(),
+        "config": CONFIG_STORE.status(),
+        "event_bus": {"subscribers": EVENT_BUS.subscriber_count(),
+                      "dead_letters": len(EVENT_BUS.get_dead_letters())},
+    }
+
+
+@app.post("/v1/senia/admin/reset-learning")
+def senia_admin_reset_learning() -> dict[str, Any]:
+    """重置自学习状态 (清除所有反馈和阈值调整)."""
+    global ONLINE_LEARNER  # noqa: PLW0603
+    ONLINE_LEARNER = OnlineLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_feedback.json")
+    _log.info("senia_learning_reset")
+    return {"ok": True, "message": "learning state reset"}
+
+
+@app.get("/v1/senia/admin/disk-check")
+def senia_admin_disk_check() -> dict[str, Any]:
+    """磁盘使用检查 + 清理建议."""
+    usage = IMAGE_STORE.disk_usage()
+    backups = BACKUP_MANAGER.list_backups()
+    total_mb = usage.get("total_mb", 0)
+    warnings = []
+    if total_mb > 5000:
+        warnings.append(f"Image archive is {total_mb:.0f}MB, consider running cleanup")
+    if len(backups) > 10:
+        warnings.append(f"{len(backups)} backups exist, consider rotation (keep=7)")
+    return {
+        "images": usage,
+        "backup_count": len(backups),
+        "warnings": warnings,
+        "suggestion": "POST /v1/images/cleanup and POST /v1/backup/rotate" if warnings else "disk usage normal",
+    }
 
 
 if __name__ == "__main__":

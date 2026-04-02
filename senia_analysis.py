@@ -123,20 +123,22 @@ def detect_streaks_fft(row_means: list[float], col_means: list[float],
     条纹表现为某个空间频率的异常峰值.
     """
     def _ac_energy(values: list[float]) -> float:
-        """AC能量比: 高频分量能量 / 总能量. 条纹 → 高频峰值 → 比值高."""
+        """条纹能量检测: 需要同时满足高频占比高 AND 绝对方差够大."""
         n = len(values)
         if n < 4:
             return 0.0
         mean = sum(values) / n
-        total_var = sum((v - mean) ** 2 for v in values)
-        if total_var < 1e-6:
-            return 0.0  # 完全均匀, 无条纹
-        # 相邻差分能量 (捕捉周期性交替变化 = 条纹特征)
-        diff_energy = sum((values[i] - values[i - 1]) ** 2 for i in range(1, n))
-        # 归一化: diff_energy / total_var, 均匀随机噪声约 2.0, 条纹 >> 2.0
-        ratio = diff_energy / (total_var + 1e-12)
-        # 映射到 0~1: ratio < 1.5 → 正常, > 3.0 → 明显条纹
-        return min(1.0, max(0.0, (ratio - 1.5) / 3.0))
+        total_var = sum((v - mean) ** 2 for v in values) / n
+        # 绝对方差太小 → 不可能是可见条纹
+        if total_var < 0.5:
+            return 0.0
+        # 相邻差分能量 (周期性交替 = 条纹)
+        diff_var = sum((values[i] - values[i - 1]) ** 2 for i in range(1, n)) / (n - 1)
+        ratio = diff_var / (total_var + 1e-12)
+        # ratio > 2.5 且绝对方差 > 2.0 才算条纹
+        if ratio < 2.5 or total_var < 2.0:
+            return 0.0
+        return min(1.0, max(0.0, (ratio - 2.5) / 3.0) * min(1.0, total_var / 5.0))
 
     row_e = _ac_energy(row_means)
     col_e = _ac_energy(col_means)

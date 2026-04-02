@@ -27,6 +27,18 @@ service_runs/
 out/
 out*/
 
+# SENIA runtime state (auto-generated, not version-controlled)
+senia_thresholds.json
+senia_feedback.json
+senia_ambient.json
+senia_recipe_twin.json
+senia_batch_memory.json
+image_archive/
+aruco_markers/
+senia_output/
+backups/
+event_queue/
+
 # OS/editor
 .DS_Store
 Thumbs.db
