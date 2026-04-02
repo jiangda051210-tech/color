@@ -40,7 +40,7 @@ from elite_color_match import (
     draw_heatmap_on_board,
     infer_profile,
     order_quad,
-    perspective_warp,
+    warp_quad,
     robust_mean_lab,
     texture_suppress,
     apply_gray_world,
@@ -282,9 +282,9 @@ def analyze_photo(
         )
 
     # ── 3. 透视校正 ──
-    board_warp, board_M, board_rect = perspective_warp(image_bgr, board_quad)
+    board_warp, board_M, board_rect = warp_quad(image_bgr, board_quad)
 
-    sample_warp, sample_M, sample_rect = perspective_warp(image_bgr, sample_quad)
+    sample_warp, sample_M, sample_rect = warp_quad(image_bgr, sample_quad)
     sample_on_board = cv2.perspectiveTransform(
         sample_quad.reshape(1, -1, 2), board_M
     ).reshape(-1, 2)
