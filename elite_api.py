@@ -7310,6 +7310,29 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
 
 # ── 管理 API ──────────────────────────────────────────
 
+# ── 环境光学习 ──────────────────────────────────────────
+
+@app.post("/v1/senia/ambient/record")
+def senia_ambient_record(
+    station_id: str = Form(...),
+    r_gain: float = Form(...),
+    g_gain: float = Form(...),
+    b_gain: float = Form(...),
+) -> dict[str, Any]:
+    """记录一次色卡校准的白平衡增益 (用于学习工位光源模式)."""
+    AMBIENT_LEARNER.record_calibration(station_id, r_gain, g_gain, b_gain)
+    return {"ok": True, "station_id": station_id}
+
+
+@app.get("/v1/senia/ambient/predict")
+def senia_ambient_predict(station_id: str = "") -> dict[str, Any]:
+    """预测工位的白平衡增益 (无色卡场景)."""
+    gains = AMBIENT_LEARNER.predict_gains(station_id)
+    if gains is None:
+        return {"predicted": False, "reason": "insufficient calibration history (need ≥3)"}
+    return {"predicted": True, "r_gain": round(gains[0], 4), "g_gain": round(gains[1], 4), "b_gain": round(gains[2], 4)}
+
+
 # ── Edge SDK (离线分析) ──────────────────────────────────
 
 @app.post("/v1/senia/edge/analyze")

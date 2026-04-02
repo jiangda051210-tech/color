@@ -54,16 +54,7 @@ from elite_color_match import (
     ciede2000 as ciede2000_np,
 )
 
-# SENIA 新模块
-from senia_calibration import ciede2000 as ciede2000_scalar
-from senia_analysis import (
-    ThresholdConfig,
-    run_full_analysis as senia_full_analysis,
-    compute_color_deviation,
-    run_defect_pipeline,
-    judge_three_tier,
-    analyze_spatial_uniformity,
-)
+# SENIA 模块 (只导入实际使用的)
 from senia_recipe import generate_recipe_advice
 
 
