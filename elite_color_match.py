@@ -159,6 +159,9 @@ def ensure_roi_in_bounds(roi: ROI, width: int, height: int) -> ROI:
     return ROI(x=x, y=y, w=w, h=h)
 
 
+_IMAGE_MAX_DIM = 32767   # OpenCV hard ceiling; reject anything wider/taller
+_IMAGE_MIN_DIM = 4       # reject degenerate single-pixel strips
+
 def read_image(path: Path) -> np.ndarray:
     # Prefer imdecode to support Unicode paths and avoid OpenCV warning noise.
     image = None
@@ -169,6 +172,21 @@ def read_image(path: Path) -> np.ndarray:
         image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {path}")
+    # Validate decoded output — guards against malformed images that decode to
+    # unexpected shapes (e.g. 0×0, single-pixel strips, wrong channel count).
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(
+            f"Image must be a 3-channel (BGR) array, got shape {image.shape}: {path}"
+        )
+    h, w = image.shape[:2]
+    if h < _IMAGE_MIN_DIM or w < _IMAGE_MIN_DIM:
+        raise ValueError(
+            f"Image too small ({w}×{h}), minimum {_IMAGE_MIN_DIM}px on each side: {path}"
+        )
+    if h > _IMAGE_MAX_DIM or w > _IMAGE_MAX_DIM:
+        raise ValueError(
+            f"Image too large ({w}×{h}), maximum {_IMAGE_MAX_DIM}px on each side: {path}"
+        )
     return image
 
 

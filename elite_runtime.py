@@ -41,6 +41,7 @@ class RuntimeSettings:
     audit_rotate_backups: int
     metrics_max_path_entries: int
     ops_summary_cache_ttl_sec: int
+    batch_images_root: Path | None
 
 
 def _get_env_bool(name: str, default: bool) -> bool:
@@ -102,6 +103,8 @@ def load_runtime_settings(root_dir: Path) -> RuntimeSettings:
     audit_rotate_backups = _get_env_int("ELITE_AUDIT_ROTATE_BACKUPS", default=5, min_value=1, max_value=30)
     metrics_max_path_entries = _get_env_int("ELITE_METRICS_MAX_PATH_ENTRIES", default=3000, min_value=200, max_value=20000)
     ops_summary_cache_ttl_sec = _get_env_int("ELITE_OPS_SUMMARY_CACHE_TTL_SEC", default=15, min_value=0, max_value=300)
+    _batch_images_root_raw = os.getenv("ELITE_BATCH_IMAGES_ROOT", "").strip()
+    batch_images_root: Path | None = Path(_batch_images_root_raw) if _batch_images_root_raw else None
     return RuntimeSettings(
         api_host=host,
         api_port=port,
@@ -137,4 +140,5 @@ def load_runtime_settings(root_dir: Path) -> RuntimeSettings:
         audit_rotate_backups=audit_rotate_backups,
         metrics_max_path_entries=metrics_max_path_entries,
         ops_summary_cache_ttl_sec=ops_summary_cache_ttl_sec,
+        batch_images_root=batch_images_root,
     )

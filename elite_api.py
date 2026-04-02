@@ -95,6 +95,9 @@ ROOT_DIR = Path(__file__).resolve().parent
 SETTINGS = load_runtime_settings(ROOT_DIR)
 APP_VERSION = "2.3.0"
 DEFAULT_OUTPUT_ROOT = SETTINGS.default_output_root
+DEFAULT_BATCH_IMAGES_ROOT: Path | None = (
+    SETTINGS.batch_images_root.resolve() if SETTINGS.batch_images_root else None
+)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 # Allowed image magic-byte signatures: (offset, bytes)
@@ -985,6 +988,29 @@ def _csv_escape(value: str) -> str:
     if any(ch in text for ch in [",", '"']):
         return '"' + text.replace('"', '""') + '"'
     return text
+
+
+def _validate_batch_image_path(p: Path) -> Path:
+    """Resolve p and, when ELITE_BATCH_IMAGES_ROOT is configured, enforce it.
+
+    Prevents path-traversal attacks via the image_paths / ensemble_images fields.
+    When DEFAULT_BATCH_IMAGES_ROOT is None (not configured) the check is skipped
+    so existing deployments keep working; operators should set the env-var to
+    restrict the attack surface in production.
+    """
+    resolved = p.resolve()
+    if DEFAULT_BATCH_IMAGES_ROOT is not None:
+        try:
+            resolved.relative_to(DEFAULT_BATCH_IMAGES_ROOT)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"image path must be inside the configured batch images root "
+                    f"({DEFAULT_BATCH_IMAGES_ROOT}): {p}"
+                ),
+            )
+    return resolved
 
 
 def _generate_output_dir(prefix: str, requested_dir: str | None) -> Path:
@@ -2064,6 +2090,81 @@ def health() -> JSONResponse:
     if not ok:
         body["checks"] = payload.get("checks", [])
     return JSONResponse(status_code=200 if ok else 503, content=body)
+
+
+@app.get("/metrics", include_in_schema=False)
+def get_metrics() -> PlainTextResponse:
+    """Prometheus text-format exposition endpoint.
+
+    Exposes request counters, per-status-code counts, latency summaries, and
+    process uptime.  Pair with a Prometheus scrape config / Grafana dashboard
+    for production observability.
+    """
+    with METRICS_LOCK:
+        now_ts = time.time()
+        uptime = now_ts - APP_START_TS
+        recent_rpm = sum(1 for ts in REQUEST_RECENT_TS if (now_ts - ts) <= 60.0)
+        total = int(REQUEST_TOTAL_COUNT)
+        errors = int(REQUEST_ERROR_COUNT)
+        status_counts = dict(REQUEST_STATUS_COUNTS)
+        path_stats_snap = {
+            path: dict(stat)
+            for path, stat in REQUEST_PATH_STATS.items()
+            if int(stat.get("count", 0)) > 0
+        }
+
+    lines: list[str] = []
+
+    def _line(name: str, help_text: str, metric_type: str, value: float, labels: dict[str, str] | None = None) -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {metric_type}")
+        label_str = ""
+        if labels:
+            parts = ",".join(f'{k}="{v}"' for k, v in sorted(labels.items()))
+            label_str = f"{{{parts}}}"
+        lines.append(f"{name}{label_str} {value}")
+
+    _line("elite_process_uptime_seconds", "Process uptime in seconds", "gauge", round(uptime, 2))
+    _line("elite_requests_total", "Total HTTP requests processed", "counter", total)
+    _line("elite_requests_errors_total", "Total HTTP requests with 4xx/5xx response", "counter", errors)
+    _line("elite_requests_per_minute", "Request rate over the last 60 seconds", "gauge", float(recent_rpm))
+
+    # Per-status-code
+    lines.append("# HELP elite_requests_by_status_total Total requests grouped by HTTP status code")
+    lines.append("# TYPE elite_requests_by_status_total counter")
+    for status_code, count in sorted(status_counts.items()):
+        lines.append(f'elite_requests_by_status_total{{status="{status_code}"}} {int(count)}')
+
+    # Per-path latency summary
+    lines.append("# HELP elite_path_requests_total Total requests per API path")
+    lines.append("# TYPE elite_path_requests_total counter")
+    for path, stat in sorted(path_stats_snap.items()):
+        safe_path = path.replace('"', '\\"')
+        lines.append(f'elite_path_requests_total{{path="{safe_path}"}} {int(stat.get("count", 0))}')
+
+    lines.append("# HELP elite_path_errors_total Error requests per API path")
+    lines.append("# TYPE elite_path_errors_total counter")
+    for path, stat in sorted(path_stats_snap.items()):
+        safe_path = path.replace('"', '\\"')
+        lines.append(f'elite_path_errors_total{{path="{safe_path}"}} {int(stat.get("error_count", 0))}')
+
+    lines.append("# HELP elite_path_latency_ms_avg Average latency in milliseconds per API path")
+    lines.append("# TYPE elite_path_latency_ms_avg gauge")
+    for path, stat in sorted(path_stats_snap.items()):
+        safe_path = path.replace('"', '\\"')
+        count = int(stat.get("count", 0))
+        total_ms = float(stat.get("latency_ms_total", 0.0))
+        avg_ms = round(total_ms / count, 2) if count > 0 else 0.0
+        lines.append(f'elite_path_latency_ms_avg{{path="{safe_path}"}} {avg_ms}')
+
+    lines.append("# HELP elite_path_latency_ms_max Maximum latency in milliseconds per API path")
+    lines.append("# TYPE elite_path_latency_ms_max gauge")
+    for path, stat in sorted(path_stats_snap.items()):
+        safe_path = path.replace('"', '\\"')
+        lines.append(f'elite_path_latency_ms_max{{path="{safe_path}"}} {round(float(stat.get("latency_ms_max", 0.0)), 2)}')
+
+    body = "\n".join(lines) + "\n"
+    return PlainTextResponse(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 def _check_dir_writable(path: Path, probe_prefix: str) -> tuple[bool, str]:
@@ -3893,7 +3994,11 @@ def analyze_batch(req: BatchAnalyzeRequest) -> dict[str, Any]:
         sample_quad = roi_to_quad(req.sample_roi.to_roi())
 
     if req.image_paths:
-        image_paths = [Path(p) for p in req.image_paths if Path(p).is_file()]
+        image_paths = [
+            _validate_batch_image_path(Path(p))
+            for p in req.image_paths
+            if Path(p).is_file()
+        ]
         batch_dir = Path(req.batch_dir) if req.batch_dir else Path(req.image_paths[0]).parent
     else:
         batch_dir = Path(req.batch_dir)  # type: ignore[arg-type]
@@ -4040,7 +4145,11 @@ def analyze_ensemble(req: EnsembleAnalyzeRequest) -> dict[str, Any]:
         sample_quad = roi_to_quad(req.sample_roi.to_roi())
 
     if req.ensemble_images:
-        image_paths = [Path(p) for p in req.ensemble_images if Path(p).is_file()]
+        image_paths = [
+            _validate_batch_image_path(Path(p))
+            for p in req.ensemble_images
+            if Path(p).is_file()
+        ]
     else:
         ensemble_dir = Path(req.ensemble_dir)  # type: ignore[arg-type]
         if not ensemble_dir.exists():

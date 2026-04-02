@@ -286,3 +286,109 @@ class TestDBInitCaching:
         init_db(db)  # second call — must be a no-op
         mtime_after_second = db.stat().st_mtime
         assert mtime_after_first == mtime_after_second
+
+
+# ---------------------------------------------------------------------------
+# 8. Batch image path traversal prevention
+# ---------------------------------------------------------------------------
+
+class TestValidateBatchImagePath:
+    def test_path_within_root_accepted(self, tmp_path):
+        from unittest.mock import patch
+        from fastapi import HTTPException
+        img = tmp_path / "images" / "a.jpg"
+        img.parent.mkdir(parents=True)
+        img.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        with patch("elite_api.DEFAULT_BATCH_IMAGES_ROOT", tmp_path.resolve()):
+            from elite_api import _validate_batch_image_path
+            result = _validate_batch_image_path(img)
+            assert result == img.resolve()
+
+    def test_traversal_outside_root_rejected(self, tmp_path):
+        from unittest.mock import patch
+        from fastapi import HTTPException
+        allowed = tmp_path / "images"
+        allowed.mkdir()
+        with patch("elite_api.DEFAULT_BATCH_IMAGES_ROOT", allowed.resolve()):
+            from elite_api import _validate_batch_image_path
+            with pytest.raises(HTTPException) as exc_info:
+                _validate_batch_image_path(tmp_path / ".." / "etc" / "passwd")
+            assert exc_info.value.status_code == 400
+
+    def test_no_root_configured_allows_any_path(self, tmp_path):
+        from unittest.mock import patch
+        img = tmp_path / "any.jpg"
+        img.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        with patch("elite_api.DEFAULT_BATCH_IMAGES_ROOT", None):
+            from elite_api import _validate_batch_image_path
+            result = _validate_batch_image_path(img)
+            assert result == img.resolve()
+
+    def test_absolute_outside_root_rejected(self, tmp_path):
+        from unittest.mock import patch
+        from fastapi import HTTPException
+        allowed = tmp_path / "images"
+        allowed.mkdir()
+        with patch("elite_api.DEFAULT_BATCH_IMAGES_ROOT", allowed.resolve()):
+            from elite_api import _validate_batch_image_path
+            with pytest.raises(HTTPException) as exc_info:
+                _validate_batch_image_path(Path("/etc/passwd"))
+            assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 9. read_image() dimension & channel validation
+# ---------------------------------------------------------------------------
+
+class TestReadImageValidation:
+    def _write_valid_image(self, path: Path) -> None:
+        """Write a minimal 10×10 3-channel BGR image via cv2."""
+        import cv2 as _cv2
+        img = np.zeros((10, 10, 3), dtype=np.uint8)
+        _cv2.imwrite(str(path), img)
+
+    def test_valid_image_returned(self, tmp_path):
+        from elite_color_match import read_image
+        p = tmp_path / "ok.png"
+        self._write_valid_image(p)
+        result = read_image(p)
+        assert result.shape == (10, 10, 3)
+
+    def test_nonexistent_file_raises(self, tmp_path):
+        from elite_color_match import read_image
+        with pytest.raises(FileNotFoundError):
+            read_image(tmp_path / "missing.png")
+
+    def test_degenerate_tiny_image_rejected(self, tmp_path):
+        """A 1×1 image must be rejected (below _IMAGE_MIN_DIM)."""
+        import cv2 as _cv2
+        from elite_color_match import read_image
+        p = tmp_path / "tiny.png"
+        img = np.zeros((1, 1, 3), dtype=np.uint8)
+        _cv2.imwrite(str(p), img)
+        with pytest.raises(ValueError, match="too small"):
+            read_image(p)
+
+
+# ---------------------------------------------------------------------------
+# 10. /metrics Prometheus endpoint
+# ---------------------------------------------------------------------------
+
+class TestMetricsEndpoint:
+    def test_metrics_returns_200_text_plain(self):
+        from httpx import Client
+        from fastapi.testclient import TestClient
+        from elite_api import app
+        with TestClient(app) as client:
+            resp = client.get("/metrics")
+        assert resp.status_code == 200
+        assert "text/plain" in resp.headers.get("content-type", "")
+
+    def test_metrics_contains_required_fields(self):
+        from fastapi.testclient import TestClient
+        from elite_api import app
+        with TestClient(app) as client:
+            body = client.get("/metrics").text
+        assert "elite_requests_total" in body
+        assert "elite_process_uptime_seconds" in body
+        assert "elite_requests_per_minute" in body
