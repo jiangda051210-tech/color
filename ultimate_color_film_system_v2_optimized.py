@@ -3348,6 +3348,8 @@ class LifecycleRuleCenter:
 
 class ReportFactory:
     def release_report(self, lot_id: str, decision: Dict[str, Any], metrics: Dict[str, Any], audience: str = "internal") -> Dict[str, Any]:
+        waiver_summary = dict(decision.get("waiver_summary", {}) or {})
+        release_gate = dict(decision.get("release_gate", {}) or {})
         base = {
             "lot_id": lot_id,
             "generated_at": _now_iso(),
@@ -3357,12 +3359,19 @@ class ReportFactory:
             "max_de": metrics.get("max_de"),
         }
         if audience == "customer":
+            waiver_state = str(release_gate.get("lifecycle_state", "unknown"))
+            waiver_status = str(waiver_summary.get("status", "not_required"))
             return {
                 **base,
                 "summary": "batch_quality_assessed",
                 "details": {
                     "conclusion": decision.get("tier"),
                     "note": "further technical details available upon request",
+                    "release_control": {
+                        "state": waiver_state,
+                        "waiver_status": waiver_status,
+                        "message": "manual quality confirmation in progress" if waiver_status in {"missing", "invalid"} else "release control satisfied",
+                    },
                 },
             }
         return {
@@ -3372,6 +3381,8 @@ class ReportFactory:
                 "reasons": decision.get("reasons", []),
                 "hard_gate": decision.get("hard_gate", {}),
                 "action_plan": decision.get("action_plan", {}),
+                "waiver_summary": waiver_summary,
+                "release_gate": release_gate,
             },
         }
 
@@ -4049,6 +4060,78 @@ class UltimateColorFilmSystemV2Optimized:
                 "expired": expired_rows,
                 "invalid": invalid_rows,
             },
+        }
+
+    def get_release_waiver_health(
+        self,
+        lot_id: str,
+        lifecycle_state: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        m = dict(meta or {})
+        ts = m.get("decision_ts")
+        force_rule = m.get("force_lifecycle_rule_version")
+        rr = self.lifecycle_rules.resolve(meta=m, at_ts=ts, force_version=force_rule)
+        pack = rr["rule_pack"]
+        p = pack.get("params", {})
+
+        auto_release_states = set(p.get("auto_release_states", ["released", "in_run_monitoring"]))
+        waiver_required_states = set(p.get("waiver_required_states", ["hold_for_review", "retest", "arbitration"]))
+        waiver_enforced = bool(p.get("waiver_enforced", True))
+        release_allowed_states = set(p.get("release_allowed_states", ["released", "in_run_monitoring", "hold_for_review", "retest", "arbitration"]))
+
+        state_snapshot = self.state_machine.snapshot(lot_id=lot_id)
+        target_state = str(lifecycle_state or state_snapshot.get("current_state", "created"))
+        case_listing = self.list_quality_cases(lot_id=lot_id, last_n=200)
+        case_rows = list(case_listing.get("rows", []))
+        active_cases = [x for x in case_rows if str(x.get("state", "open")) not in {"closed", "cancelled"}]
+        waiver_ctx = self._collect_release_waiver_context(active_cases=active_cases, lifecycle_state=target_state, now_ts=ts)
+
+        waiver_required = waiver_enforced and target_state in waiver_required_states
+        invalid_count = int(waiver_ctx.get("release_waiver_invalid_count", 0) or 0)
+        expired_count = int(waiver_ctx.get("release_waiver_expired_count", 0) or 0)
+        scope_match = bool(waiver_ctx.get("release_waiver_scope_match", False))
+
+        if invalid_count > 0:
+            status = "invalid"
+        elif waiver_required and scope_match:
+            status = "approved"
+        elif waiver_required and not scope_match:
+            status = "missing"
+        else:
+            status = "not_required"
+
+        if status == "invalid":
+            next_action = "fix_waiver_approval_metadata"
+        elif status == "missing":
+            next_action = "open_case_and_add_release_waiver"
+        elif status == "approved":
+            next_action = "manual_review_then_release_under_waiver"
+        else:
+            next_action = "follow_standard_release_gate"
+
+        return {
+            "lot_id": lot_id,
+            "target_state": target_state,
+            "status": status,
+            "waiver_required": waiver_required,
+            "waiver_enforced": waiver_enforced,
+            "scope_match": scope_match,
+            "waiver_active_count": int(waiver_ctx.get("release_waiver_active_count", 0) or 0),
+            "waiver_expired_count": expired_count,
+            "waiver_invalid_count": invalid_count,
+            "waiver_ids": list(waiver_ctx.get("release_waiver_ids", [])),
+            "case_ids": list(waiver_ctx.get("release_waiver_case_ids", [])),
+            "state_release_ready": target_state in release_allowed_states,
+            "auto_release_state": target_state in auto_release_states,
+            "can_auto_release_now": (target_state in auto_release_states) and status in {"not_required", "approved"} and invalid_count <= 0,
+            "next_action": next_action,
+            "rule_trace": {
+                "lifecycle_rule_version": pack.get("version"),
+                "resolved_by": rr.get("resolved_by"),
+                "notes": pack.get("notes"),
+            },
+            "waiver_summary": waiver_ctx.get("release_waiver_summary", {}),
         }
 
     def evaluate_auto_boundary(self, context: Dict[str, Any], meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -4751,12 +4834,33 @@ class UltimateColorFilmSystemV2Optimized:
         audience: str = "internal",
     ) -> Dict[str, Any]:
         fd = assessment.get("final_decision", {})
+        release_waiver = dict(assessment.get("quality_fact_layer", {}).get("release_waiver", {}) or {})
+        release_gate = dict(assessment.get("boundary", {}).get("release_gate", {}) or {})
+        waiver_status = "not_required"
+        if int(release_waiver.get("invalid_count", 0) or 0) > 0:
+            waiver_status = "invalid"
+        elif bool(release_waiver.get("scope_match", False)):
+            waiver_status = "approved"
+        elif bool(release_gate.get("waiver_enforced", False)) and str(release_gate.get("lifecycle_state", "")) in set(
+            release_gate.get("waiver_required_states", [])
+        ):
+            waiver_status = "missing"
         decision_doc = {
             "tier": fd.get("tier"),
             "decision_code": fd.get("decision_code"),
             "reasons": fd.get("reasons", []),
             "hard_gate": assessment.get("boundary", {}),
             "action_plan": assessment.get("disposition_plan", {}),
+            "release_gate": release_gate,
+            "waiver_summary": {
+                "status": waiver_status,
+                "present": bool(release_waiver.get("present", False)),
+                "scope_match": bool(release_waiver.get("scope_match", False)),
+                "active_count": int(release_waiver.get("active_count", 0) or 0),
+                "expired_count": int(release_waiver.get("expired_count", 0) or 0),
+                "invalid_count": int(release_waiver.get("invalid_count", 0) or 0),
+                "waiver_ids": list(release_waiver.get("waiver_ids", [])),
+            },
         }
         report = self.report_factory.release_report(lot_id=lot_id, decision=decision_doc, metrics=metrics, audience=audience)
         return {

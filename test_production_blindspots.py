@@ -340,6 +340,99 @@ def test_non_release_state_with_valid_waiver_allows_manual_review_only():
     assert out["quality_fact_layer"]["release_waiver"]["scope_match"] is True
 
 
+def test_release_waiver_health_reports_missing_and_approved():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-WAIVER-HEALTH"
+    _add_trace(sys, lot, complete=True)
+    sys.transition_state(lot_id=lot, to_state="hold_for_review", actor="QA", reason="manual hold", force=True)
+
+    missing = sys.get_release_waiver_health(lot_id=lot, lifecycle_state="hold_for_review")
+    assert missing["status"] == "missing"
+    assert missing["waiver_required"] is True
+    assert missing["scope_match"] is False
+
+    opened = sys.open_quality_case(
+        lot_id=lot,
+        case_type="risk_acceptance",
+        issue="waiver health approved path",
+        severity="medium",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"waiver-health-{lot}",
+    )
+    cid = opened.get("case_id")
+    assert cid
+    wv = sys.add_case_waiver(
+        case_id=cid,
+        actor="QA",
+        approved_by="QA Manager",
+        reason="approved controlled release",
+        approver_role="quality_manager",
+        customer_tier="standard",
+        waiver_type="release_with_risk",
+        expiry_ts=time.time() + 3600.0,
+    )
+    assert wv["ok"] is True
+
+    approved = sys.get_release_waiver_health(lot_id=lot, lifecycle_state="hold_for_review")
+    assert approved["status"] == "approved"
+    assert approved["scope_match"] is True
+    assert approved["waiver_active_count"] >= 1
+
+
+def test_release_report_contains_waiver_summary_for_audiences():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-WAIVER-REPORT"
+    _add_trace(sys, lot, complete=True)
+    sys.transition_state(lot_id=lot, to_state="hold_for_review", actor="QA", reason="manual hold", force=True)
+    opened = sys.open_quality_case(
+        lot_id=lot,
+        case_type="risk_acceptance",
+        issue="report waiver path",
+        severity="medium",
+        source="unit_test",
+        created_by="QA",
+        dedup_key=f"waiver-report-{lot}",
+    )
+    cid = opened.get("case_id")
+    assert cid
+    wv = sys.add_case_waiver(
+        case_id=cid,
+        actor="QA",
+        approved_by="QA Manager",
+        reason="approved controlled release",
+        approver_role="quality_manager",
+        customer_tier="standard",
+        waiver_type="release_with_risk",
+        expiry_ts=time.time() + 3600.0,
+    )
+    assert wv["ok"] is True
+
+    payload = _good_assessment_payload(lot)
+    payload["meta"]["idempotency_key"] = f"idem-{lot}-001"
+    out = sys.integrated_assessment(**payload)
+
+    internal_report = sys.generate_release_report(
+        lot_id=lot,
+        assessment=out,
+        metrics={"avg_de": 1.12, "max_de": 1.96},
+        audience="internal",
+    )
+    details = internal_report["report"]["details"]
+    assert "waiver_summary" in details
+    assert details["waiver_summary"]["status"] in {"approved", "missing", "invalid", "not_required"}
+
+    customer_report = sys.generate_release_report(
+        lot_id=lot,
+        assessment=out,
+        metrics={"avg_de": 1.12, "max_de": 1.96},
+        audience="customer",
+    )
+    c_details = customer_report["report"]["details"]
+    assert "release_control" in c_details
+    assert c_details["release_control"]["waiver_status"] in {"approved", "missing", "invalid", "not_required"}
+
+
 def test_trace_revision_and_override_append_only():
     sys = UltimateColorFilmSystemV2Optimized()
     lot = "LOT-TRACE-REV"
@@ -805,6 +898,8 @@ def run_all():
     test_state_machine_illegal_transition_blocked()
     test_non_release_state_requires_waiver_hard_block()
     test_non_release_state_with_valid_waiver_allows_manual_review_only()
+    test_release_waiver_health_reports_missing_and_approved()
+    test_release_report_contains_waiver_summary_for_audiences()
     test_trace_revision_and_override_append_only()
     test_trace_event_idempotency_deduplicates()
     test_replay_with_new_rule_or_meta()

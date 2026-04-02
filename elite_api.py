@@ -5066,6 +5066,7 @@ def get_lifecycle_manifest() -> dict[str, Any]:
             "spc_report": "/v1/lifecycle/spc/report",
             "state_snapshot": "/v1/lifecycle/state/snapshot",
             "roll_summary": "/v1/lifecycle/roll/summary",
+            "waiver_health": "/v1/lifecycle/decision/waiver-health",
             "rule_simulation": "/v1/lifecycle/decision/simulate-rules",
             "case_list": "/v1/lifecycle/case/list",
             "case_sla_report": "/v1/lifecycle/case/sla-report",
@@ -5531,6 +5532,7 @@ def get_lifecycle_advanced_manifest() -> dict[str, Any]:
             "rules": "/v1/lifecycle/rules/*",
             "version_link": "/v1/lifecycle/version-link/*",
             "integrated_decision": "/v1/lifecycle/decision/integrated",
+            "waiver_health": "/v1/lifecycle/decision/waiver-health",
             "decision_replay": "/v1/lifecycle/decision/replay",
             "decision_rule_simulation": "/v1/lifecycle/decision/simulate-rules",
             "decision_rule_batch_simulation": "/v1/lifecycle/decision/simulate-rules-batch",
@@ -6041,6 +6043,24 @@ def post_lifecycle_decision_integrated(payload: dict[str, Any]) -> dict[str, Any
             alt_light_labs=payload.get("alt_light_labs") if isinstance(payload.get("alt_light_labs"), dict) else None,
             post_process_steps=payload.get("post_process_steps") if isinstance(payload.get("post_process_steps"), list) else None,
             storage_context=payload.get("storage_context") if isinstance(payload.get("storage_context"), dict) else None,
+        )
+    return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
+
+
+@app.get("/v1/lifecycle/decision/waiver-health")
+def get_lifecycle_decision_waiver_health(
+    lot_id: str,
+    target_state: str | None = None,
+    force_lifecycle_rule_version: str | None = None,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    if force_lifecycle_rule_version:
+        meta["force_lifecycle_rule_version"] = force_lifecycle_rule_version
+    with ULTIMATE_LOCK:
+        result = ULTIMATE_SYSTEM.get_release_waiver_health(
+            lot_id=lot_id,
+            lifecycle_state=(str(target_state) if target_state else None),
+            meta=meta if meta else None,
         )
     return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
 
