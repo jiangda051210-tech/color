@@ -1,0 +1,550 @@
+"""
+SENIA 高级前端界面
+=================
+现代化设计: 毛玻璃 + 渐变 + 微动画 + AI智能感
+"""
+
+from __future__ import annotations
+
+def render_senia_home(app_version: str = "2.4.0") -> str:
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SENIA Elite AI Color Matching</title>
+<style>
+*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+:root {{
+  --bg-primary: #06080f;
+  --bg-card: rgba(12, 20, 35, 0.72);
+  --bg-glass: rgba(255,255,255,0.04);
+  --border: rgba(255,255,255,0.07);
+  --border-active: rgba(99,179,255,0.35);
+  --text-primary: #e8edf5;
+  --text-secondary: rgba(200,210,230,0.6);
+  --text-dim: rgba(160,175,200,0.4);
+  --accent: #4ea8ff;
+  --accent-glow: rgba(78,168,255,0.25);
+  --pass: #00e68a;
+  --pass-bg: rgba(0,230,138,0.1);
+  --marginal: #ffc14d;
+  --marginal-bg: rgba(255,193,77,0.1);
+  --fail: #ff5c72;
+  --fail-bg: rgba(255,92,114,0.1);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+}}
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+body {{
+  font-family: var(--font);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+}}
+
+/* ── 背景光效 ── */
+body::before {{
+  content: '';
+  position: fixed; top: -40%; left: -20%; width: 80%; height: 80%;
+  background: radial-gradient(ellipse, rgba(78,168,255,0.07) 0%, transparent 70%);
+  pointer-events: none; z-index: 0;
+}}
+body::after {{
+  content: '';
+  position: fixed; bottom: -30%; right: -10%; width: 60%; height: 60%;
+  background: radial-gradient(ellipse, rgba(0,230,138,0.04) 0%, transparent 70%);
+  pointer-events: none; z-index: 0;
+}}
+
+.app {{ position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 24px 20px; }}
+
+/* ── 顶栏 ── */
+.topbar {{
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 0; margin-bottom: 32px; border-bottom: 1px solid var(--border);
+}}
+.brand {{ display: flex; align-items: center; gap: 12px; }}
+.brand-icon {{
+  width: 38px; height: 38px; border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent), #00e68a);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 16px; color: #06080f;
+}}
+.brand-text {{ font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }}
+.brand-tag {{
+  font-size: 11px; color: var(--text-dim); font-weight: 400;
+  background: var(--bg-glass); padding: 3px 8px; border-radius: 6px;
+  border: 1px solid var(--border); font-family: var(--mono);
+}}
+.topbar-links {{ display: flex; gap: 6px; }}
+.topbar-links a {{
+  color: var(--text-secondary); text-decoration: none; font-size: 13px;
+  padding: 6px 14px; border-radius: 8px; transition: all .2s;
+  border: 1px solid transparent;
+}}
+.topbar-links a:hover {{
+  color: var(--text-primary); background: var(--bg-glass);
+  border-color: var(--border);
+}}
+
+/* ── Hero ── */
+.hero {{ text-align: center; margin-bottom: 48px; }}
+.hero h1 {{
+  font-size: 40px; font-weight: 700; letter-spacing: -1.5px;
+  background: linear-gradient(135deg, #fff 20%, var(--accent) 50%, #00e68a 80%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; margin-bottom: 12px;
+}}
+.hero p {{ color: var(--text-secondary); font-size: 16px; max-width: 560px; margin: 0 auto; line-height: 1.6; }}
+
+/* ── 上传区 ── */
+.upload-zone {{
+  background: var(--bg-card);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border: 1.5px dashed var(--border-active);
+  border-radius: var(--radius); padding: 48px 32px; text-align: center;
+  cursor: pointer; transition: all .3s; position: relative; overflow: hidden;
+  margin-bottom: 32px;
+}}
+.upload-zone:hover {{ border-color: var(--accent); background: rgba(12,20,35,0.85); }}
+.upload-zone.dragging {{ border-color: var(--accent); box-shadow: 0 0 40px var(--accent-glow); }}
+.upload-zone.has-file {{ border-style: solid; border-color: var(--pass); }}
+.upload-icon {{ font-size: 48px; margin-bottom: 12px; opacity: 0.7; }}
+.upload-title {{ font-size: 18px; font-weight: 600; margin-bottom: 8px; }}
+.upload-hint {{ color: var(--text-secondary); font-size: 13px; }}
+.upload-preview {{
+  display: none; max-height: 280px; border-radius: var(--radius-sm);
+  margin-top: 16px; object-fit: contain;
+}}
+.upload-zone.has-file .upload-preview {{ display: block; }}
+.upload-zone.has-file .upload-placeholder {{ display: none; }}
+
+/* ── 设置行 ── */
+.settings-row {{
+  display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 32px;
+  align-items: end;
+}}
+.field {{ flex: 1; min-width: 140px; }}
+.field label {{
+  display: block; font-size: 11px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; font-weight: 500;
+}}
+.field select, .field input {{
+  width: 100%; padding: 10px 14px; background: var(--bg-glass);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: 14px; font-family: var(--font);
+  transition: border-color .2s; outline: none;
+}}
+.field select:focus, .field input:focus {{ border-color: var(--accent); }}
+
+.btn-analyze {{
+  padding: 10px 36px; border: none; border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent), #00c8ff);
+  color: #06080f; font-size: 15px; font-weight: 600; cursor: pointer;
+  transition: all .2s; font-family: var(--font); min-width: 140px;
+  box-shadow: 0 4px 20px var(--accent-glow);
+}}
+.btn-analyze:hover {{ transform: translateY(-1px); box-shadow: 0 6px 30px var(--accent-glow); }}
+.btn-analyze:disabled {{ opacity: 0.5; cursor: not-allowed; transform: none; }}
+
+/* ── 分析进度 ── */
+.progress-bar {{
+  display: none; margin-bottom: 32px; background: var(--bg-card);
+  border-radius: var(--radius); padding: 24px; backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+}}
+.progress-bar.active {{ display: block; }}
+.progress-steps {{ display: flex; gap: 4px; margin-bottom: 16px; }}
+.progress-step {{
+  flex: 1; height: 3px; background: var(--bg-glass); border-radius: 2px;
+  transition: background .5s;
+}}
+.progress-step.done {{ background: var(--accent); }}
+.progress-step.active {{ background: var(--accent); animation: pulse-step 1s infinite; }}
+@keyframes pulse-step {{ 0%,100% {{ opacity: 1; }} 50% {{ opacity: 0.4; }} }}
+.progress-label {{
+  font-size: 13px; color: var(--text-secondary); text-align: center;
+  font-family: var(--mono);
+}}
+
+/* ── 结果区 ── */
+.result-area {{ display: none; }}
+.result-area.active {{ display: block; }}
+
+/* 判定大卡片 */
+.verdict-card {{
+  background: var(--bg-card); backdrop-filter: blur(20px);
+  border-radius: var(--radius); padding: 32px; margin-bottom: 24px;
+  border: 1px solid var(--border); position: relative; overflow: hidden;
+}}
+.verdict-card::before {{
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+}}
+.verdict-card.pass::before {{ background: linear-gradient(90deg, var(--pass), #00c8ff); }}
+.verdict-card.marginal::before {{ background: linear-gradient(90deg, var(--marginal), #ffaa00); }}
+.verdict-card.fail::before {{ background: linear-gradient(90deg, var(--fail), #ff3366); }}
+
+.verdict-header {{ display: flex; align-items: center; gap: 20px; margin-bottom: 20px; }}
+.verdict-badge {{
+  font-size: 32px; font-weight: 700; letter-spacing: -1px; font-family: var(--mono);
+  padding: 8px 24px; border-radius: var(--radius-sm);
+}}
+.verdict-badge.pass {{ color: var(--pass); background: var(--pass-bg); }}
+.verdict-badge.marginal {{ color: var(--marginal); background: var(--marginal-bg); }}
+.verdict-badge.fail {{ color: var(--fail); background: var(--fail-bg); }}
+.verdict-de {{ font-size: 14px; color: var(--text-secondary); }}
+.verdict-de strong {{ font-size: 28px; font-weight: 600; color: var(--text-primary); font-family: var(--mono); }}
+.verdict-dirs {{
+  display: flex; gap: 8px; flex-wrap: wrap;
+}}
+.dir-tag {{
+  padding: 5px 14px; border-radius: 20px; font-size: 13px; font-weight: 500;
+  background: var(--bg-glass); border: 1px solid var(--border);
+}}
+
+/* 指标网格 */
+.metrics-grid {{
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px; margin-bottom: 24px;
+}}
+.metric-card {{
+  background: var(--bg-glass); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 16px; text-align: center;
+}}
+.metric-label {{ font-size: 11px; color: var(--text-dim); text-transform: uppercase;
+  letter-spacing: 0.6px; margin-bottom: 6px; }}
+.metric-value {{ font-size: 24px; font-weight: 600; font-family: var(--mono); }}
+
+/* 调色建议 / 根因 双列 */
+.insights-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }}
+@media (max-width: 768px) {{ .insights-row {{ grid-template-columns: 1fr; }} }}
+
+.insight-card {{
+  background: var(--bg-card); backdrop-filter: blur(20px);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 24px;
+}}
+.insight-title {{
+  font-size: 13px; color: var(--text-dim); text-transform: uppercase;
+  letter-spacing: 0.8px; margin-bottom: 14px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}}
+.advice-item {{
+  padding: 10px 14px; margin-bottom: 8px; border-radius: var(--radius-sm);
+  background: var(--bg-glass); border-left: 3px solid var(--accent);
+  font-size: 14px; line-height: 1.5;
+}}
+.advice-item.process {{ border-left-color: var(--marginal); }}
+.root-cause-badge {{
+  display: inline-block; padding: 6px 16px; border-radius: 8px;
+  font-size: 14px; font-weight: 600; margin-bottom: 12px;
+}}
+.root-cause-badge.recipe {{ background: var(--marginal-bg); color: var(--marginal); }}
+.root-cause-badge.process {{ background: var(--fail-bg); color: var(--fail); }}
+.root-cause-badge.ok {{ background: var(--pass-bg); color: var(--pass); }}
+
+/* 热图 */
+.heatmap-section {{
+  background: var(--bg-card); backdrop-filter: blur(20px);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 24px; margin-bottom: 24px; text-align: center;
+}}
+.heatmap-section img {{
+  max-width: 100%; border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}}
+
+/* 底部 */
+.footer {{
+  text-align: center; padding: 32px 0; color: var(--text-dim); font-size: 12px;
+  border-top: 1px solid var(--border); margin-top: 48px;
+}}
+
+/* ── 动画 ── */
+@keyframes fadeInUp {{
+  from {{ opacity: 0; transform: translateY(20px); }}
+  to {{ opacity: 1; transform: translateY(0); }}
+}}
+.result-area.active > * {{ animation: fadeInUp .5s ease-out both; }}
+.result-area.active > *:nth-child(2) {{ animation-delay: .1s; }}
+.result-area.active > *:nth-child(3) {{ animation-delay: .2s; }}
+.result-area.active > *:nth-child(4) {{ animation-delay: .3s; }}
+.result-area.active > *:nth-child(5) {{ animation-delay: .4s; }}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-icon">S</div>
+      <span class="brand-text">SENIA Elite</span>
+      <span class="brand-tag">v{app_version}</span>
+    </div>
+    <nav class="topbar-links">
+      <a href="/v1/web/executive-dashboard">Dashboard</a>
+      <a href="/v1/web/precision-observatory">Observatory</a>
+      <a href="/docs">API</a>
+    </nav>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <h1>AI Color Matching</h1>
+    <p>上传一张照片, 自动检测大货与标样, 输出三级判定、偏差方向和调色建议</p>
+  </section>
+
+  <!-- 上传区 -->
+  <div class="upload-zone" id="uploadZone">
+    <div class="upload-placeholder">
+      <div class="upload-icon">+</div>
+      <div class="upload-title">拖拽照片到此处, 或点击选择</div>
+      <div class="upload-hint">支持 JPG / PNG / DNG &nbsp;&middot;&nbsp; 建议使用 ProRAW 格式拍摄</div>
+    </div>
+    <img class="upload-preview" id="uploadPreview">
+    <input type="file" id="fileInput" accept="image/*" style="display:none">
+  </div>
+
+  <!-- 设置行 -->
+  <div class="settings-row">
+    <div class="field">
+      <label>Material Profile</label>
+      <select id="profile">
+        <option value="auto">Auto Detect</option>
+        <option value="wood">Wood (木纹)</option>
+        <option value="solid">Solid (纯色)</option>
+        <option value="stone">Stone (石纹)</option>
+        <option value="metallic">Metallic (金属)</option>
+        <option value="high_gloss">High Gloss (高光)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Lot ID</label>
+      <input id="lotId" placeholder="e.g. L20240728-01">
+    </div>
+    <div class="field">
+      <label>Product</label>
+      <input id="productCode" placeholder="e.g. AW-125470">
+    </div>
+    <div class="field">
+      <label>Grid</label>
+      <select id="grid">
+        <option value="6x8" selected>6 x 8</option>
+        <option value="4x6">4 x 6</option>
+        <option value="8x10">8 x 10</option>
+      </select>
+    </div>
+    <button class="btn-analyze" id="btnAnalyze" disabled>Analyze</button>
+  </div>
+
+  <!-- 进度条 -->
+  <div class="progress-bar" id="progressBar">
+    <div class="progress-steps" id="progressSteps"></div>
+    <div class="progress-label" id="progressLabel"></div>
+  </div>
+
+  <!-- 结果区 -->
+  <div class="result-area" id="resultArea">
+    <!-- JS 动态填充 -->
+  </div>
+
+  <footer class="footer">
+    SENIA Elite v{app_version} &mdash; AI-Powered Color Quality Intelligence
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const uploadZone = $('uploadZone');
+const fileInput = $('fileInput');
+const preview = $('uploadPreview');
+const btnAnalyze = $('btnAnalyze');
+const progressBar = $('progressBar');
+const resultArea = $('resultArea');
+let selectedFile = null;
+
+// ── 上传处理 ──
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => {{ e.preventDefault(); uploadZone.classList.add('dragging'); }});
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragging'));
+uploadZone.addEventListener('drop', e => {{
+  e.preventDefault(); uploadZone.classList.remove('dragging');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+}});
+fileInput.addEventListener('change', () => {{ if (fileInput.files.length) handleFile(fileInput.files[0]); }});
+
+function handleFile(file) {{
+  selectedFile = file;
+  const reader = new FileReader();
+  reader.onload = e => {{ preview.src = e.target.result; }};
+  reader.readAsDataURL(file);
+  uploadZone.classList.add('has-file');
+  btnAnalyze.disabled = false;
+}}
+
+// ── 分析进度动画 ──
+const STEPS = [
+  'Detecting board & sample...',
+  'Perspective correction...',
+  'Filtering text & stickers...',
+  'Extracting base color...',
+  'Computing CIEDE2000...',
+  'Three-tier judgment...',
+  'Generating advice...',
+];
+
+function showProgress(stepIdx) {{
+  progressBar.classList.add('active');
+  let html = '';
+  for (let i = 0; i < STEPS.length; i++) {{
+    const cls = i < stepIdx ? 'done' : i === stepIdx ? 'active' : '';
+    html += `<div class="progress-step ${{cls}}"></div>`;
+  }}
+  $('progressSteps').innerHTML = html;
+  $('progressLabel').textContent = STEPS[Math.min(stepIdx, STEPS.length - 1)];
+}}
+
+// ── 分析请求 ──
+btnAnalyze.addEventListener('click', async () => {{
+  if (!selectedFile) return;
+  btnAnalyze.disabled = true;
+  resultArea.classList.remove('active');
+  resultArea.innerHTML = '';
+
+  // 模拟进度
+  let step = 0;
+  const timer = setInterval(() => {{ if (step < STEPS.length - 1) showProgress(++step); }}, 600);
+
+  try {{
+    showProgress(0);
+    const form = new FormData();
+    form.append('image', selectedFile);
+    form.append('profile', $('profile').value);
+    form.append('lot_id', $('lotId').value);
+    form.append('product_code', $('productCode').value);
+    form.append('grid', $('grid').value);
+
+    const resp = await fetch('/v1/senia/analyze', {{ method: 'POST', body: form }});
+    clearInterval(timer);
+    showProgress(STEPS.length);
+
+    if (!resp.ok) {{
+      const err = await resp.json().catch(() => ({{ detail: resp.statusText }}));
+      throw new Error(err.detail || 'Analysis failed');
+    }}
+
+    const data = await resp.json();
+    setTimeout(() => {{ renderResult(data); progressBar.classList.remove('active'); }}, 500);
+  }} catch (err) {{
+    clearInterval(timer);
+    progressBar.classList.remove('active');
+    resultArea.innerHTML = `<div class="verdict-card fail"><div class="verdict-header">
+      <div class="verdict-badge fail">ERROR</div>
+      <div>${{esc(err.message)}}</div></div></div>`;
+    resultArea.classList.add('active');
+  }} finally {{
+    btnAnalyze.disabled = false;
+  }}
+}});
+
+function esc(s) {{ const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }}
+
+// ── 渲染结果 ──
+function renderResult(d) {{
+  const tier = d.tier || 'UNKNOWN';
+  const tierCls = tier === 'PASS' ? 'pass' : tier === 'MARGINAL' ? 'marginal' : 'fail';
+  const tierLabel = tier === 'PASS' ? '合格' : tier === 'MARGINAL' ? '临界' : '不合格';
+  const summary = d.result?.summary || {{}};
+  const dev = d.deviation || {{}};
+  const dirs = dev.directions || [];
+  const recipe = d.recipe_advice || {{}};
+  const uni = d.uniformity || {{}};
+  const reasons = d.tier_reasons || [];
+  const heatmapUrl = d.artifacts?.heatmap;
+
+  let html = '';
+
+  // 判定卡片
+  html += `<div class="verdict-card ${{tierCls}}">
+    <div class="verdict-header">
+      <div class="verdict-badge ${{tierCls}}">${{tierLabel}}</div>
+      <div class="verdict-de"><strong>${{(summary.avg_delta_e00||0).toFixed(2)}}</strong> ΔE00 avg
+        &nbsp;&middot;&nbsp; p95: ${{(summary.p95_delta_e00||0).toFixed(2)}}
+        &nbsp;&middot;&nbsp; max: ${{(summary.max_delta_e00||0).toFixed(2)}}</div>
+    </div>
+    <div class="verdict-dirs">
+      ${{dirs.map(d => `<span class="dir-tag">${{esc(d)}}</span>`).join('')}}
+      ${{dirs.length === 0 ? '<span class="dir-tag" style="border-color:var(--pass)">色差极小</span>' : ''}}
+    </div>
+  </div>`;
+
+  // 指标网格
+  html += `<div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-label">ΔL (明暗)</div>
+      <div class="metric-value" style="color:${{Math.abs(dev.dL||0)>1?'var(--marginal)':'var(--text-primary)'}}">${{(dev.dL||0).toFixed(2)}}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Δa (红绿)</div>
+      <div class="metric-value" style="color:${{Math.abs(dev.da||0)>0.8?'var(--fail)':'var(--text-primary)'}}">${{(dev.da||0).toFixed(2)}}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Δb (黄蓝)</div>
+      <div class="metric-value" style="color:${{Math.abs(dev.db||0)>0.8?'var(--fail)':'var(--text-primary)'}}">${{(dev.db||0).toFixed(2)}}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">ΔC (饱和度)</div>
+      <div class="metric-value">${{(dev.dC||0).toFixed(2)}}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Material</div>
+      <div class="metric-value" style="font-size:16px">${{esc(d.profile?.used || 'auto')}}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Confidence</div>
+      <div class="metric-value">${{((d.result?.confidence?.overall||0)*100).toFixed(0)}}%</div>
+    </div>
+  </div>`;
+
+  // 调色建议 + 根因
+  const advices = recipe.advices || [];
+  html += `<div class="insights-row">
+    <div class="insight-card">
+      <div class="insight-title">&#x1f3af; Recipe Advice &middot; 调色建议</div>
+      ${{advices.length === 0 ? '<div class="advice-item" style="border-left-color:var(--pass)">色差合格, 无需调整</div>' :
+        advices.slice(0, 6).map(a => `<div class="advice-item ${{a.category === 'process' ? 'process' : ''}}">${{esc(a.action)}}</div>`).join('')}}
+    </div>
+    <div class="insight-card">
+      <div class="insight-title">&#x1f50d; Root Cause &middot; 根因分析</div>
+      <div class="root-cause-badge ${{uni.root_cause || 'ok'}}">${{
+        uni.root_cause === 'recipe' ? '配方问题' :
+        uni.root_cause === 'process' ? '工艺问题' :
+        uni.root_cause === 'mixed' ? '混合问题' : '正常'}}</div>
+      <p style="color:var(--text-secondary);font-size:14px;line-height:1.6">${{esc(uni.explanation || '')}}</p>
+      ${{reasons.map(r => `<p style="color:var(--text-dim);font-size:12px;margin-top:6px">&bull; ${{esc(r)}}</p>`).join('')}}
+    </div>
+  </div>`;
+
+  // 热图
+  if (heatmapUrl) {{
+    html += `<div class="heatmap-section">
+      <div class="insight-title" style="text-align:left;margin-bottom:16px">&#x1f5fa; Color Deviation Heatmap</div>
+      <img src="/v1/senia/artifact?path=${{encodeURIComponent(heatmapUrl)}}" alt="heatmap"
+           onerror="this.parentElement.style.display='none'">
+    </div>`;
+  }}
+
+  resultArea.innerHTML = html;
+  resultArea.classList.add('active');
+  window.scrollTo({{ top: resultArea.offsetTop - 20, behavior: 'smooth' }});
+}}
+</script>
+</body>
+</html>"""

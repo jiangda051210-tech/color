@@ -84,6 +84,7 @@ from elite_innovation_state import (
 )
 from elite_backup import BackupManager
 from senia_image_pipeline import analyze_photo as senia_analyze_photo
+from senia_web_ui import render_senia_home
 from elite_batch_parallel import run_parallel_batch
 from elite_config_reload import ConfigStore
 from elite_event_bus import EventBus, FileQueueSubscriber, QualityDecisionEvent
@@ -3563,7 +3564,26 @@ def get_system_self_test() -> dict[str, Any]:
 
 @app.get("/", response_class=HTMLResponse)
 def home() -> str:
+    return render_senia_home(APP_VERSION)
+
+
+@app.get("/v1/web/classic", response_class=HTMLResponse)
+def home_classic() -> str:
     return render_home_page(APP_VERSION)
+
+
+@app.get("/v1/senia/artifact")
+def serve_senia_artifact(path: str = "") -> Response:
+    """Serve generated analysis artifacts (heatmap, detection overlay, etc.)."""
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+    # Security: only serve from output dirs
+    if ".." in str(p):
+        raise HTTPException(status_code=403, detail="forbidden")
+    suffix = p.suffix.lower()
+    media_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".json": "application/json"}
+    return FileResponse(str(p), media_type=media_types.get(suffix, "application/octet-stream"))
 
 
 @app.get("/v1/web/executive-dashboard", response_class=HTMLResponse)
