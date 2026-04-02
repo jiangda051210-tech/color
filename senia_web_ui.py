@@ -11,8 +11,13 @@ def render_senia_home(app_version: str = "2.4.0") -> str:
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SENIA Elite AI Color Matching</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#06080f">
+<meta name="description" content="SENIA 智能对色系统 — 拍照即出结果">
+<link rel="manifest" href="data:application/json,{{}}" >
+<title>SENIA 智能对色</title>
 <style>
 *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
@@ -268,19 +273,43 @@ body::after {{
 
 /* ── 动画 ── */
 /* ── 移动端适配 ── */
-@media (max-width: 640px) {{
-  .hero h1 {{ font-size: 26px; }}
-  .hero p {{ font-size: 14px; }}
-  .verdict-header {{ flex-direction: column; gap: 10px; }}
-  .verdict-badge {{ font-size: 24px; padding: 6px 16px; }}
-  .verdict-de strong {{ font-size: 22px; }}
-  .verdict-card {{ padding: 18px 14px; }}
-  .metrics-grid {{ grid-template-columns: repeat(2, 1fr); }}
+/* ── 平板适配 ── */
+@media (max-width: 900px) {{
+  .metrics-grid {{ grid-template-columns: repeat(3, 1fr); }}
   .insights-row {{ grid-template-columns: 1fr; }}
-  .settings-row {{ flex-direction: column; }}
+}}
+
+/* ── 手机适配 (关键: 44px 最小触摸目标) ── */
+@media (max-width: 640px) {{
+  .app {{ padding: 12px 10px; }}
+  .hero {{ margin-bottom: 20px; }}
+  .hero h1 {{ font-size: 24px; }}
+  .hero p {{ font-size: 13px; }}
+  .verdict-header {{ flex-direction: column; gap: 8px; }}
+  .verdict-badge {{ font-size: 22px; padding: 6px 16px; }}
+  .verdict-de strong {{ font-size: 20px; }}
+  .verdict-card {{ padding: 14px 12px; }}
+  .metrics-grid {{ grid-template-columns: repeat(2, 1fr); gap: 8px; }}
+  .metric-card {{ padding: 10px; }}
+  .metric-value {{ font-size: 18px; }}
+  .insights-row {{ grid-template-columns: 1fr; gap: 10px; }}
+  .insight-card {{ padding: 14px; }}
+  .settings-row {{ flex-direction: column; gap: 8px; }}
   .field {{ min-width: 100%; }}
-  .btn-analyze {{ width: 100%; }}
-  .topbar {{ flex-direction: column; gap: 8px; }}
+  .field select, .field input {{ padding: 12px 14px; font-size: 16px; min-height: 44px; }}
+  .btn-analyze {{ width: 100%; min-height: 48px; font-size: 16px; }}
+  .topbar {{ flex-direction: column; gap: 6px; align-items: flex-start; }}
+  .topbar-links {{ width: 100%; overflow-x: auto; white-space: nowrap; }}
+  .topbar-links a {{ padding: 8px 12px; min-height: 36px; }}
+  .upload-zone {{ padding: 24px 16px; }}
+  .dir-tag {{ padding: 6px 12px; font-size: 12px; min-height: 32px; display: inline-flex; align-items: center; }}
+  .advice-item {{ padding: 10px 12px; font-size: 13px; }}
+  /* 双拍上传在手机上竖排 */
+  #dualUpload {{ grid-template-columns: 1fr !important; }}
+  /* 模式按钮更大 */
+  #modeBtn1, #modeBtn2 {{ padding: 12px 16px; font-size: 13px; flex: 1; min-height: 44px; }}
+  /* 反馈按钮更大 */
+  .insight-card button {{ min-height: 44px; }}
 }}
 
 @keyframes fadeInUp {{
@@ -412,7 +441,7 @@ body::after {{
   </div>
 
   <footer class="footer">
-    SENIA Elite v{app_version} &mdash; AI-Powered Color Quality Intelligence
+    SENIA Elite v{app_version} &mdash; 智能对色系统 &nbsp;|&nbsp; 有网即可访问 &nbsp;|&nbsp; PC · 手机 · 平板
   </footer>
 </div>
 

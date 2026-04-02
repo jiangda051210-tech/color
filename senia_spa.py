@@ -88,10 +88,17 @@ body::before{content:'';position:fixed;top:-40%;left:-20%;width:80%;height:80%;
 .badge-fail{background:rgba(255,92,114,.1);color:var(--fail)}
 
 @media(max-width:640px){
+  .app{padding:10px 8px}
   .form-row{flex-direction:column}
   .form-field{min-width:100%}
-  .nav-tabs{width:100%;overflow-x:auto}
+  .form-field input,.form-field select,.form-field textarea{padding:12px;font-size:16px;min-height:44px}
+  .nav{flex-direction:column;gap:8px}
+  .nav-tabs{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .nav-tab{padding:10px 14px;min-height:40px}
   .kpi-row{grid-template-columns:repeat(2,1fr)}
+  .btn{min-height:44px;padding:12px 20px;font-size:14px}
+  .card{padding:14px}
+  .result-box{font-size:11px;max-height:200px}
 }
 </style>
 </head>

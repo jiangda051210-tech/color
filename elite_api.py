@@ -2009,10 +2009,23 @@ async def _upload_to_image_input(upload: UploadFile, field_name: str) -> ImageIn
 
 
 app = FastAPI(
-    title="Elite Color Match API",
-    description="Industry-grade color matching API for sample board vs film.",
+    title="SENIA Elite Color Matching",
+    description="AI-Powered Color Quality Intelligence for Decorative Film Manufacturing",
     version=APP_VERSION,
 )
+
+# CORS: 允许公网浏览器访问 (手机/PC/任何域名)
+try:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+except ImportError:
+    pass  # CORS middleware not available
 
 
 @app.middleware("http")
