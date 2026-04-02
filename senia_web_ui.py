@@ -314,51 +314,60 @@ body::after {{
 
   <!-- Hero -->
   <section class="hero">
-    <h1>AI Color Matching</h1>
-    <p>上传一张照片, 自动检测大货与标样, 输出三级判定、偏差方向和调色建议</p>
+    <h1>智能对色系统</h1>
+    <p>拍一张照片，自动判定颜色是否合格，告诉你偏差方向和调色建议</p>
   </section>
+
+  <!-- 拍摄指引 (首次提示) -->
+  <div id="cameraGuide" style="background:var(--bg-card);backdrop-filter:blur(20px);border:1px solid var(--border-active);
+    border-radius:var(--radius);padding:24px;margin-bottom:24px;display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <span style="font-size:15px;font-weight:600">📸 拍摄指引</span>
+      <button onclick="this.parentElement.parentElement.style.display='none';localStorage.setItem('senia_guide_seen','1')"
+        style="background:none;border:1px solid var(--border);color:var(--t2,var(--text-secondary));padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">知道了</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;font-size:13px;color:var(--text-secondary)">
+      <div>🔲 <strong>大货（整版膜）</strong>平铺在桌上</div>
+      <div>📋 <strong>标样（小色板）</strong>放在大货旁边或上方</div>
+      <div>💡 <strong>灯光</strong>：尽量用固定光源，避免阴影</div>
+      <div>📱 <strong>手机</strong>：距离约 30~40cm，正对拍摄</div>
+    </div>
+  </div>
 
   <!-- 上传区 -->
   <div class="upload-zone" id="uploadZone">
     <div class="upload-placeholder">
-      <div class="upload-icon">+</div>
-      <div class="upload-title">拖拽照片到此处, 或点击选择</div>
-      <div class="upload-hint">支持 JPG / PNG / DNG &nbsp;&middot;&nbsp; 建议使用 ProRAW 格式拍摄</div>
+      <div class="upload-icon">📷</div>
+      <div class="upload-title">点击选择照片，或拖拽到此处</div>
+      <div class="upload-hint">请确保照片中同时包含大货和标样 &nbsp;|&nbsp; 支持 JPG / PNG / DNG</div>
     </div>
     <img class="upload-preview" id="uploadPreview">
     <input type="file" id="fileInput" accept="image/*" style="display:none">
   </div>
 
-  <!-- 设置行 -->
+  <!-- 设置行 (简化: 只显示必填, 其余折叠) -->
   <div class="settings-row">
     <div class="field">
-      <label>Material Profile</label>
+      <label>材质类型</label>
       <select id="profile">
-        <option value="auto">Auto Detect</option>
-        <option value="wood">Wood (木纹)</option>
-        <option value="solid">Solid (纯色)</option>
-        <option value="stone">Stone (石纹)</option>
-        <option value="metallic">Metallic (金属)</option>
-        <option value="high_gloss">High Gloss (高光)</option>
+        <option value="auto" selected>自动识别</option>
+        <option value="wood">木纹</option>
+        <option value="solid">纯色</option>
+        <option value="stone">石纹</option>
+        <option value="metallic">金属</option>
+        <option value="high_gloss">高光</option>
       </select>
     </div>
     <div class="field">
-      <label>Lot ID</label>
-      <input id="lotId" placeholder="e.g. L20240728-01">
+      <label>批次号</label>
+      <input id="lotId" placeholder="选填，如 L20240728-01">
     </div>
     <div class="field">
-      <label>Product</label>
-      <input id="productCode" placeholder="e.g. AW-125470">
+      <label>产品编号</label>
+      <input id="productCode" placeholder="选填，如 AW-125470">
     </div>
-    <div class="field">
-      <label>Grid</label>
-      <select id="grid">
-        <option value="6x8" selected>6 x 8</option>
-        <option value="4x6">4 x 6</option>
-        <option value="8x10">8 x 10</option>
-      </select>
-    </div>
-    <button class="btn-analyze" id="btnAnalyze" disabled>Analyze</button>
+    <input type="hidden" id="grid" value="6x8">
+    <button class="btn-analyze" id="btnAnalyze" disabled>开始对色</button>
   </div>
 
   <!-- 进度条 -->
@@ -407,14 +416,19 @@ function handleFile(file) {{
 }}
 
 // ── 分析进度动画 ──
+// 首次访问显示拍摄指引
+if (!localStorage.getItem('senia_guide_seen')) {{
+  document.getElementById('cameraGuide').style.display = 'block';
+}}
+
 const STEPS = [
-  'Detecting board & sample...',
-  'Perspective correction...',
-  'Filtering text & stickers...',
-  'Extracting base color...',
-  'Computing CIEDE2000...',
-  'Three-tier judgment...',
-  'Generating advice...',
+  '正在识别大货和标样...',
+  '透视校正中...',
+  '过滤手写和贴纸...',
+  '提取底色中...',
+  '计算色差 (CIEDE2000)...',
+  '三级判定中...',
+  '生成调色建议...',
 ];
 
 function showProgress(stepIdx) {{
@@ -463,8 +477,11 @@ btnAnalyze.addEventListener('click', async () => {{
     clearInterval(timer);
     progressBar.classList.remove('active');
     resultArea.innerHTML = `<div class="verdict-card fail"><div class="verdict-header">
-      <div class="verdict-badge fail">ERROR</div>
-      <div>${{esc(err.message)}}</div></div></div>`;
+      <div class="verdict-badge fail">分析失败</div>
+      <div style="font-size:14px;line-height:1.6">${{esc(err.message)}}</div></div>
+      <div style="margin-top:16px;text-align:center">
+        <button onclick="document.getElementById('uploadZone').click()" class="btn-analyze" style="font-size:14px;padding:8px 24px">📷 重新拍摄</button>
+      </div></div>`;
     resultArea.classList.add('active');
   }} finally {{
     btnAnalyze.disabled = false;
@@ -488,17 +505,34 @@ function renderResult(d) {{
 
   let html = '';
 
+  // 播放提示音
+  try {{ new Audio('data:audio/wav;base64,UklGRl9vT19teleVBFTQAAAAEAAQAAgA8AAQBIAAAGAAAQB'+
+    'kYXRhW28vT19'+('A'.repeat(200))).play().catch(()=>{{}}); }} catch(e) {{}}
+
+  const now = new Date();
+  const timeStr = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0')+':'+now.getSeconds().toString().padStart(2,'0');
+
   // 判定卡片
   html += `<div class="verdict-card ${{tierCls}}">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;font-size:12px;color:var(--text-dim)">
+      <span>${{d.lot_id ? '批次 '+esc(d.lot_id) : ''}} ${{d.product_code ? '· 产品 '+esc(d.product_code) : ''}}</span>
+      <span>${{timeStr}} · ${{(d.elapsed_sec||0).toFixed(1)}}s</span>
+    </div>
     <div class="verdict-header">
       <div class="verdict-badge ${{tierCls}}">${{tierLabel}}</div>
-      <div class="verdict-de"><strong>${{(summary.avg_delta_e00||0).toFixed(2)}}</strong> ΔE00 avg
+      <div class="verdict-de"><strong>${{(summary.avg_delta_e00||0).toFixed(2)}}</strong> 色差
         &nbsp;&middot;&nbsp; p95: ${{(summary.p95_delta_e00||0).toFixed(2)}}
-        &nbsp;&middot;&nbsp; max: ${{(summary.max_delta_e00||0).toFixed(2)}}</div>
+        &nbsp;&middot;&nbsp; 最大: ${{(summary.max_delta_e00||0).toFixed(2)}}</div>
     </div>
     <div class="verdict-dirs">
       ${{dirs.map(d => `<span class="dir-tag">${{esc(d)}}</span>`).join('')}}
       ${{dirs.length === 0 ? '<span class="dir-tag" style="border-color:var(--pass)">色差极小</span>' : ''}}
+    </div>
+    <div style="margin-top:16px;display:flex;gap:10px;justify-content:center">
+      <button onclick="document.getElementById('uploadZone').click()" class="btn-analyze"
+        style="font-size:13px;padding:8px 20px">📷 重新拍摄</button>
+      <button onclick="window.print()" style="padding:8px 20px;border-radius:var(--radius-sm);border:1px solid var(--border);
+        background:var(--bg-glass);color:var(--text-secondary);cursor:pointer;font-size:13px">🖨 打印结果</button>
     </div>
   </div>`;
 
@@ -521,11 +555,12 @@ function renderResult(d) {{
       <div class="metric-value">${{(dev.dC||0).toFixed(2)}}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Material</div>
-      <div class="metric-value" style="font-size:16px">${{esc(d.profile?.used || 'auto')}}</div>
+      <div class="metric-label">材质</div>
+      <div class="metric-value" style="font-size:16px">${{
+        {{'wood':'木纹','solid':'纯色','stone':'石纹','metallic':'金属','high_gloss':'高光'}}[d.profile?.used] || d.profile?.used || '自动'}}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Capture Quality</div>
+      <div class="metric-label">拍摄质量</div>
       <div class="metric-value">${{((d.result?.confidence?.overall||0)*100).toFixed(0)}}%</div>
     </div>
   </div>`;
@@ -534,12 +569,12 @@ function renderResult(d) {{
   const advices = recipe.advices || [];
   html += `<div class="insights-row">
     <div class="insight-card">
-      <div class="insight-title">&#x1f3af; Recipe Advice &middot; 调色建议</div>
+      <div class="insight-title">🎯 调色建议</div>
       ${{advices.length === 0 ? '<div class="advice-item" style="border-left-color:var(--pass)">色差合格, 无需调整</div>' :
         advices.slice(0, 6).map(a => `<div class="advice-item ${{a.category === 'process' ? 'process' : ''}}">${{esc(a.action)}}</div>`).join('')}}
     </div>
     <div class="insight-card">
-      <div class="insight-title">&#x1f50d; Root Cause &middot; 根因分析</div>
+      <div class="insight-title">🔍 根因分析</div>
       <div class="root-cause-badge ${{uni.root_cause || 'ok'}}">${{
         uni.root_cause === 'recipe' ? '配方问题' :
         uni.root_cause === 'process' ? '工艺问题' :
@@ -552,17 +587,17 @@ function renderResult(d) {{
   // 热图
   if (heatmapUrl) {{
     html += `<div class="heatmap-section">
-      <div class="insight-title" style="text-align:left;margin-bottom:16px">&#x1f5fa; Color Deviation Heatmap</div>
+      <div class="insight-title" style="text-align:left;margin-bottom:16px">🗺 色差热图</div>
       <img src="/v1/senia/artifact?path=${{encodeURIComponent(heatmapUrl)}}" alt="heatmap"
            onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
-      <p style="display:none;color:var(--text-dim);font-size:13px">Heatmap image unavailable. Check report.json for raw data.</p>
+      <p style="display:none;color:var(--text-dim);font-size:13px">热图暂不可用，请查看 report.json 获取原始数据</p>
     </div>`;
   }}
 
   // ── 操作员反馈 (自学习) ──
   html += `<div class="insights-row">
     <div class="insight-card" style="text-align:center">
-      <div class="insight-title">&#x1f4ac; Operator Feedback &middot; 你同意这个判定吗?</div>
+      <div class="insight-title">💬 你同意这个判定吗？</div>
       <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px">你的反馈会让系统越来越准</p>
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
         <button onclick="sendFeedback('${{d.lot_id||""}}','${{tier}}','PASS',${{summary.avg_delta_e00||0}},'${{d.profile?.used||"auto"}}')"
@@ -578,7 +613,7 @@ function renderResult(d) {{
       <div id="feedbackResult" style="margin-top:10px;font-size:12px;color:var(--text-dim)"></div>
     </div>
     <div class="insight-card">
-      <div class="insight-title">&#x1f4c8; Lot History &middot; 批次趋势</div>
+      <div class="insight-title">📈 批次趋势</div>
       <div id="lotHistory" style="font-size:13px;color:var(--text-secondary)">
         ${{d.history?.has_baseline
           ? `<div style="margin-bottom:8px">
