@@ -28,8 +28,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install ruff
-      - run: ruff check $RUFF_TARGETS --select F,B --ignore B007,B008,B904,B905
+      - run: python -m pip install ruff
+      - run: python -m ruff check $RUFF_TARGETS --select F,B --ignore B007,B008,B904,B905
 
   typecheck:
     name: Type check (mypy)
@@ -40,8 +40,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install mypy numpy
-      - run: mypy --ignore-missing-imports elite_runtime.py elite_quality_history.py
+      - run: python -m pip install mypy numpy
+      - run: python -m mypy --ignore-missing-imports elite_runtime.py elite_quality_history.py run_release_gate.py
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -59,7 +59,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt
 
       - name: Run unit/integration tests
         env:
@@ -69,8 +69,8 @@ jobs:
           ELITE_ENABLE_AUDIT_LOG: "false"
           ELITE_ENABLE_API_KEY_AUTH: "false"
         run: |
-          pytest test_production_blindspots.py -v --tb=short
-          pytest test_security_and_perf.py -v --tb=short
+          python -m pytest test_production_blindspots.py -v --tb=short
+          python -m pytest test_security_and_perf.py -v --tb=short
 
   release-gate:
     name: Release gate
@@ -84,7 +84,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt
       - name: Run release gate
         env:
           ELITE_OUTPUT_ROOT: /tmp/color_release_runs

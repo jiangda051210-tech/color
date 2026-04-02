@@ -1,53 +1,58 @@
-.PHONY: install install-dev lint format typecheck test test-blindspots e2e release-gate run clean
+.PHONY: install install-dev lint lint-fix format format-check typecheck check test test-blindspots test-security e2e release-gate run run-prod docker-build docker-run clean
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
+PYTHON ?= python
+PIP := $(PYTHON) -m pip
+RUFF := $(PYTHON) -m ruff
+MYPY := $(PYTHON) -m mypy
+PYTEST := $(PYTHON) -m pytest
+
+RUFF_TARGETS := elite_runtime.py elite_quality_history.py run_full_e2e_flow.py run_release_gate.py test_production_blindspots.py test_security_and_perf.py
+RUFF_LINT_FLAGS := --select F,B --ignore B007,B008,B904,B905
 
 install:
-	pip install -r requirements.txt
+	$(PIP) install -r requirements.txt
 
 install-dev:
-	pip install -r requirements.txt
-	pip install ruff mypy pytest pytest-asyncio httpx
-
-# ── Code quality ──────────────────────────────────────────────────────────────
+	$(PIP) install -r requirements.txt
+	$(PIP) install ruff mypy
 
 lint:
-	ruff check .
+	$(RUFF) check $(RUFF_TARGETS) $(RUFF_LINT_FLAGS)
 
 lint-fix:
-	ruff check --fix .
+	$(RUFF) check $(RUFF_TARGETS) --fix $(RUFF_LINT_FLAGS)
 
 format:
-	ruff format .
+	$(RUFF) format $(RUFF_TARGETS)
 
 format-check:
-	ruff format --check .
+	$(RUFF) format --check $(RUFF_TARGETS)
 
 typecheck:
-	mypy --ignore-missing-imports elite_runtime.py elite_quality_history.py
+	$(MYPY) --ignore-missing-imports elite_runtime.py elite_quality_history.py run_release_gate.py
 
 check: lint format-check typecheck
 
-# ── Testing ───────────────────────────────────────────────────────────────────
-
 test:
-	pytest test_production_blindspots.py -v --tb=short
+	$(PYTEST) test_production_blindspots.py test_security_and_perf.py -v --tb=short
+
+test-blindspots:
+	$(PYTEST) test_production_blindspots.py -v --tb=short
+
+test-security:
+	$(PYTEST) test_security_and_perf.py -v --tb=short
 
 e2e:
-	python run_full_e2e_flow.py
+	$(PYTHON) run_full_e2e_flow.py
 
 release-gate:
-	python run_release_gate.py --quick-check
-
-# ── Run ───────────────────────────────────────────────────────────────────────
+	$(PYTHON) run_release_gate.py --quick-check
 
 run:
-	python -m uvicorn elite_api:app --host 0.0.0.0 --port 8877 --reload --log-level info
+	$(PYTHON) -m uvicorn elite_api:app --host 0.0.0.0 --port 8877 --reload --log-level info
 
 run-prod:
-	python -m uvicorn elite_api:app --host 0.0.0.0 --port 8877 --workers 2 --log-level info
-
-# ── Docker ────────────────────────────────────────────────────────────────────
+	$(PYTHON) -m uvicorn elite_api:app --host 0.0.0.0 --port 8877 --workers 2 --log-level info
 
 docker-build:
 	docker build -t senia-elite-color:latest .
@@ -58,9 +63,5 @@ docker-run:
 	  --env-file .env \
 	  senia-elite-color:latest
 
-# ── Cleanup ───────────────────────────────────────────────────────────────────
-
 clean:
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -name "*.pyc" -delete 2>/dev/null || true
-	rm -rf .pytest_cache .mypy_cache .ruff_cache dist build *.egg-info
+	$(PYTHON) -c "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]; [f.unlink() for f in pathlib.Path('.').rglob('*.pyc') if f.exists()]; [shutil.rmtree(pathlib.Path(n), ignore_errors=True) for n in ('.pytest_cache', '.mypy_cache', '.ruff_cache', 'dist', 'build')]; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').glob('*.egg-info')]"

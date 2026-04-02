@@ -1,6 +1,7 @@
 param(
   [string]$ApiHost = "127.0.0.1",
   [int]$Port = 8877,
+  [bool]$QuickCheck = $true,
   [string]$ApiKey = "",
   [string]$AdminKey = "",
   [string]$TenantId = "",
@@ -40,6 +41,7 @@ if ($SkipRoleBoundary) { $argsList += "--skip-role-boundary" }
 if ($RequireRoleBoundary) { $argsList += "--require-role-boundary" }
 if ($RequireSloHealthy) { $argsList += "--require-slo-healthy" }
 if ($StrictAlertTest) { $argsList += "--strict-alert-test" }
+if ($QuickCheck) { $argsList += "--quick-check" }
 
 Write-Host "Running release gate against $baseUrl"
 python @argsList
