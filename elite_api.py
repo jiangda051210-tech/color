@@ -86,6 +86,10 @@ from elite_innovation_state import (
 from elite_backup import BackupManager
 from senia_auto_match import auto_match as senia_auto_match_pixels
 from senia_dual_shot import analyze_dual_shot as senia_dual_shot
+from senia_next_gen import (
+    cam16_forward, cam16_delta, metamerism_risk,
+    compute_surface_fingerprint, delta_e_to_cost, batch_consistency_index,
+)
 from senia_capture_station import CAPTURE_STATION_BOM, BUILD_STEPS, IPHONE_CAMERA_SETTINGS
 from senia_colorchecker import calibrate_from_photo
 from senia_edge_sdk import analyze_offline as edge_analyze_offline
@@ -7345,6 +7349,38 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
 
 
 # ── 管理 API ──────────────────────────────────────────
+
+# ── Next-Gen 创新功能 ────────────────────────────────────
+
+@app.get("/v1/senia/metamerism-risk")
+def senia_metamerism_check(
+    L: float, a: float, b: float,
+    L_a: float | None = None, a_a: float | None = None, b_a: float | None = None,
+) -> dict[str, Any]:
+    """同色异谱预警: 在工厂灯下合格, 到客户家会不会变色?"""
+    lab_a = (L_a, a_a, b_a) if L_a is not None and a_a is not None and b_a is not None else None
+    return metamerism_risk((L, a, b), lab_a)
+
+
+@app.get("/v1/senia/cost-risk")
+def senia_cost_risk(
+    dE: float, batch_sqm: float = 500, unit_cost: float = 15, customer_tier: str = "standard",
+) -> dict[str, Any]:
+    """色差成本量化: 这个 ΔE 会导致多少退货和索赔?"""
+    return delta_e_to_cost(dE, batch_sqm, unit_cost, customer_tier)
+
+
+@app.post("/v1/senia/batch-consistency")
+def senia_batch_consistency(
+    samples_json: str = Form(...),
+) -> dict[str, Any]:
+    """批内一致性指数: 这批货铺在一起会不会看到色差?"""
+    try:
+        samples = [float(x) for x in json.loads(samples_json)]
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid samples_json: {exc}") from exc
+    return batch_consistency_index(samples)
+
 
 # ── 环境光学习 ──────────────────────────────────────────
 
