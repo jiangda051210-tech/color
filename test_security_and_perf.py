@@ -13,9 +13,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import os
-import struct
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -131,7 +128,6 @@ class TestImageMagicBytesValidation:
 
 class TestGenerateOutputDirPathTraversal:
     def test_subpath_allowed(self, tmp_path):
-        from fastapi import HTTPException
         with patch("elite_api.DEFAULT_OUTPUT_ROOT", tmp_path):
             from elite_api import _generate_output_dir
             result = _generate_output_dir("test", str(tmp_path / "sub" / "run1"))
@@ -295,7 +291,6 @@ class TestDBInitCaching:
 class TestValidateBatchImagePath:
     def test_path_within_root_accepted(self, tmp_path):
         from unittest.mock import patch
-        from fastapi import HTTPException
         img = tmp_path / "images" / "a.jpg"
         img.parent.mkdir(parents=True)
         img.write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
@@ -376,7 +371,6 @@ class TestReadImageValidation:
 
 class TestMetricsEndpoint:
     def test_metrics_returns_200_text_plain(self):
-        from httpx import Client
         from fastapi.testclient import TestClient
         from elite_api import app
         with TestClient(app) as client:

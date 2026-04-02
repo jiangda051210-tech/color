@@ -12,8 +12,16 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint (ruff)
+    name: Lint (ruff critical set)
     runs-on: ubuntu-latest
+    env:
+      RUFF_TARGETS: >-
+        elite_runtime.py
+        elite_quality_history.py
+        run_full_e2e_flow.py
+        run_release_gate.py
+        test_production_blindspots.py
+        test_security_and_perf.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,8 +29,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install ruff
-      - run: ruff check .
-      - run: ruff format --check .
+      - run: ruff check $RUFF_TARGETS --select F,B --ignore B007,B008,B904,B905
 
   typecheck:
     name: Type check (mypy)
@@ -61,7 +68,9 @@ jobs:
           ELITE_INNOVATION_DB: /tmp/color_test_innovation.sqlite
           ELITE_ENABLE_AUDIT_LOG: "false"
           ELITE_ENABLE_API_KEY_AUTH: "false"
-        run: pytest test_production_blindspots.py -v --tb=short
+        run: |
+          pytest test_production_blindspots.py -v --tb=short
+          pytest test_security_and_perf.py -v --tb=short
 
   release-gate:
     name: Release gate

@@ -46,6 +46,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Fail release gate if role boundary checks cannot be executed.",
     )
     parser.add_argument("--strict-alert-test", action="store_true", help="Treat 403 alert-test as E2E failure.")
+    parser.add_argument(
+        "--quick-check",
+        action="store_true",
+        help="Compatibility flag for CI/Makefile. Currently equivalent to default behavior.",
+    )
     parser.add_argument("--slo-availability-target", type=float, default=99.5, help="SLO target for availability percentage.")
     parser.add_argument("--slo-p95-target-ms", type=float, default=1200.0, help="SLO target for p95 latency in ms.")
     parser.add_argument("--require-slo-healthy", action="store_true", help="Fail if /v1/system/slo status is not healthy.")
