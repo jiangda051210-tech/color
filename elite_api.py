@@ -83,7 +83,16 @@ from elite_innovation_state import (
     upsert_acceptance_profile,
 )
 from elite_backup import BackupManager
+from senia_colorchecker import calibrate_from_photo
+from senia_history import compute_lot_trend, compare_with_baseline
 from senia_image_pipeline import analyze_photo as senia_analyze_photo
+from senia_models import (
+    SeniaAnalyzeResponse,
+    SeniaCalibrationResponse,
+    SeniaLotTrendResponse,
+    SeniaThresholdResponse,
+)
+from senia_threshold_store import ThresholdStore
 from senia_web_ui import render_senia_home
 from elite_batch_parallel import run_parallel_batch
 from elite_config_reload import ConfigStore
@@ -165,6 +174,8 @@ BACKUP_MANAGER = BackupManager(
     sources=[DEFAULT_HISTORY_DB, DEFAULT_INNOVATION_DB],
     config_files=[DEFAULT_DECISION_POLICY_CONFIG, DEFAULT_CUSTOMER_TIER_CONFIG, DEFAULT_ACTION_RULES_CONFIG],
 )
+
+THRESHOLD_STORE = ThresholdStore(config_path=ROOT_DIR / "senia_thresholds.json")
 
 _log.info("modules_initialized", version=APP_VERSION,
           config_count=len(CONFIG_STORE.status()),
@@ -6860,7 +6871,89 @@ async def senia_analyze_endpoint(
     except Exception:
         pass
 
+    # ── 历史对比: 与基线比较 ──
+    try:
+        avg_de_val = summary.get("avg_delta_e00", 0.0)
+        baseline = compare_with_baseline(avg_de_val, DEFAULT_HISTORY_DB, lot_id, product_code)
+        report["history"] = baseline
+    except Exception:
+        report["history"] = {"has_baseline": False}
+
     return report
+
+
+@app.post("/v1/senia/calibrate")
+async def senia_calibrate_endpoint(
+    image: UploadFile = File(...),
+) -> dict[str, Any]:
+    """
+    ColorChecker 自动校准: 上传含色卡的照片, 返回 3×3 CCM.
+    """
+    raw = await image.read()
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="invalid image")
+    result = calibrate_from_photo(img)
+    _log.info("senia_calibrate", found=result.get("found"), quality=result.get("ccm_quality"))
+    return result
+
+
+@app.get("/v1/senia/lot-trend")
+def senia_lot_trend(
+    lot_id: str = "",
+    product_code: str = "",
+    limit: int = 30,
+) -> dict[str, Any]:
+    """查询批次/产品的色差趋势和漂移检测."""
+    return compute_lot_trend(DEFAULT_HISTORY_DB, lot_id, product_code, min(limit, 200))
+
+
+@app.get("/v1/senia/thresholds")
+def senia_get_thresholds(
+    profile: str = "solid",
+    product_code: str = "",
+    customer_id: str = "",
+) -> dict[str, Any]:
+    """获取当前阈值配置 (考虑产品/客户覆盖)."""
+    t = THRESHOLD_STORE.get(profile, product_code, customer_id)
+    return {
+        "pass_dE": t.pass_dE,
+        "marginal_dE": t.marginal_dE,
+        "defect_marginal": t.defect_marginal,
+        "defect_fail": t.defect_fail,
+        "profile": profile,
+        "product_code": product_code,
+        "customer_id": customer_id,
+    }
+
+
+@app.post("/v1/senia/thresholds/product")
+def senia_set_product_threshold(
+    product_code: str = Form(...),
+    pass_dE: float = Form(None),
+    marginal_dE: float = Form(None),
+) -> dict[str, Any]:
+    """设置产品级阈值覆盖."""
+    result = THRESHOLD_STORE.set_product_override(product_code, pass_dE=pass_dE, marginal_dE=marginal_dE)
+    return {"ok": True, "product_code": product_code, "thresholds": result}
+
+
+@app.post("/v1/senia/thresholds/customer")
+def senia_set_customer_threshold(
+    customer_id: str = Form(...),
+    pass_dE: float = Form(None),
+    marginal_dE: float = Form(None),
+) -> dict[str, Any]:
+    """设置客户级阈值覆盖."""
+    result = THRESHOLD_STORE.set_customer_override(customer_id, pass_dE=pass_dE, marginal_dE=marginal_dE)
+    return {"ok": True, "customer_id": customer_id, "thresholds": result}
+
+
+@app.get("/v1/senia/thresholds/all")
+def senia_list_thresholds() -> dict[str, Any]:
+    """列出所有阈值覆盖."""
+    return THRESHOLD_STORE.status()
 
 
 if __name__ == "__main__":
