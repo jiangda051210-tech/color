@@ -83,6 +83,7 @@ from elite_innovation_state import (
     upsert_acceptance_profile,
 )
 from elite_backup import BackupManager
+from senia_image_pipeline import analyze_photo as senia_analyze_photo
 from elite_batch_parallel import run_parallel_batch
 from elite_config_reload import ConfigStore
 from elite_event_bus import EventBus, FileQueueSubscriber, QualityDecisionEvent
@@ -6738,6 +6739,64 @@ async def run_parallel_batch_endpoint(
         "results": result.results[:50],
         "errors": result.errors[:20],
     }
+
+
+@app.post("/v1/senia/analyze")
+async def senia_analyze_endpoint(
+    image: UploadFile = File(...),
+    profile: str = Form("auto"),
+    lot_id: str = Form(""),
+    product_code: str = Form(""),
+    grid: str = Form("6x8"),
+) -> dict[str, Any]:
+    """
+    SENIA 全自动对色: 上传一张照片, 返回判定+偏差方向+调色建议.
+
+    三级判定: PASS (合格) / MARGINAL (临界) / FAIL (不合格)
+    偏差方向: 偏红/偏黄/偏暗/偏灰/饱和度不足
+    调色建议: 减红/减白/查刮刀... (区分配方问题 vs 工艺问题)
+    """
+    raw = await image.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"image too large (max {MAX_UPLOAD_BYTES // 1024 // 1024}MB)")
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="invalid image")
+
+    rows, cols = 6, 8
+    try:
+        parts = grid.split("x")
+        rows, cols = int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        pass
+
+    out_dir = _ensure_output_dir(f"senia_{lot_id or 'auto'}_{int(time.time())}")
+
+    # 保存上传的图片
+    img_path = out_dir / (image.filename or "upload.jpg")
+    img_path.write_bytes(raw)
+
+    try:
+        report = senia_analyze_photo(
+            image_path=img_path,
+            profile_name=profile,
+            output_dir=out_dir,
+            grid_rows=rows,
+            grid_cols=cols,
+            lot_id=lot_id,
+            product_code=product_code,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    _log.info("senia_analyze",
+              tier=report["tier"],
+              dE00=report["result"]["summary"]["avg_delta_e00"],
+              profile=report["profile"]["used"],
+              lot_id=lot_id)
+
+    return report
 
 
 if __name__ == "__main__":
