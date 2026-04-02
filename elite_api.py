@@ -85,6 +85,9 @@ from elite_innovation_state import (
 )
 from elite_backup import BackupManager
 from senia_colorchecker import calibrate_from_photo
+from senia_instant import process_instant, InstantResult
+from senia_predictor import ProductionPredictor, DeviceFingerprint
+from senia_qr_passport import generate_passport, verify_passport, render_passport_html
 from senia_learning import (
     OnlineLearner,
     AmbientLightLearner,
@@ -184,7 +187,9 @@ BACKUP_MANAGER = BackupManager(
 )
 
 THRESHOLD_STORE = ThresholdStore(config_path=ROOT_DIR / "senia_thresholds.json")
-SENIA_ANALYZE_SEMAPHORE = AsyncSemaphore(3)  # Max 3 concurrent heavy analyses
+SENIA_ANALYZE_SEMAPHORE = AsyncSemaphore(3)
+PRODUCTION_PREDICTOR = ProductionPredictor(store_path=DEFAULT_OUTPUT_ROOT / "senia_predictor.json")
+DEVICE_FINGERPRINT = DeviceFingerprint(store_path=DEFAULT_OUTPUT_ROOT / "senia_device_fp.json")
 ONLINE_LEARNER = OnlineLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_feedback.json")
 AMBIENT_LEARNER = AmbientLightLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_ambient.json")
 RECIPE_TWIN = RecipeDigitalTwin(store_path=DEFAULT_OUTPUT_ROOT / "senia_recipe_twin.json")
@@ -7056,6 +7061,161 @@ def senia_aging_predict(
 ) -> dict[str, Any]:
     """预测色差随时间变化 + 老化感知验收建议."""
     return predict_aging_acceptance(current_dE, current_dL, current_db, profile, min(months, 60))
+
+
+# ── 管理 API ──────────────────────────────────────────
+
+# ── 即时对色 (微信/钉钉机器人) ──────────────────────────
+
+@app.post("/v1/senia/instant")
+async def senia_instant_endpoint(
+    image: UploadFile = File(...),
+    lot_id: str = Form(""),
+    profile: str = Form("auto"),
+) -> dict[str, Any]:
+    """
+    即时对色: 3秒出结果, 返回可直接发送到微信/钉钉的消息.
+    """
+    raw = await image.read()
+    if len(raw) < 1000:
+        return {"error": "文件太小", "text": "❌ 文件太小, 不是有效图片"}
+    result = process_instant(raw, lot_id=lot_id, profile=profile)
+    return {
+        "tier": result.tier,
+        "dE00": result.dE00,
+        "directions": result.directions,
+        "text_message": result.to_text_message(),
+        "voice_text": result.to_voice_text(),
+        "wecom_card": result.to_wecom_card(),
+        "elapsed_sec": result.elapsed_sec,
+        "error": result.error,
+    }
+
+
+# ── 生产前预测 (配方→颜色) ──────────────────────────────
+
+@app.post("/v1/senia/predict/record")
+def senia_predict_record(
+    product_code: str = Form(...),
+    recipe_json: str = Form(...),
+    measured_L: float = Form(...),
+    measured_a: float = Form(...),
+    measured_b: float = Form(...),
+    machine_json: str = Form("{}"),
+    env_json: str = Form("{}"),
+) -> dict[str, Any]:
+    """记录 配方+机台+环境→色值 数据, 用于训练预测模型."""
+    try:
+        recipe = json.loads(recipe_json)
+        machine = json.loads(machine_json) if machine_json != "{}" else None
+        env = json.loads(env_json) if env_json != "{}" else None
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+    return PRODUCTION_PREDICTOR.record(product_code, recipe, (measured_L, measured_a, measured_b), machine, env)
+
+
+@app.post("/v1/senia/predict/color")
+def senia_predict_color(
+    product_code: str = Form(...),
+    recipe_json: str = Form(...),
+    machine_json: str = Form("{}"),
+    env_json: str = Form("{}"),
+) -> dict[str, Any]:
+    """生产前预测: 输入配方, 预测颜色."""
+    try:
+        recipe = json.loads(recipe_json)
+        machine = json.loads(machine_json) if machine_json != "{}" else None
+        env = json.loads(env_json) if env_json != "{}" else None
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+    pred = PRODUCTION_PREDICTOR.predict(product_code, recipe, machine, env)
+    return {
+        "predicted_L": pred.predicted_L, "predicted_a": pred.predicted_a, "predicted_b": pred.predicted_b,
+        "confidence": pred.confidence, "rmse": pred.rmse,
+        "suggestion": pred.suggestion, "sample_count": pred.sample_count,
+    }
+
+
+@app.post("/v1/senia/predict/optimize-recipe")
+def senia_optimize_recipe(
+    product_code: str = Form(...),
+    target_L: float = Form(...),
+    target_a: float = Form(...),
+    target_b: float = Form(...),
+    current_recipe_json: str = Form(...),
+    machine_json: str = Form("{}"),
+    env_json: str = Form("{}"),
+) -> dict[str, Any]:
+    """逆向优化: 给定目标色, 求最优配方."""
+    try:
+        current = json.loads(current_recipe_json)
+        machine = json.loads(machine_json) if machine_json != "{}" else None
+        env = json.loads(env_json) if env_json != "{}" else None
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+    result = PRODUCTION_PREDICTOR.optimize_recipe(product_code, (target_L, target_a, target_b), current, machine, env)
+    return {
+        "optimized_recipe": result.optimized_recipe,
+        "adjustments": result.adjustments,
+        "predicted_dE": result.predicted_dE,
+        "confidence": result.confidence,
+        "iterations": result.iterations,
+    }
+
+
+# ── 设备指纹 ────────────────────────────────────────────
+
+@app.post("/v1/senia/device/learn")
+def senia_device_learn(
+    device_id: str = Form(...),
+    patches_json: str = Form(...),
+) -> dict[str, Any]:
+    """从 ColorChecker 校准学习设备色彩指纹."""
+    try:
+        patches = json.loads(patches_json)
+        measured = [(int(p[0]), int(p[1]), int(p[2])) for p in patches]
+    except (json.JSONDecodeError, ValueError, IndexError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid patches_json: {exc}") from exc
+    return DEVICE_FINGERPRINT.learn_from_calibration(device_id, measured)
+
+
+# ── QR 色彩护照 ─────────────────────────────────────────
+
+@app.post("/v1/senia/passport/generate")
+def senia_passport_generate(
+    lot_id: str = Form(...),
+    product_code: str = Form(...),
+    tier: str = Form(...),
+    dE00: float = Form(...),
+    L: float = Form(...),
+    a: float = Form(...),
+    b: float = Form(...),
+    directions: str = Form(""),
+    profile: str = Form(""),
+) -> dict[str, Any]:
+    """生成数字色彩护照 (附防伪签名)."""
+    dirs = [d.strip() for d in directions.split(",") if d.strip()] if directions else []
+    return generate_passport(lot_id, product_code, tier, dE00, dirs, (L, a, b), profile)
+
+
+@app.get("/v1/senia/passport/verify")
+def senia_passport_verify(passport_json: str = "") -> dict[str, Any]:
+    """验证色彩护照签名."""
+    try:
+        data = json.loads(passport_json)
+    except (json.JSONDecodeError, ValueError):
+        return {"valid": False, "error": "invalid JSON"}
+    return verify_passport(data)
+
+
+@app.get("/v1/senia/passport/view", response_class=HTMLResponse)
+def senia_passport_view(passport_json: str = "") -> str:
+    """渲染可视化色彩护照 (买家扫码看到这个页面)."""
+    try:
+        data = json.loads(passport_json)
+    except (json.JSONDecodeError, ValueError):
+        return "<h1>Invalid passport</h1>"
+    return render_passport_html(data)
 
 
 # ── 管理 API ──────────────────────────────────────────
