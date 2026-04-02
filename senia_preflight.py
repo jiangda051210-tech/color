@@ -89,8 +89,10 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
 
     # ── 7. 图像尺寸检查 ──
     scores["resolution"] = h * w
-    if h * w < 500 * 500:
+    if h * w < 200 * 200:
         errors.append("图片分辨率太低 ({}x{})，请用更高分辨率拍摄".format(w, h))
+    elif h * w < 400 * 400:
+        warnings.append("图片分辨率偏低 ({}x{})，可能影响精度".format(w, h))
 
     # ── 8. 颜色通道饱和检测 (保护膜/特殊光源的特征) ──
     b_mean = float(image_bgr[..., 0].mean())

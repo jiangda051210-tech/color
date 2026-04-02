@@ -85,6 +85,7 @@ from elite_innovation_state import (
 )
 from elite_backup import BackupManager
 from senia_auto_match import auto_match as senia_auto_match_pixels
+from senia_dual_shot import analyze_dual_shot as senia_dual_shot
 from senia_capture_station import CAPTURE_STATION_BOM, BUILD_STEPS, IPHONE_CAMERA_SETTINGS
 from senia_colorchecker import calibrate_from_photo
 from senia_edge_sdk import analyze_offline as edge_analyze_offline
@@ -6914,6 +6915,41 @@ async def senia_analyze_endpoint(
     except Exception:
         report["history"] = {"has_baseline": False}
 
+    return report
+
+
+@app.post("/v1/senia/dual-shot")
+async def senia_dual_shot_endpoint(
+    reference: UploadFile = File(...),
+    sample: UploadFile = File(...),
+    profile: str = Form("auto"),
+    lot_id: str = Form(""),
+    product_code: str = Form(""),
+) -> dict[str, Any]:
+    """
+    双拍模式: 分别上传标样照片和大货照片, 精度最高.
+    不需要把标样放在大货上面, 分别拍即可.
+    """
+    ref_raw = await reference.read()
+    smp_raw = await sample.read()
+
+    out_dir = _ensure_output_dir(f"dual_{lot_id or 'auto'}_{int(time.time())}")
+    ref_path = out_dir / (reference.filename or "reference.jpg")
+    smp_path = out_dir / (sample.filename or "sample.jpg")
+    ref_path.write_bytes(ref_raw)
+    smp_path.write_bytes(smp_raw)
+
+    try:
+        report = senia_dual_shot(
+            reference_path=ref_path, sample_path=smp_path,
+            profile_name=profile, output_dir=out_dir,
+            lot_id=lot_id, product_code=product_code,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    _log.info("senia_dual_shot", tier=report["tier"],
+              dE00=report["result"]["summary"]["avg_delta_e00"])
     return report
 
 
