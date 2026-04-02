@@ -86,7 +86,7 @@ from elite_innovation_state import (
 from elite_backup import BackupManager
 from senia_colorchecker import calibrate_from_photo
 from senia_instant import process_instant, InstantResult
-from senia_knowledge_crawler import KnowledgeEngine
+from senia_knowledge_crawler import KnowledgeEngine, WebCrawler, AutoModelUpgrader
 from senia_spa import render_senia_spa
 from senia_predictor import ProductionPredictor, DeviceFingerprint
 from senia_qr_passport import generate_passport, verify_passport, render_passport_html
@@ -193,6 +193,11 @@ SENIA_ANALYZE_SEMAPHORE = AsyncSemaphore(3)
 PRODUCTION_PREDICTOR = ProductionPredictor(store_path=DEFAULT_OUTPUT_ROOT / "senia_predictor.json")
 DEVICE_FINGERPRINT = DeviceFingerprint(store_path=DEFAULT_OUTPUT_ROOT / "senia_device_fp.json")
 KNOWLEDGE_ENGINE = KnowledgeEngine(store_path=DEFAULT_OUTPUT_ROOT / "senia_knowledge.json")
+WEB_CRAWLER = WebCrawler(cache_dir=DEFAULT_OUTPUT_ROOT / "crawler_cache")
+AUTO_UPGRADER = AutoModelUpgrader(
+    knowledge=KNOWLEDGE_ENGINE, crawler=WEB_CRAWLER,
+    log_path=DEFAULT_OUTPUT_ROOT / "senia_upgrade_log.jsonl",
+)
 ONLINE_LEARNER = OnlineLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_feedback.json")
 AMBIENT_LEARNER = AmbientLightLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_ambient.json")
 RECIPE_TWIN = RecipeDigitalTwin(store_path=DEFAULT_OUTPUT_ROOT / "senia_recipe_twin.json")
@@ -7251,6 +7256,43 @@ def senia_knowledge_material(material: str = "wood_oak_gray") -> dict[str, Any]:
         from senia_knowledge_crawler import MATERIAL_COLOR_PROFILES
         return {"found": False, "available": list(MATERIAL_COLOR_PROFILES.keys())}
     return {"found": True, "material": material, "data": data}
+
+
+@app.post("/v1/senia/knowledge/crawl")
+def senia_knowledge_crawl() -> dict[str, Any]:
+    """手动触发爬虫: 从公开数据源抓取色彩科学数据."""
+    results = WEB_CRAWLER.crawl_all()
+    return {
+        "ok": True,
+        "sources": len(results),
+        "succeeded": sum(1 for r in results if r.success),
+        "total_records": sum(r.records_fetched for r in results),
+        "details": [
+            {"source": r.source, "success": r.success, "records": r.records_fetched,
+             "new": r.records_new, "error": r.error}
+            for r in results
+        ],
+    }
+
+
+@app.post("/v1/senia/knowledge/auto-upgrade")
+def senia_knowledge_auto_upgrade() -> dict[str, Any]:
+    """
+    完整自动升级: 爬取→验证→合并→优化.
+    系统从网上自动学习公开数据, 更新模型参数.
+    """
+    report = AUTO_UPGRADER.run_full_upgrade()
+    _log.info("auto_upgrade_complete",
+              success=report.get("success"),
+              steps=len(report.get("steps", [])))
+    return report
+
+
+@app.get("/v1/senia/knowledge/upgrade-history")
+def senia_knowledge_upgrade_history() -> dict[str, Any]:
+    """查看自动升级历史."""
+    history = AUTO_UPGRADER.get_upgrade_history()
+    return {"count": len(history), "history": history}
 
 
 @app.get("/v1/senia/knowledge/standard")
