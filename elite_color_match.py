@@ -159,6 +159,9 @@ def ensure_roi_in_bounds(roi: ROI, width: int, height: int) -> ROI:
     return ROI(x=x, y=y, w=w, h=h)
 
 
+_IMAGE_MAX_DIM = 32767   # OpenCV hard ceiling; reject anything wider/taller
+_IMAGE_MIN_DIM = 4       # reject degenerate single-pixel strips
+
 def read_image(path: Path) -> np.ndarray:
     # Prefer imdecode to support Unicode paths and avoid OpenCV warning noise.
     image = None
@@ -169,6 +172,21 @@ def read_image(path: Path) -> np.ndarray:
         image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {path}")
+    # Validate decoded output — guards against malformed images that decode to
+    # unexpected shapes (e.g. 0×0, single-pixel strips, wrong channel count).
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(
+            f"Image must be a 3-channel (BGR) array, got shape {image.shape}: {path}"
+        )
+    h, w = image.shape[:2]
+    if h < _IMAGE_MIN_DIM or w < _IMAGE_MIN_DIM:
+        raise ValueError(
+            f"Image too small ({w}×{h}), minimum {_IMAGE_MIN_DIM}px on each side: {path}"
+        )
+    if h > _IMAGE_MAX_DIM or w > _IMAGE_MAX_DIM:
+        raise ValueError(
+            f"Image too large ({w}×{h}), maximum {_IMAGE_MAX_DIM}px on each side: {path}"
+        )
     return image
 
 
@@ -217,6 +235,10 @@ def bgr_to_lab_float(image_bgr: np.ndarray) -> np.ndarray:
     return out
 
 
+# Precomputed CIEDE2000 constants (computed once at import time)
+_C25_7: float = 25.0**7  # = 6103515625.0
+
+
 def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     l1, a1, b1 = lab1[:, 0], lab1[:, 1], lab1[:, 2]
     l2, a2, b2 = lab2[:, 0], lab2[:, 1], lab2[:, 2]
@@ -225,7 +247,8 @@ def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     c2 = np.sqrt(a2**2 + b2**2)
     avg_c = (c1 + c2) / 2.0
 
-    g = 0.5 * (1.0 - np.sqrt((avg_c**7) / (avg_c**7 + 25.0**7 + 1e-12)))
+    avg_c7 = avg_c**7
+    g = 0.5 * (1.0 - np.sqrt(avg_c7 / (avg_c7 + _C25_7 + 1e-12)))
     a1p = (1.0 + g) * a1
     a2p = (1.0 + g) * a2
     c1p = np.sqrt(a1p**2 + b1**2)
@@ -259,7 +282,8 @@ def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     )
 
     delta_theta = 30.0 * np.exp(-(((avg_hp - 275.0) / 25.0) ** 2))
-    rc = 2.0 * np.sqrt((avg_cp**7) / (avg_cp**7 + 25.0**7 + 1e-12))
+    avg_cp7 = avg_cp**7
+    rc = 2.0 * np.sqrt(avg_cp7 / (avg_cp7 + _C25_7 + 1e-12))
     sl = 1.0 + (0.015 * ((avg_l - 50.0) ** 2)) / np.sqrt(20.0 + ((avg_l - 50.0) ** 2))
     sc = 1.0 + 0.045 * avg_cp
     sh = 1.0 + 0.015 * avg_cp * t
@@ -1030,7 +1054,10 @@ def analyze_single_image(
             x0 = int(round(c * w / grid_cols))
             x1 = int(round((c + 1) * w / grid_cols))
             cell_mask = board_mask[y0:y1, x0:x1]
-            used = bool(np.count_nonzero(cell_mask) >= max(80, int(cell_mask.size * 0.28)))
+            cell_nz = np.count_nonzero(cell_mask)
+            cell_size = cell_mask.size
+            used = bool(cell_nz >= max(80, int(cell_size * 0.28)))
+            valid_ratio = float(cell_nz / max(1, cell_size))
             if not used:
                 grid.append(
                     {
@@ -1038,7 +1065,7 @@ def analyze_single_image(
                         "col": c + 1,
                         "used": False,
                         "delta_e00": None,
-                        "valid_ratio": float(np.count_nonzero(cell_mask) / max(1, cell_mask.size)),
+                        "valid_ratio": valid_ratio,
                     }
                 )
                 continue
@@ -1050,7 +1077,7 @@ def analyze_single_image(
                     "row": r + 1,
                     "col": c + 1,
                     "used": True,
-                    "valid_ratio": float(np.count_nonzero(cell_mask) / max(1, cell_mask.size)),
+                    "valid_ratio": valid_ratio,
                     "used_pixels": cnt,
                     "delta_e00": de,
                     "board_lab": [float(x) for x in mean_lab],
@@ -1257,7 +1284,8 @@ def analyze_dual_image(
             m1 = ref_mask[y0:y1, x0:x1]
             m2 = film_mask[y0:y1, x0:x1]
             m = m1 & m2
-            used = bool(np.count_nonzero(m) >= max(80, int(m.size * 0.28)))
+            m_nz = np.count_nonzero(m)
+            used = bool(m_nz >= max(80, int(m.size * 0.28)))
             if not used:
                 grid.append({"row": r + 1, "col": c + 1, "used": False, "delta_e00": None})
                 continue
@@ -1614,13 +1642,15 @@ def run_ensemble_single_mode(
     if not ok_members:
         raise RuntimeError("ensemble mode failed: no valid reports")
 
-    arr_avg = np.array([m["avg_delta_e00"] for m in ok_members], dtype=np.float32)
-    arr_p95 = np.array([m["p95_delta_e00"] for m in ok_members], dtype=np.float32)
-    arr_max = np.array([m["max_delta_e00"] for m in ok_members], dtype=np.float32)
-    arr_conf = np.array([m["confidence"] for m in ok_members], dtype=np.float32)
-    arr_dl = np.array([m["dL"] for m in ok_members], dtype=np.float32)
-    arr_dc = np.array([m["dC"] for m in ok_members], dtype=np.float32)
-    arr_dh = np.array([m["dH_deg"] for m in ok_members], dtype=np.float32)
+    _ens_mat = np.array(
+        [
+            (m["avg_delta_e00"], m["p95_delta_e00"], m["max_delta_e00"],
+             m["confidence"], m["dL"], m["dC"], m["dH_deg"])
+            for m in ok_members
+        ],
+        dtype=np.float32,
+    )
+    arr_avg, arr_p95, arr_max, arr_conf, arr_dl, arr_dc, arr_dh = _ens_mat.T
 
     base = reports[0]
     targets_used = base["profile"]["targets_used"]

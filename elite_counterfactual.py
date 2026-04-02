@@ -5,8 +5,15 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import train_test_split
+
+try:
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.model_selection import train_test_split
+    _SKLEARN_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover
+    _SKLEARN_AVAILABLE = False
+    GradientBoostingRegressor = None  # type: ignore[assignment,misc]
+    train_test_split = None  # type: ignore[assignment]
 
 from elite_decision_center import apply_policy_patch, load_decision_policy
 from elite_quality_history import list_outcomes, list_recent_runs

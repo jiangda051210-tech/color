@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -8,16 +9,34 @@ from typing import Any
 import numpy as np
 
 
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_ALLOWED_SQL_TYPES = frozenset({"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"})
+
+# Tracks which DB paths have already been initialised in this process lifetime.
+# Avoids redundant CREATE TABLE / CREATE INDEX calls on every function entry.
+_DB_INITIALIZED: set[str] = set()
+
+
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
-    existing = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if not _SAFE_IDENTIFIER.match(table):
+        raise ValueError(f"unsafe table name: {table!r}")
+    existing = conn.execute(f"PRAGMA table_info({table})").fetchall()  # noqa: S608 — table validated above
     existing_names = {str(row[1]) for row in existing}
     for name, sql_type in columns.items():
+        if not _SAFE_IDENTIFIER.match(name):
+            raise ValueError(f"unsafe column name: {name!r}")
+        sql_type_upper = sql_type.upper()
+        if sql_type_upper not in _ALLOWED_SQL_TYPES:
+            raise ValueError(f"disallowed SQL type: {sql_type!r}")
         if name in existing_names:
             continue
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type_upper}")  # noqa: S608 — all parts validated
 
 
 def init_db(db_path: Path) -> None:
+    resolved = str(db_path.resolve())
+    if resolved in _DB_INITIALIZED:
+        return
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     try:
@@ -101,9 +120,22 @@ def init_db(db_path: Path) -> None:
             ON quality_outcomes(run_id)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_quality_outcomes_outcome
+            ON quality_outcomes(outcome)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_quality_outcomes_severity
+            ON quality_outcomes(severity)
+            """
+        )
         conn.commit()
     finally:
         conn.close()
+    _DB_INITIALIZED.add(resolved)
 
 
 def _to_float(v: Any, default: float = 0.0) -> float:

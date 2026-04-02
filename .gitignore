@@ -5,11 +5,16 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
 
 # Virtual env
 .venv/
 venv/
 env/
+.python-version
 
 # Runtime DB / local state
 *.sqlite
@@ -27,8 +32,15 @@ service_runs/
 out/
 out*/
 
+# Environment / secrets — never commit real credentials
+.env
+.env.local
+.env.*.local
+
 # OS/editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo

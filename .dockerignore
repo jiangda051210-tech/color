@@ -1,0 +1,48 @@
+# Version control
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime data (mounted as volume in container)
+*.sqlite
+*.sqlite3
+*.db
+logs/
+service_runs/
+out/
+out*/
+
+# Test data (not needed in production image)
+batch_test/
+demo_data/
+
+# Documentation
+*.md
+ELITE_ROADMAP.md
+
+# Windows deployment scripts
+*.ps1
+
+# Editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# CI/CD
+.github/
+
+# Config examples (use env vars in container)
+*.env.example
