@@ -99,7 +99,7 @@ def _request(
         raw = resp.read().decode("utf-8", errors="replace")
         try:
             body = json.loads(raw)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             body = raw
         return resp.status, body
 
@@ -161,7 +161,7 @@ def _post_multipart(
         raw = resp.read().decode("utf-8", errors="replace")
         try:
             parsed = json.loads(raw)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             parsed = raw
         return resp.status, parsed
 

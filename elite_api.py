@@ -61,14 +61,14 @@ from elite_open_bandit import recommend_open_bandit_policy
 from elite_innovation_engine import DriftPredictor, EliteInnovationEngine
 try:
     from color_film_mvp_v3_optimized import ColorFilmPipelineV3Optimized as ColorFilmPipelineV2
-except Exception:  # pragma: no cover - fallback for compatibility
+except ImportError:  # pragma: no cover - fallback for compatibility
     from color_film_mvp_v2 import ColorFilmPipelineV2
 
 try:
     from ultimate_color_film_system_v2_optimized import (
         UltimateColorFilmSystemV2Optimized as UltimateColorFilmSystem,
     )
-except Exception:  # pragma: no cover - fallback for compatibility
+except ImportError:  # pragma: no cover - fallback for compatibility
     from ultimate_color_film_system import UltimateColorFilmSystem
 from elite_innovation_state import (
     load_color_passport,
@@ -217,7 +217,7 @@ def _rotate_audit_log_if_needed() -> None:
     try:
         if AUDIT_LOG_PATH.stat().st_size < max_bytes:
             return
-    except Exception:
+    except OSError:
         return
 
     backups = max(1, int(SETTINGS.audit_rotate_backups))
@@ -750,7 +750,7 @@ def _write_alert_dead_letter(event: dict[str, Any]) -> None:
             _rotate_alert_dead_letter_if_needed()
             with ALERT_DEAD_LETTER_PATH.open("a", encoding="utf-8") as fp:
                 fp.write(line + "\n")
-    except Exception:
+    except OSError:
         return
 
 
@@ -773,7 +773,7 @@ def _read_alert_dead_letter_rows(limit: int = 200) -> list[dict[str, Any]]:
                 rows.append(payload)
             else:
                 rows.append({"raw": text})
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             rows.append({"raw": text})
     return rows
 
@@ -3391,7 +3391,7 @@ def get_system_audit_tail(limit: int = 120) -> dict[str, Any]:
                 rows.append(payload)
             else:
                 rows.append({"raw": text})
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             rows.append({"raw": text})
     return {
         "ok": True,

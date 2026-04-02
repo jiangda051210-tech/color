@@ -70,14 +70,14 @@ def _request(
             raw = resp.read().decode("utf-8", errors="replace")
             try:
                 body = json.loads(raw)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 body = raw
             return int(resp.status), body
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         try:
             body = json.loads(raw)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             body = raw
         return int(exc.code), body
     except Exception as exc:  # noqa: BLE001

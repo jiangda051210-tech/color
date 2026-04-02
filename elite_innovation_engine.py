@@ -23,7 +23,7 @@ import hashlib
 import time
 import statistics
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 from collections import deque, defaultdict
 import copy
 
@@ -343,7 +343,7 @@ class DriftPredictor:
     def __init__(self, threshold: float = 3.0, window: int = 60):
         self.threshold = threshold
         self.window = window
-        self.history: List[dict] = []
+        self.history: list[dict] = []
         # Bayesian LR 先验
         self._mu = [0.0, 0.0]       # [intercept, slope]
         self._P = [[10.0, 0.0], [0.0, 10.0]]  # 协方差
@@ -548,7 +548,7 @@ class ColorAgingPredictor:
 
     def predict(self, lab_current: dict, material: str = 'pvc_film',
                 environment: str = 'indoor_normal',
-                years: List[int] = None) -> dict:
+                years: list[int] = None) -> dict:
         """
         预测未来各时间点的颜色和色差
         """
@@ -589,7 +589,7 @@ class ColorAgingPredictor:
     def predict_differential_aging(self, lab_sample: dict, lab_film: dict,
                                     material_sample: str, material_film: str,
                                     environment: str = 'indoor_normal',
-                                    years: List[int] = None) -> dict:
+                                    years: list[int] = None) -> dict:
         """
         ★ 核心创新: 预测样板和彩膜在老化后的色差变化
         可能出厂时ΔE=1.5合格，但5年后因为老化速率不同变成ΔE=4.0
@@ -885,8 +885,8 @@ class BatchBlendOptimizer:
     使每个客户收到的板材之间色差最小
     """
 
-    def optimize(self, batches: List[dict], n_groups: int = 2,
-                 customer_tiers: List[str] = None) -> dict:
+    def optimize(self, batches: list[dict], n_groups: int = 2,
+                 customer_tiers: list[str] = None) -> dict:
         """
         Args:
             batches: [{'batch_id': 'B001', 'lab': {'L':..., 'a':..., 'b':...}, 'quantity': 100}, ...]
@@ -1298,7 +1298,7 @@ class SPCEngine:
             if len(xbars) > 1:
                 try:
                     pp = round((spec_upper - spec_lower) / (6 * statistics.stdev(xbars)), 3)
-                except Exception:
+                except (statistics.StatisticsError, ZeroDivisionError):
                     pp = cp
             else:
                 pp = cp

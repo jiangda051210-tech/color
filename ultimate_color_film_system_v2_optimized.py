@@ -15,9 +15,10 @@ import sqlite3
 import statistics
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 from color_film_mvp_v3_optimized import de2000
 
@@ -34,7 +35,7 @@ def _safe_mean(values: Sequence[float], default: float = 0.0) -> float:
     return statistics.mean(values) if values else default
 
 
-def _ensure_lab(lab: Any) -> Optional[Dict[str, float]]:
+def _ensure_lab(lab: Any) -> dict[str, float] | None:
     if not isinstance(lab, dict):
         return None
     out = {}
@@ -55,17 +56,17 @@ class EnvironmentCompensatorV2:
         self._ref_temp = 25.0
         self._ref_humid = 50.0
         self._led_hours = 0.0
-        self._history: List[Dict[str, Any]] = []
+        self._history: list[dict[str, Any]] = []
 
     def record_conditions(
         self,
         temp: float,
         humidity: float,
-        led_hours: Optional[float] = None,
+        led_hours: float | None = None,
         machine_id: str = "LINE-01",
-        shift: Optional[str] = None,
-        ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        shift: str | None = None,
+        ts: float | None = None,
+    ) -> dict[str, Any]:
         if led_hours is not None and _is_number(led_hours):
             self._led_hours = float(led_hours)
         record = {
@@ -82,7 +83,7 @@ class EnvironmentCompensatorV2:
             self._history = self._history[-5000:]
         return {"recorded": True, "count": len(self._history)}
 
-    def compensate_lab(self, lab: Dict[str, float], temp: float, humidity: float) -> Dict[str, float]:
+    def compensate_lab(self, lab: dict[str, float], temp: float, humidity: float) -> dict[str, float]:
         dt = float(temp) - self._ref_temp
         dh = float(humidity) - self._ref_humid
         return {
@@ -91,8 +92,8 @@ class EnvironmentCompensatorV2:
             "b": lab["b"] - self.TEMP_COEFF["db_per_deg"] * dt - self.HUMID_COEFF["db_per_pct"] * dh,
         }
 
-    def check_environment(self, temp: float, humidity: float, machine_id: str = "LINE-01") -> Dict[str, Any]:
-        issues: List[str] = []
+    def check_environment(self, temp: float, humidity: float, machine_id: str = "LINE-01") -> dict[str, Any]:
+        issues: list[str] = []
         severity = 0.0
         temp = float(temp)
         humidity = float(humidity)
@@ -149,18 +150,18 @@ class EnvironmentCompensatorV2:
 
 class SubstrateAnalyzerV2:
     def __init__(self) -> None:
-        self._lots: Dict[str, Dict[str, Any]] = {}
+        self._lots: dict[str, dict[str, Any]] = {}
 
     def register_lot(
         self,
         lot_id: str,
-        lab: Dict[str, float],
+        lab: dict[str, float],
         supplier: str = "",
         material: str = "pvc",
         opacity: float = 1.0,
         gloss: float = 0.0,
-        thickness_um: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        thickness_um: float | None = None,
+    ) -> dict[str, Any]:
         lab_ok = _ensure_lab(lab)
         if lab_ok is None:
             return {"error": "invalid_lab"}
@@ -177,7 +178,7 @@ class SubstrateAnalyzerV2:
         }
         return {"registered": True, "lot": lot_id, "duplicate_overwrite": duplicate, "total_lots": len(self._lots)}
 
-    def compare_to_reference(self, lot_id: str, ref_lot_id: Optional[str] = None) -> Dict[str, Any]:
+    def compare_to_reference(self, lot_id: str, ref_lot_id: str | None = None) -> dict[str, Any]:
         if lot_id not in self._lots:
             return {"error": f"lot_not_found:{lot_id}"}
         if ref_lot_id is None:
@@ -211,8 +212,8 @@ class SubstrateAnalyzerV2:
         }
 
     @staticmethod
-    def _suggest(d: Dict[str, float]) -> str:
-        parts: List[str] = []
+    def _suggest(d: dict[str, float]) -> str:
+        parts: list[str] = []
         if d["raw_dL"] > 0.3:
             parts.append("substrate_whiter:increase_ink_density")
         elif d["raw_dL"] < -0.3:
@@ -233,9 +234,9 @@ class WetToDryPredictorV2:
     }
 
     def __init__(self) -> None:
-        self._history: List[Dict[str, Any]] = []
+        self._history: list[dict[str, Any]] = []
 
-    def _profile(self, ink_type: str) -> Dict[str, float]:
+    def _profile(self, ink_type: str) -> dict[str, float]:
         p = dict(self.PROFILES.get(ink_type, self.PROFILES["solvent_gravure"]))
         samples = [x for x in self._history if x["type"] == ink_type]
         if len(samples) >= 5:
@@ -245,12 +246,12 @@ class WetToDryPredictorV2:
 
     def predict_dry_lab(
         self,
-        wet_lab: Dict[str, float],
+        wet_lab: dict[str, float],
         ink_type: str = "solvent_gravure",
         elapsed_hours: float = 0.0,
-        post_process: Optional[List[str]] = None,
+        post_process: list[str] | None = None,
         storage_days: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         wet = _ensure_lab(wet_lab)
         if wet is None:
             return {"error": "invalid_wet_lab"}
@@ -304,7 +305,7 @@ class WetToDryPredictorV2:
             "warning": "wet_dry_shift_high" if d["total"] > 1.2 else "wet_dry_shift_medium" if d["total"] > 0.6 else None,
         }
 
-    def learn(self, wet_lab: Dict[str, float], dry_lab: Dict[str, float], ink_type: str, dry_hours: float) -> Dict[str, Any]:
+    def learn(self, wet_lab: dict[str, float], dry_lab: dict[str, float], ink_type: str, dry_hours: float) -> dict[str, Any]:
         wet = _ensure_lab(wet_lab)
         dry = _ensure_lab(dry_lab)
         if wet is None or dry is None:
@@ -326,16 +327,16 @@ class WetToDryPredictorV2:
 
 
 class PrintRunMonitorV2:
-    def __init__(self, target_lab: Optional[Dict[str, float]] = None, tolerance: float = 2.5) -> None:
+    def __init__(self, target_lab: dict[str, float] | None = None, tolerance: float = 2.5) -> None:
         self._target = _ensure_lab(target_lab) if target_lab else None
         self._tol = float(tolerance)
-        self._samples: List[Dict[str, Any]] = []
-        self._alerts: List[Dict[str, Any]] = []
+        self._samples: list[dict[str, Any]] = []
+        self._alerts: list[dict[str, Any]] = []
         self._run_id = ""
-        self._changeovers: List[Dict[str, Any]] = []
+        self._changeovers: list[dict[str, Any]] = []
         self._startup_samples = 8
 
-    def set_target(self, lab: Dict[str, float], tolerance: Optional[float] = None, run_id: Optional[str] = None) -> Dict[str, Any]:
+    def set_target(self, lab: dict[str, float], tolerance: float | None = None, run_id: str | None = None) -> dict[str, Any]:
         self._target = _ensure_lab(lab)
         if self._target is None:
             return {"error": "invalid_target_lab"}
@@ -347,7 +348,7 @@ class PrintRunMonitorV2:
         self._run_id = run_id or f"RUN-{int(time.time())}"
         return {"ok": True, "run_id": self._run_id, "tolerance": self._tol}
 
-    def mark_changeover(self, change_type: str, at_seq: Optional[int] = None, stabilization_samples: int = 10) -> Dict[str, Any]:
+    def mark_changeover(self, change_type: str, at_seq: int | None = None, stabilization_samples: int = 10) -> dict[str, Any]:
         seq = int(at_seq if at_seq is not None else len(self._samples) + 1)
         self._changeovers.append({"type": change_type, "seq": seq, "stabilization_samples": max(1, int(stabilization_samples)), "ts": _now_iso()})
         return {"recorded": True, "changeovers": len(self._changeovers)}
@@ -362,12 +363,12 @@ class PrintRunMonitorV2:
 
     def add_sample(
         self,
-        lab: Dict[str, float],
-        seq: Optional[int] = None,
-        timestamp: Optional[float] = None,
-        meter_position: Optional[float] = None,
+        lab: dict[str, float],
+        seq: int | None = None,
+        timestamp: float | None = None,
+        meter_position: float | None = None,
         roll_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if self._target is None:
             return {"error": "target_not_set"}
         lab_ok = _ensure_lab(lab)
@@ -397,8 +398,8 @@ class PrintRunMonitorV2:
         }
         self._samples.append(sample)
 
-        alert: Optional[Dict[str, Any]] = None
-        extra_alerts: List[Dict[str, Any]] = []
+        alert: dict[str, Any] | None = None
+        extra_alerts: list[dict[str, Any]] = []
         if d["total"] > self._tol:
             alert = {"type": "OUT_OF_TOLERANCE", "seq": seq_num, "de": d["total"], "phase": phase}
 
@@ -442,7 +443,7 @@ class PrintRunMonitorV2:
             "run_stats": self._run_stats(),
         }
 
-    def _run_stats(self) -> Dict[str, Any]:
+    def _run_stats(self) -> dict[str, Any]:
         if not self._samples:
             return {}
         des = [s["de"] for s in self._samples]
@@ -455,7 +456,7 @@ class PrintRunMonitorV2:
             "alerts": len(self._alerts),
         }
 
-    def get_report(self) -> Dict[str, Any]:
+    def get_report(self) -> dict[str, Any]:
         stats = self._run_stats()
         trend = self._trend_analysis()
         segment = self._head_mid_tail()
@@ -481,7 +482,7 @@ class PrintRunMonitorV2:
             },
         }
 
-    def _trend_analysis(self) -> Dict[str, Any]:
+    def _trend_analysis(self) -> dict[str, Any]:
         if len(self._samples) < 6:
             return {"direction": "insufficient_data"}
         first = [x["de"] for x in self._samples[: len(self._samples) // 2]]
@@ -494,7 +495,7 @@ class PrintRunMonitorV2:
             return {"direction": "improving", "change": round(b - a, 4)}
         return {"direction": "stable", "change": round(b - a, 4)}
 
-    def _head_mid_tail(self) -> Dict[str, float]:
+    def _head_mid_tail(self) -> dict[str, float]:
         if len(self._samples) < 3:
             return {}
         n = len(self._samples)
@@ -503,7 +504,7 @@ class PrintRunMonitorV2:
         mid = [x["de"] for x in self._samples[n // 3 : 2 * n // 3]]
         return {"head": round(_safe_mean(head), 4), "middle": round(_safe_mean(mid), 4), "tail": round(_safe_mean(tail), 4)}
 
-    def _tail_drift_summary(self) -> Dict[str, Any]:
+    def _tail_drift_summary(self) -> dict[str, Any]:
         if len(self._samples) < 12:
             return {"detected": False, "reason": "insufficient_samples"}
         n = len(self._samples)
@@ -523,7 +524,7 @@ class PrintRunMonitorV2:
             "sustained_risk": sustained,
         }
 
-    def _detect_tail_drift(self) -> Optional[Dict[str, Any]]:
+    def _detect_tail_drift(self) -> dict[str, Any] | None:
         summary = self._tail_drift_summary()
         if summary.get("detected"):
             return {
@@ -542,21 +543,21 @@ class RollLifecycleTrackerV2:
     """
 
     def __init__(self) -> None:
-        self._rolls: Dict[str, Dict[str, Any]] = {}
-        self._lot_rolls: Dict[str, List[str]] = defaultdict(list)
-        self._zones: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self._samples: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._rolls: dict[str, dict[str, Any]] = {}
+        self._lot_rolls: dict[str, list[str]] = defaultdict(list)
+        self._zones: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._samples: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     def register_roll(
         self,
         lot_id: str,
         roll_id: str,
         length_m: float,
-        parent_roll_id: Optional[str] = None,
-        rework_of: Optional[str] = None,
+        parent_roll_id: str | None = None,
+        rework_of: str | None = None,
         machine_id: str = "",
         shift: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         rid = str(roll_id)
         if not rid or not lot_id:
             return {"registered": False, "error": "missing_roll_or_lot"}
@@ -584,7 +585,7 @@ class RollLifecycleTrackerV2:
         meter_start: float,
         meter_end: float,
         reason: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         rid = str(roll_id)
         if rid not in self._rolls:
             return {"recorded": False, "error": "roll_not_found"}
@@ -610,10 +611,10 @@ class RollLifecycleTrackerV2:
         roll_id: str,
         meter_pos: float,
         de: float,
-        lab: Optional[Dict[str, float]] = None,
+        lab: dict[str, float] | None = None,
         source: str = "",
-        ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        ts: float | None = None,
+    ) -> dict[str, Any]:
         rid = str(roll_id)
         if rid not in self._rolls:
             return {"recorded": False, "error": "roll_not_found"}
@@ -637,7 +638,7 @@ class RollLifecycleTrackerV2:
         return {"recorded": True, "count": len(self._samples[rid])}
 
     @staticmethod
-    def _zone_de_stats(samples: List[Dict[str, Any]], zone: Dict[str, Any]) -> Dict[str, Any]:
+    def _zone_de_stats(samples: list[dict[str, Any]], zone: dict[str, Any]) -> dict[str, Any]:
         ms = float(zone["meter_start"])
         me = float(zone["meter_end"])
         inside = [x for x in samples if ms <= float(x["meter_pos"]) <= me]
@@ -664,7 +665,7 @@ class RollLifecycleTrackerV2:
             "risk_score": round(risk, 4),
         }
 
-    def summary(self, roll_id: str) -> Dict[str, Any]:
+    def summary(self, roll_id: str) -> dict[str, Any]:
         rid = str(roll_id)
         if rid not in self._rolls:
             return {"status": "roll_not_found", "roll_id": rid}
@@ -719,7 +720,7 @@ class RollLifecycleTrackerV2:
             "latest_meter": samples[-1]["meter_pos"],
         }
 
-    def lot_summary(self, lot_id: str) -> Dict[str, Any]:
+    def lot_summary(self, lot_id: str) -> dict[str, Any]:
         roll_ids = list(self._lot_rolls.get(lot_id, []))
         rows = [self.summary(rid) for rid in roll_ids]
         valid = [x for x in rows if x.get("status") == "ok"]
@@ -736,21 +737,21 @@ class RollLifecycleTrackerV2:
 
 class CrossBatchMatcherV2:
     def __init__(self) -> None:
-        self._batches: Dict[str, Dict[str, Any]] = {}
+        self._batches: dict[str, dict[str, Any]] = {}
 
-    def register_batch(self, batch_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    def register_batch(self, batch_id: str, data: dict[str, Any]) -> dict[str, Any]:
         duplicate = batch_id in self._batches
         payload = dict(data)
         payload["ts"] = _now_iso()
         self._batches[batch_id] = payload
         return {"registered": True, "batch_id": batch_id, "duplicate_overwrite": duplicate, "total": len(self._batches)}
 
-    def find_match_recipe(self, target_batch_id: str, current_conditions: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def find_match_recipe(self, target_batch_id: str, current_conditions: dict[str, Any] | None = None) -> dict[str, Any]:
         if target_batch_id not in self._batches:
             return {"error": "target_batch_not_found"}
         target = self._batches[target_batch_id]
         cur = dict(current_conditions or {})
-        factors: List[Dict[str, Any]] = []
+        factors: list[dict[str, Any]] = []
 
         if isinstance(cur.get("substrate_lab"), dict) and isinstance(target.get("substrate_lab"), dict):
             d = de2000(target["substrate_lab"], cur["substrate_lab"])["total"]
@@ -792,7 +793,7 @@ class InkLotTrackerV2:
         self._lots = defaultdict(list)
         self._index = set()
 
-    def register(self, ink_model: str, lot_id: str, lab: Dict[str, float], supplier: str = "") -> Dict[str, Any]:
+    def register(self, ink_model: str, lot_id: str, lab: dict[str, float], supplier: str = "") -> dict[str, Any]:
         lab_ok = _ensure_lab(lab)
         if lab_ok is None:
             return {"error": "invalid_lab"}
@@ -803,7 +804,7 @@ class InkLotTrackerV2:
         self._lots[ink_model].append({"lot": lot_id, "lab": lab_ok, "supplier": supplier, "ts": _now_iso()})
         return {"registered": True, "lot_id": lot_id, "total": len(self._lots[ink_model])}
 
-    def lot_variation(self, ink_model: str) -> Dict[str, Any]:
+    def lot_variation(self, ink_model: str) -> dict[str, Any]:
         lots = self._lots.get(ink_model, [])
         if len(lots) < 2:
             return {"status": "insufficient", "count": len(lots)}
@@ -820,9 +821,9 @@ class InkLotTrackerV2:
 
 class AutoCalibrationGuardV2:
     def __init__(self) -> None:
-        self._calibrations: Dict[str, Dict[str, Any]] = {}
+        self._calibrations: dict[str, dict[str, Any]] = {}
 
-    def register_source(self, source: str, interval_hours: float) -> Dict[str, Any]:
+    def register_source(self, source: str, interval_hours: float) -> dict[str, Any]:
         self._calibrations[source] = {
             "interval": float(interval_hours),
             "last_cal": time.time(),
@@ -830,9 +831,9 @@ class AutoCalibrationGuardV2:
         }
         return {"registered": True, "source": source}
 
-    def check_status(self) -> Dict[str, Any]:
+    def check_status(self) -> dict[str, Any]:
         now = time.time()
-        results: Dict[str, Dict[str, Any]] = {}
+        results: dict[str, dict[str, Any]] = {}
         overdue = 0
         for source, data in self._calibrations.items():
             elapsed = (now - data["last_cal"]) / 3600.0
@@ -853,7 +854,7 @@ class AutoCalibrationGuardV2:
             "action": "recalibrate_now" if overdue else "ok",
         }
 
-    def record_calibration(self, source: str, by: str = "", notes: str = "") -> Dict[str, Any]:
+    def record_calibration(self, source: str, by: str = "", notes: str = "") -> dict[str, Any]:
         if source not in self._calibrations:
             return {"error": "source_not_found"}
         now = time.time()
@@ -863,13 +864,13 @@ class AutoCalibrationGuardV2:
 
 
 class EdgeEffectAnalyzerV2:
-    def analyze(self, de_grid: List[float], grid_shape: Tuple[int, int] = (6, 8)) -> Dict[str, Any]:
+    def analyze(self, de_grid: list[float], grid_shape: tuple[int, int] = (6, 8)) -> dict[str, Any]:
         rows, cols = grid_shape
         if len(de_grid) != rows * cols:
             return {"error": "grid_mismatch"}
 
-        center: List[float] = []
-        edges: List[float] = []
+        center: list[float] = []
+        edges: list[float] = []
         by_edge = {"left": [], "right": [], "top": [], "bottom": []}
 
         for i, val in enumerate(de_grid):
@@ -912,9 +913,9 @@ class EdgeEffectAnalyzerV2:
 
 class RollerLifeTrackerV2:
     def __init__(self) -> None:
-        self._rollers: Dict[str, Dict[str, Any]] = {}
+        self._rollers: dict[str, dict[str, Any]] = {}
 
-    def register(self, roller_id: str, roller_type: str, max_meters: int = 500000) -> Dict[str, Any]:
+    def register(self, roller_id: str, roller_type: str, max_meters: int = 500000) -> dict[str, Any]:
         self._rollers[roller_id] = {
             "type": roller_type,
             "installed": _now_iso(),
@@ -925,7 +926,7 @@ class RollerLifeTrackerV2:
         }
         return {"registered": True, "roller_id": roller_id}
 
-    def update_meters(self, roller_id: str, meters: int, avg_de: Optional[float] = None) -> Dict[str, Any]:
+    def update_meters(self, roller_id: str, meters: int, avg_de: float | None = None) -> dict[str, Any]:
         if roller_id not in self._rollers:
             return {"error": "roller_not_found"}
         r = self._rollers[roller_id]
@@ -934,7 +935,7 @@ class RollerLifeTrackerV2:
             r["quality"].append({"meters": int(meters), "de": float(avg_de), "ts": _now_iso()})
         return {"updated": True}
 
-    def status(self, roller_id: str) -> Dict[str, Any]:
+    def status(self, roller_id: str) -> dict[str, Any]:
         if roller_id not in self._rollers:
             return {"error": "roller_not_found"}
         r = self._rollers[roller_id]
@@ -963,16 +964,16 @@ class RollerLifeTrackerV2:
 
 class GoldenSampleManagerV2:
     def __init__(self) -> None:
-        self._samples: Dict[str, Dict[str, Any]] = {}
+        self._samples: dict[str, dict[str, Any]] = {}
 
-    def register(self, code: str, lab: Dict[str, float], max_age_days: int = 90) -> Dict[str, Any]:
+    def register(self, code: str, lab: dict[str, float], max_age_days: int = 90) -> dict[str, Any]:
         lab_ok = _ensure_lab(lab)
         if lab_ok is None:
             return {"error": "invalid_lab"}
         self._samples[code] = {"original": lab_ok, "current": lab_ok, "created": time.time(), "max_age": int(max_age_days), "checks": []}
         return {"registered": True, "code": code}
 
-    def check(self, code: str, measured_lab: Dict[str, float]) -> Dict[str, Any]:
+    def check(self, code: str, measured_lab: dict[str, float]) -> dict[str, Any]:
         if code not in self._samples:
             return {"error": "sample_not_found"}
         measured = _ensure_lab(measured_lab)
@@ -1008,7 +1009,7 @@ class OperatorSkillTrackerV2:
     def __init__(self) -> None:
         self._operators = defaultdict(lambda: {"sessions": [], "total": 0, "first_pass": 0, "invalid_entries": 0})
 
-    def record_session(self, operator: str, attempts: int, final_de: float, target_de: float = 2.5, operator_inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def record_session(self, operator: str, attempts: int, final_de: float, target_de: float = 2.5, operator_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         d = self._operators[operator]
         if not _is_number(attempts) or int(attempts) <= 0 or not _is_number(final_de):
             d["invalid_entries"] += 1
@@ -1025,7 +1026,7 @@ class OperatorSkillTrackerV2:
             d["sessions"] = d["sessions"][-500:]
         return {"recorded": True, "total": d["total"]}
 
-    def profile(self, operator: str) -> Dict[str, Any]:
+    def profile(self, operator: str) -> dict[str, Any]:
         d = self._operators.get(operator)
         if not d or d["total"] == 0:
             return {"operator": operator, "status": "no_data"}
@@ -1055,7 +1056,7 @@ class OperatorSkillTrackerV2:
             "grade": grade,
         }
 
-    def leaderboard(self) -> Dict[str, Any]:
+    def leaderboard(self) -> dict[str, Any]:
         rows = []
         for op, d in self._operators.items():
             if d["total"] <= 0:
@@ -1076,9 +1077,9 @@ class TraceabilityLedgerV2:
     ]
 
     def __init__(self) -> None:
-        self._chains: Dict[str, Dict[str, Any]] = {}
+        self._chains: dict[str, dict[str, Any]] = {}
 
-    def _hash_event(self, prev_hash: str, payload: Dict[str, Any], nonce: str) -> str:
+    def _hash_event(self, prev_hash: str, payload: dict[str, Any], nonce: str) -> str:
         txt = json.dumps({"prev_hash": prev_hash, "payload": payload, "nonce": nonce}, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(txt.encode("utf-8")).hexdigest()[:24]
 
@@ -1086,12 +1087,12 @@ class TraceabilityLedgerV2:
         self,
         lot_id: str,
         stage: str,
-        data: Dict[str, Any],
-        event_id: Optional[str] = None,
+        data: dict[str, Any],
+        event_id: str | None = None,
         actor: str = "",
-        links: Optional[List[Dict[str, str]]] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        links: list[dict[str, str]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         if lot_id not in self._chains:
             self._chains[lot_id] = {
                 "events": [],
@@ -1137,10 +1138,10 @@ class TraceabilityLedgerV2:
         self,
         lot_id: str,
         target_event_id: str,
-        patch: Dict[str, Any],
+        patch: dict[str, Any],
         actor: str,
         reason: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if lot_id not in self._chains:
             return {"error": "lot_not_found"}
         chain = self._chains[lot_id]
@@ -1173,7 +1174,7 @@ class TraceabilityLedgerV2:
         actor: str,
         approved_by: str,
         reason: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if lot_id not in self._chains:
             return {"error": "lot_not_found"}
         chain = self._chains[lot_id]
@@ -1196,7 +1197,7 @@ class TraceabilityLedgerV2:
         )
         return {"recorded": True, "override_id": override_id}
 
-    def anchor_chain(self, lot_id: str, note: str = "") -> Dict[str, Any]:
+    def anchor_chain(self, lot_id: str, note: str = "") -> dict[str, Any]:
         chain = self._chains.get(lot_id)
         if not chain:
             return {"error": "lot_not_found"}
@@ -1205,7 +1206,7 @@ class TraceabilityLedgerV2:
         chain["anchors"].append(anchor)
         return {"anchored": True, "tip_hash": tip, "anchor_count": len(chain["anchors"])}
 
-    def validate_chain(self, lot_id: str) -> Dict[str, Any]:
+    def validate_chain(self, lot_id: str) -> dict[str, Any]:
         chain = self._chains.get(lot_id)
         if not chain:
             return {"valid": False, "error": "lot_not_found"}
@@ -1229,7 +1230,7 @@ class TraceabilityLedgerV2:
             prev = e["hash"]
         return {"valid": valid, "broken_at": broken_at}
 
-    def get_chain(self, lot_id: str) -> Dict[str, Any]:
+    def get_chain(self, lot_id: str) -> dict[str, Any]:
         if lot_id not in self._chains:
             return {"error": "lot_not_found"}
         chain = self._chains[lot_id]
@@ -1258,7 +1259,7 @@ class TraceabilityLedgerV2:
             "overrides": chain.get("overrides", []),
         }
 
-    def find_root_cause(self, lot_id: str, symptom: str) -> Dict[str, Any]:
+    def find_root_cause(self, lot_id: str, symptom: str) -> dict[str, Any]:
         chain = self._chains.get(lot_id, {}).get("events", [])
         if not chain:
             return {"error": "no_trace_data"}
@@ -1266,7 +1267,7 @@ class TraceabilityLedgerV2:
         symptom_l = symptom.lower()
         is_yellow = ("偏黄" in symptom) or ("黄变" in symptom) or ("yellow" in symptom_l) or ("yell" in symptom_l)
         is_nonuniform = ("不均" in symptom) or ("发花" in symptom) or ("uneven" in symptom_l) or ("mottle" in symptom_l) or ("band" in symptom_l)
-        suspects: List[Dict[str, Any]] = []
+        suspects: list[dict[str, Any]] = []
         for e in chain:
             st = e.get("stage")
             data = e.get("data", {})
@@ -1286,9 +1287,9 @@ class TraceabilityLedgerV2:
 
 class RecipeVersionRegistryV2:
     def __init__(self) -> None:
-        self._recipes: Dict[str, Dict[str, Any]] = {}
+        self._recipes: dict[str, dict[str, Any]] = {}
 
-    def create_version(self, recipe_code: str, formula: Dict[str, float], author: str, reason: str, approve: bool = False) -> Dict[str, Any]:
+    def create_version(self, recipe_code: str, formula: dict[str, float], author: str, reason: str, approve: bool = False) -> dict[str, Any]:
         bucket = self._recipes.setdefault(recipe_code, {"versions": [], "active": None})
         ver = len(bucket["versions"]) + 1
         row = {
@@ -1304,7 +1305,7 @@ class RecipeVersionRegistryV2:
             bucket["active"] = ver
         return {"recipe_code": recipe_code, "version": ver, "approved": row["approved"]}
 
-    def approve_version(self, recipe_code: str, version: int, approver: str) -> Dict[str, Any]:
+    def approve_version(self, recipe_code: str, version: int, approver: str) -> dict[str, Any]:
         bucket = self._recipes.get(recipe_code)
         if not bucket:
             return {"error": "recipe_not_found"}
@@ -1317,7 +1318,7 @@ class RecipeVersionRegistryV2:
         bucket["active"] = int(version)
         return {"approved": True, "active": bucket["active"]}
 
-    def rollback_to(self, recipe_code: str, version: int, operator: str) -> Dict[str, Any]:
+    def rollback_to(self, recipe_code: str, version: int, operator: str) -> dict[str, Any]:
         bucket = self._recipes.get(recipe_code)
         if not bucket:
             return {"error": "recipe_not_found"}
@@ -1329,9 +1330,9 @@ class RecipeVersionRegistryV2:
 
 class CAPAEngineV2:
     def __init__(self) -> None:
-        self._cases: Dict[str, Dict[str, Any]] = {}
+        self._cases: dict[str, dict[str, Any]] = {}
 
-    def auto_generate(self, lot_id: str, issue: str, root_cause: str, severity: str = "medium") -> Dict[str, Any]:
+    def auto_generate(self, lot_id: str, issue: str, root_cause: str, severity: str = "medium") -> dict[str, Any]:
         case_id = f"CAPA-{int(time.time())}-{len(self._cases)+1:04d}"
         actions = []
         if "data" in root_cause:
@@ -1356,7 +1357,7 @@ class CAPAEngineV2:
         }
         return self._cases[case_id]
 
-    def close(self, case_id: str, outcome: str, evidence: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def close(self, case_id: str, outcome: str, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
         if case_id not in self._cases:
             return {"error": "capa_not_found"}
         row = self._cases[case_id]
@@ -1366,7 +1367,7 @@ class CAPAEngineV2:
         row["evidence"] = evidence or {}
         return {"closed": True, "case_id": case_id}
 
-    def list_open(self) -> Dict[str, Any]:
+    def list_open(self) -> dict[str, Any]:
         return {"open": [x for x in self._cases.values() if x["status"] == "open"]}
 
 
@@ -1376,16 +1377,16 @@ class TimeStabilityManager:
     """
 
     def __init__(self) -> None:
-        self._records: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._records: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     def record(
         self,
         lot_id: str,
         elapsed_hours: float,
-        lab: Dict[str, float],
+        lab: dict[str, float],
         stage: str = "recheck",
-        verdict: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        verdict: str | None = None,
+    ) -> dict[str, Any]:
         lab_ok = _ensure_lab(lab)
         if lab_ok is None:
             return {"error": "invalid_lab"}
@@ -1400,7 +1401,7 @@ class TimeStabilityManager:
         self._records[lot_id].sort(key=lambda x: x["elapsed_hours"])
         return {"recorded": True, "count": len(self._records[lot_id])}
 
-    def report(self, lot_id: str) -> Dict[str, Any]:
+    def report(self, lot_id: str) -> dict[str, Any]:
         rows = self._records.get(lot_id, [])
         if not rows:
             return {"status": "no_data", "lot_id": lot_id}
@@ -1434,13 +1435,13 @@ class ProcessCouplingRiskEngine:
         "uv": {"viscosity": (8, 20), "line_speed": (40, 150), "dry_temp": (20, 45), "tension": (8, 30), "pressure": (1.0, 3.5)},
     }
 
-    def evaluate(self, params: Dict[str, Any], route: str = "gravure") -> Dict[str, Any]:
+    def evaluate(self, params: dict[str, Any], route: str = "gravure") -> dict[str, Any]:
         route_key = route if route in self.ROUTE_RANGES else "gravure"
         ranges = self.ROUTE_RANGES[route_key]
-        out_of_range: List[str] = []
-        edge_risk: List[str] = []
+        out_of_range: list[str] = []
+        edge_risk: list[str] = []
 
-        normalized: Dict[str, float] = {}
+        normalized: dict[str, float] = {}
         for key, (lo, hi) in ranges.items():
             val = params.get(key)
             if not _is_number(val):
@@ -1452,7 +1453,7 @@ class ProcessCouplingRiskEngine:
             elif (v - lo) / max(1e-6, hi - lo) < 0.1 or (hi - v) / max(1e-6, hi - lo) < 0.1:
                 edge_risk.append(f"{key}_near_limit:{v}")
 
-        coupling_alerts: List[str] = []
+        coupling_alerts: list[str] = []
         visc = normalized.get("viscosity")
         speed = normalized.get("line_speed")
         temp = normalized.get("dry_temp")
@@ -1481,7 +1482,7 @@ class ProcessCouplingRiskEngine:
             "recommendation": "manual_review" if risk_score >= 0.45 else "monitor",
         }
 
-    def reverse_infer(self, color_symptom: Dict[str, Any], params: Dict[str, Any], route: str = "gravure") -> Dict[str, Any]:
+    def reverse_infer(self, color_symptom: dict[str, Any], params: dict[str, Any], route: str = "gravure") -> dict[str, Any]:
         eval_out = self.evaluate(params, route=route)
         suspects = []
         dL = float(color_symptom.get("dL", 0.0) or 0.0)
@@ -1498,11 +1499,11 @@ class ProcessCouplingRiskEngine:
 class FilmAppearanceRiskEngine:
     def evaluate(
         self,
-        lab: Dict[str, float],
-        film_props: Dict[str, Any],
-        substrate_bases: Optional[List[Dict[str, Any]]] = None,
-        observer_angles: Optional[List[float]] = None,
-    ) -> Dict[str, Any]:
+        lab: dict[str, float],
+        film_props: dict[str, Any],
+        substrate_bases: list[dict[str, Any]] | None = None,
+        observer_angles: list[float] | None = None,
+    ) -> dict[str, Any]:
         lab_ok = _ensure_lab(lab)
         if lab_ok is None:
             return {"error": "invalid_lab"}
@@ -1555,16 +1556,16 @@ class FilmAppearanceRiskEngine:
 
 class CustomerScenarioEngine:
     def __init__(self) -> None:
-        self._profiles: Dict[str, Dict[str, Any]] = {}
+        self._profiles: dict[str, dict[str, Any]] = {}
 
-    def register_profile(self, customer_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    def register_profile(self, customer_id: str, profile: dict[str, Any]) -> dict[str, Any]:
         self._profiles[customer_id] = {
             "profile": dict(profile),
             "updated_at": _now_iso(),
         }
         return {"registered": True, "customer_id": customer_id}
 
-    def evaluate(self, customer_id: str, sku: str, scenario: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    def evaluate(self, customer_id: str, sku: str, scenario: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
         prof = self._profiles.get(customer_id, {}).get("profile", {})
         tolerance = float(prof.get("default_tolerance", 2.5))
         sku_tol_map = prof.get("sku_tolerance", {}) if isinstance(prof.get("sku_tolerance"), dict) else {}
@@ -1595,11 +1596,11 @@ class CustomerScenarioEngine:
 
 class RetestDisputeManager:
     def __init__(self) -> None:
-        self._records: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self._status: Dict[str, str] = defaultdict(lambda: "created")
+        self._records: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._status: dict[str, str] = defaultdict(lambda: "created")
 
     @staticmethod
-    def _hash_record(prev_hash: str, payload: Dict[str, Any]) -> str:
+    def _hash_record(prev_hash: str, payload: dict[str, Any]) -> str:
         txt = json.dumps({"prev_hash": prev_hash, "payload": payload}, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(txt.encode("utf-8")).hexdigest()[:24]
 
@@ -1609,11 +1610,11 @@ class RetestDisputeManager:
         test_type: str,
         device_id: str,
         operator: str,
-        raw_result: Dict[str, Any],
-        compensated_result: Optional[Dict[str, Any]],
-        judgment_result: Dict[str, Any],
-        review_result: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        raw_result: dict[str, Any],
+        compensated_result: dict[str, Any] | None,
+        judgment_result: dict[str, Any],
+        review_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         prev_hash = self._records[lot_id][-1]["hash"] if self._records[lot_id] else "GENESIS"
         session_type = str(test_type).strip().lower().replace("-", "_").replace(" ", "_") or "retest"
         row = {
@@ -1635,7 +1636,7 @@ class RetestDisputeManager:
         self._status[lot_id] = "arbitration" if session_type == "arbitration" else "retesting"
         return {"recorded": True, "seq": row["seq"], "count": len(self._records[lot_id]), "record_id": row["record_id"]}
 
-    def _validate_chain(self, lot_id: str) -> Dict[str, Any]:
+    def _validate_chain(self, lot_id: str) -> dict[str, Any]:
         rows = self._records.get(lot_id, [])
         prev = "GENESIS"
         for idx, row in enumerate(rows):
@@ -1647,7 +1648,7 @@ class RetestDisputeManager:
             prev = got
         return {"valid": True, "broken_at": None}
 
-    def dispute_report(self, lot_id: str) -> Dict[str, Any]:
+    def dispute_report(self, lot_id: str) -> dict[str, Any]:
         rows = self._records.get(lot_id, [])
         if not rows:
             return {"status": "no_data", "lot_id": lot_id}
@@ -1693,9 +1694,9 @@ class RetestDisputeManager:
 
 class MultiMachineConsistencyEngine:
     def __init__(self) -> None:
-        self._records: List[Dict[str, Any]] = []
+        self._records: list[dict[str, Any]] = []
 
-    def record(self, machine_id: str, plant_id: str, sku: str, dL: float, da: float, db: float) -> Dict[str, Any]:
+    def record(self, machine_id: str, plant_id: str, sku: str, dL: float, da: float, db: float) -> dict[str, Any]:
         self._records.append(
             {
                 "machine_id": machine_id,
@@ -1711,7 +1712,7 @@ class MultiMachineConsistencyEngine:
             self._records = self._records[-20000:]
         return {"recorded": True, "count": len(self._records)}
 
-    def fingerprint(self, machine_id: str, sku: Optional[str] = None) -> Dict[str, Any]:
+    def fingerprint(self, machine_id: str, sku: str | None = None) -> dict[str, Any]:
         rows = [x for x in self._records if x["machine_id"] == machine_id and (sku is None or x["sku"] == sku)]
         if not rows:
             return {"status": "no_data", "machine_id": machine_id}
@@ -1724,7 +1725,7 @@ class MultiMachineConsistencyEngine:
             "avg_db": round(_safe_mean([x["db"] for x in rows]), 4),
         }
 
-    def chronic_bias_report(self) -> Dict[str, Any]:
+    def chronic_bias_report(self) -> dict[str, Any]:
         machines = sorted({x["machine_id"] for x in self._records})
         out = []
         for m in machines:
@@ -1738,8 +1739,8 @@ class MultiMachineConsistencyEngine:
 
 class LearningLoopEngine:
     def __init__(self) -> None:
-        self._events: List[Dict[str, Any]] = []
-        self._cause_stats: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._events: list[dict[str, Any]] = []
+        self._cause_stats: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
     def record(
         self,
@@ -1748,7 +1749,7 @@ class LearningLoopEngine:
         actual_cause: str,
         success: bool,
         rule_source: str = "heuristic",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         row = {
             "context_key": context_key,
             "predicted_cause": predicted_cause,
@@ -1763,7 +1764,7 @@ class LearningLoopEngine:
             self._events = self._events[-100000:]
         return {"recorded": True, "count": len(self._events)}
 
-    def cause_priority(self, context_key: str) -> Dict[str, Any]:
+    def cause_priority(self, context_key: str) -> dict[str, Any]:
         stats = self._cause_stats.get(context_key, {})
         total = sum(stats.values())
         if total <= 0:
@@ -1791,13 +1792,13 @@ class DecisionEnvelopeV2:
         risk_score: float,
         confidence: float,
         blocking: bool,
-        warnings: Optional[List[str]] = None,
-        explanations: Optional[List[str]] = None,
-        recommendations: Optional[List[str]] = None,
-        evidence: Optional[List[Dict[str, Any]]] = None,
-        next_actions: Optional[List[Dict[str, Any]]] = None,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        warnings: list[str] | None = None,
+        explanations: list[str] | None = None,
+        recommendations: list[str] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        next_actions: list[dict[str, Any]] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
             "status": status,
             "risk_level": cls._risk_level(risk_score),
@@ -1819,15 +1820,15 @@ class DataIntegrityGuardV2:
     """
 
     def __init__(self) -> None:
-        self._idempotency: Dict[str, str] = {}
-        self._submission_cache: Dict[str, Dict[str, Any]] = {}
+        self._idempotency: dict[str, str] = {}
+        self._submission_cache: dict[str, dict[str, Any]] = {}
 
     @staticmethod
-    def _hash_payload(payload: Dict[str, Any]) -> str:
+    def _hash_payload(payload: dict[str, Any]) -> str:
         body = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
 
-    def check_idempotency(self, idempotency_key: Optional[str], payload: Dict[str, Any]) -> Dict[str, Any]:
+    def check_idempotency(self, idempotency_key: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         if not idempotency_key:
             return {"ok": True, "duplicate": False}
         key = str(idempotency_key)
@@ -1843,11 +1844,11 @@ class DataIntegrityGuardV2:
         self._idempotency[key] = digest
         return {"ok": True, "duplicate": False}
 
-    def cache_submission(self, idempotency_key: Optional[str], result: Dict[str, Any]) -> None:
+    def cache_submission(self, idempotency_key: str | None, result: dict[str, Any]) -> None:
         if idempotency_key:
             self._submission_cache[str(idempotency_key)] = dict(result)
 
-    def get_cached_submission(self, idempotency_key: Optional[str]) -> Optional[Dict[str, Any]]:
+    def get_cached_submission(self, idempotency_key: str | None) -> dict[str, Any] | None:
         if not idempotency_key:
             return None
         row = self._submission_cache.get(str(idempotency_key))
@@ -1856,13 +1857,13 @@ class DataIntegrityGuardV2:
     def validate_assessment_inputs(
         self,
         lot_id: str,
-        base_decision: Dict[str, Any],
-        color_metrics: Dict[str, Any],
-        meta: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        errors: List[str] = []
-        warnings: List[str] = []
-        evidence: List[Dict[str, Any]] = []
+        base_decision: dict[str, Any],
+        color_metrics: dict[str, Any],
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        errors: list[str] = []
+        warnings: list[str] = []
+        evidence: list[dict[str, Any]] = []
         required_color = ["avg_de", "max_de"]
         for k in required_color:
             if k not in color_metrics or not _is_number(color_metrics.get(k)):
@@ -1902,7 +1903,7 @@ class DataIntegrityGuardV2:
             "evidence": evidence,
         }
 
-    def validate_event_payload(self, stage: str, data: Dict[str, Any], ts: Optional[float] = None) -> Dict[str, Any]:
+    def validate_event_payload(self, stage: str, data: dict[str, Any], ts: float | None = None) -> dict[str, Any]:
         if not isinstance(data, dict):
             return {"valid": False, "errors": ["event_data_not_dict"], "warnings": []}
         req_map = {
@@ -1913,8 +1914,8 @@ class DataIntegrityGuardV2:
             "inspection": ["avg_de"],
             "shipping": ["shipment_id"],
         }
-        errors: List[str] = []
-        warnings: List[str] = []
+        errors: list[str] = []
+        warnings: list[str] = []
         for key in req_map.get(stage, []):
             if key not in data:
                 errors.append(f"missing_field:{key}")
@@ -1929,7 +1930,7 @@ class MeasurementSystemGuardV2:
     """
 
     def __init__(self) -> None:
-        self._records: List[Dict[str, Any]] = []
+        self._records: list[dict[str, Any]] = []
 
     def record(
         self,
@@ -1937,9 +1938,9 @@ class MeasurementSystemGuardV2:
         sample_id: str,
         device_id: str,
         operator_id: str,
-        lab: Dict[str, float],
-        ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        lab: dict[str, float],
+        ts: float | None = None,
+    ) -> dict[str, Any]:
         lab_ok = _ensure_lab(lab)
         if lab_ok is None:
             return {"recorded": False, "error": "invalid_lab"}
@@ -1958,10 +1959,10 @@ class MeasurementSystemGuardV2:
         return {"recorded": True, "count": len(self._records)}
 
     @staticmethod
-    def _std(values: List[float]) -> float:
+    def _std(values: list[float]) -> float:
         return statistics.stdev(values) if len(values) > 1 else 0.0
 
-    def report(self, lot_id: Optional[str] = None, window: int = 500) -> Dict[str, Any]:
+    def report(self, lot_id: str | None = None, window: int = 500) -> dict[str, Any]:
         rows = self._records[-max(1, int(window)) :]
         if lot_id:
             rows = [x for x in rows if x["lot_id"] == lot_id]
@@ -1977,11 +1978,11 @@ class MeasurementSystemGuardV2:
                 "warnings": ["msa_insufficient_data"],
             }
 
-        by_sample_device_op: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+        by_sample_device_op: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
         for r in rows:
             by_sample_device_op[(r["sample_id"], r["device_id"], r["operator_id"])].append(r)
 
-        repeatability_de: List[float] = []
+        repeatability_de: list[float] = []
         for group in by_sample_device_op.values():
             if len(group) < 2:
                 continue
@@ -1991,10 +1992,10 @@ class MeasurementSystemGuardV2:
         repeatability_std = self._std(repeatability_de) if repeatability_de else 0.0
 
         # Reproducibility: compare operator/device means on same sample_id.
-        by_sample: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        by_sample: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for r in rows:
             by_sample[r["sample_id"]].append(r)
-        reproducibility_de: List[float] = []
+        reproducibility_de: list[float] = []
         for sample_rows in by_sample.values():
             if len(sample_rows) < 2:
                 continue
@@ -2007,7 +2008,7 @@ class MeasurementSystemGuardV2:
         conf = max(0.05, 1.0 - risk)
         gage_status = "capable" if risk < 0.3 else "marginal" if risk < 0.6 else "incapable"
         blocking = risk >= 0.75
-        warnings: List[str] = []
+        warnings: list[str] = []
         if risk >= 0.6:
             warnings.append("msa_risk_high")
         if repeatability_std > 0.35:
@@ -2033,9 +2034,9 @@ class SPCMonitorV2:
     """
 
     def __init__(self) -> None:
-        self._streams: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._streams: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    def add_point(self, stream_id: str, value: float, ts: Optional[float] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def add_point(self, stream_id: str, value: float, ts: float | None = None, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         if not _is_number(value):
             return {"recorded": False, "error": "value_not_numeric"}
         row = {
@@ -2049,7 +2050,7 @@ class SPCMonitorV2:
             self._streams[stream_id] = self._streams[stream_id][-20000:]
         return {"recorded": True, "count": len(self._streams[stream_id])}
 
-    def report(self, stream_id: str, window: int = 100) -> Dict[str, Any]:
+    def report(self, stream_id: str, window: int = 100) -> dict[str, Any]:
         rows = self._streams.get(stream_id, [])[-max(5, int(window)) :]
         if len(rows) < 8:
             return {"status": "insufficient_data", "stream_id": stream_id, "stable": True, "warnings": ["spc_insufficient_data"]}
@@ -2074,7 +2075,7 @@ class SPCMonitorV2:
         std_shift = (statistics.stdev(second) if len(second) > 1 else 0.0) - (statistics.stdev(first) if len(first) > 1 else 0.0)
         spread_growth = std_shift > max(0.15, (statistics.stdev(first) if len(first) > 1 else 0.0) * 0.3)
 
-        warnings: List[str] = []
+        warnings: list[str] = []
         if out_of_control:
             warnings.append("spc_out_of_control")
         if trend_up:
@@ -2112,10 +2113,10 @@ class MetamerismRiskEngineV2:
 
     def evaluate(
         self,
-        lab_d65: Dict[str, float],
-        alt_lights: Optional[Dict[str, Dict[str, float]]] = None,
-        film_props: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        lab_d65: dict[str, float],
+        alt_lights: dict[str, dict[str, float]] | None = None,
+        film_props: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         base = _ensure_lab(lab_d65)
         if base is None:
             return {"error": "invalid_lab_d65"}
@@ -2127,7 +2128,7 @@ class MetamerismRiskEngineV2:
                 "A_2856K": {"L": base["L"] - 0.45, "a": base["a"] + 0.15, "b": base["b"] + 0.75},
                 "F11_store": {"L": base["L"] - 0.25, "a": base["a"] + 0.1, "b": base["b"] + 0.45},
             }
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for name, lv in alt.items():
             lab = _ensure_lab(lv)
             if lab is None:
@@ -2148,7 +2149,7 @@ class MetamerismRiskEngineV2:
 
 
 class PostProcessImpactPredictorV2:
-    def predict(self, lab: Dict[str, float], steps: Optional[List[str]] = None, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def predict(self, lab: dict[str, float], steps: list[str] | None = None, context: dict[str, Any] | None = None) -> dict[str, Any]:
         src = _ensure_lab(lab)
         if src is None:
             return {"error": "invalid_lab"}
@@ -2193,13 +2194,13 @@ class PostProcessImpactPredictorV2:
 class StorageTransportStabilityPredictorV2:
     def predict(
         self,
-        lab: Dict[str, float],
+        lab: dict[str, float],
         storage_days: float,
         temp_c: float,
         humidity_pct: float,
         uv_hours: float = 0.0,
         vibration_index: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         src = _ensure_lab(lab)
         if src is None:
             return {"error": "invalid_lab"}
@@ -2266,8 +2267,8 @@ class LifecycleStateMachineV2:
     }
 
     def __init__(self) -> None:
-        self._state: Dict[str, str] = {}
-        self._history: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._state: dict[str, str] = {}
+        self._history: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     def transition(
         self,
@@ -2275,9 +2276,9 @@ class LifecycleStateMachineV2:
         to_state: str,
         actor: str,
         reason: str = "",
-        evidence: Optional[Dict[str, Any]] = None,
+        evidence: dict[str, Any] | None = None,
         force: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         target = str(to_state)
         if target not in self.STATES:
             return {"ok": False, "error": "invalid_state"}
@@ -2301,7 +2302,7 @@ class LifecycleStateMachineV2:
         self._state[lot_id] = target
         return {"ok": True, "state": target, "history_count": len(self._history[lot_id]), "forced": row["forced"]}
 
-    def snapshot(self, lot_id: str) -> Dict[str, Any]:
+    def snapshot(self, lot_id: str) -> dict[str, Any]:
         state = self._state.get(lot_id, "created")
         hist = self._history.get(lot_id, [])
         return {"lot_id": lot_id, "current_state": state, "history": list(hist), "history_count": len(hist)}
@@ -2309,7 +2310,7 @@ class LifecycleStateMachineV2:
 
 class FailureModeRegistryV2:
     def __init__(self) -> None:
-        self._modes: Dict[str, Dict[str, Any]] = {}
+        self._modes: dict[str, dict[str, Any]] = {}
         self._init_defaults()
 
     def _init_defaults(self) -> None:
@@ -2322,7 +2323,7 @@ class FailureModeRegistryV2:
         ]:
             self.register(**row)
 
-    def register(self, mode_id: str, desc: str, severity: int, occurrence: int, detectability: int, category: str = "general") -> Dict[str, Any]:
+    def register(self, mode_id: str, desc: str, severity: int, occurrence: int, detectability: int, category: str = "general") -> dict[str, Any]:
         sev = max(1, min(10, int(severity)))
         occ = max(1, min(10, int(occurrence)))
         det = max(1, min(10, int(detectability)))
@@ -2339,11 +2340,11 @@ class FailureModeRegistryV2:
         }
         return {"registered": True, "mode_id": mode_id, "rpn": rpn}
 
-    def list_modes(self) -> Dict[str, Any]:
+    def list_modes(self) -> dict[str, Any]:
         rows = sorted(self._modes.values(), key=lambda x: x["rpn"], reverse=True)
         return {"count": len(rows), "rows": rows}
 
-    def capa_candidates(self, triggers: List[str]) -> Dict[str, Any]:
+    def capa_candidates(self, triggers: list[str]) -> dict[str, Any]:
         mapping = {
             "calibration_overdue": ["立即停机校准", "校准周期缩短并纳入班前检查"],
             "trace_missing_required_events": ["补录缺失事件并标记补录原因", "关键节点设置强制录入门禁"],
@@ -2351,7 +2352,7 @@ class FailureModeRegistryV2:
             "repeatability_too_poor": ["执行MSA复核", "锁定设备与操作员组合做仲裁测量"],
             "spc_out_of_control": ["暂停自动放行", "排查特殊原因并隔离风险段"],
         }
-        actions: List[str] = []
+        actions: list[str] = []
         for t in triggers:
             actions.extend(mapping.get(t, []))
         dedup = []
@@ -2366,8 +2367,8 @@ class FailureModeRegistryV2:
 class AlertCenterV2:
     def __init__(self, dedup_seconds: int = 600) -> None:
         self._dedup_seconds = max(30, int(dedup_seconds))
-        self._alerts: List[Dict[str, Any]] = []
-        self._last_seen: Dict[str, Dict[str, Any]] = {}
+        self._alerts: list[dict[str, Any]] = []
+        self._last_seen: dict[str, dict[str, Any]] = {}
 
     def push(
         self,
@@ -2375,9 +2376,9 @@ class AlertCenterV2:
         severity: str,
         message: str,
         source: str,
-        evidence: Optional[Dict[str, Any]] = None,
-        dedup_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        evidence: dict[str, Any] | None = None,
+        dedup_key: str | None = None,
+    ) -> dict[str, Any]:
         now = time.time()
         key = dedup_key or f"{alert_type}|{source}|{message}"
         prev = self._last_seen.get(key)
@@ -2402,9 +2403,9 @@ class AlertCenterV2:
             self._alerts = self._alerts[-10000:]
         return {"recorded": True, "deduped": False, "alert_id": row["alert_id"]}
 
-    def summary(self, last_n: int = 50) -> Dict[str, Any]:
+    def summary(self, last_n: int = 50) -> dict[str, Any]:
         rows = self._alerts[-max(1, int(last_n)) :]
-        grouped: Dict[str, int] = defaultdict(int)
+        grouped: dict[str, int] = defaultdict(int)
         for r in rows:
             grouped[r["type"]] += 1
         return {"count": len(rows), "alerts": rows, "grouped": dict(grouped)}
@@ -2427,12 +2428,12 @@ class QualityCaseCenterV2:
         "cancelled": set(),
     }
 
-    def __init__(self, store_path: Optional[str] = None, db_path: Optional[str] = None) -> None:
+    def __init__(self, store_path: str | None = None, db_path: str | None = None) -> None:
         self._lock = RLock()
-        self._cases: Dict[str, Dict[str, Any]] = {}
-        self._events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self._dedup: Dict[str, str] = {}
-        self._actions: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._cases: dict[str, dict[str, Any]] = {}
+        self._events: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._dedup: dict[str, str] = {}
+        self._actions: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._role_rank = {
             "operator": 1,
             "supervisor": 2,
@@ -2457,7 +2458,7 @@ class QualityCaseCenterV2:
             backend = "sqlite"
         elif self._store_path:
             backend = "json_file"
-        self._store_meta: Dict[str, Any] = {
+        self._store_meta: dict[str, Any] = {
             "enabled": bool(self._store_path or self._db_path),
             "backend": backend,
             "loaded": False,
@@ -2493,7 +2494,7 @@ class QualityCaseCenterV2:
             open_cnt = sum(1 for x in self._actions.get(cid, []) if x.get("status") != "completed")
             case["open_action_count"] = int(open_cnt)
 
-    def _dump_store(self) -> Dict[str, Any]:
+    def _dump_store(self) -> dict[str, Any]:
         self._normalize_open_action_count()
         return {
             "version": 1,
@@ -2524,7 +2525,7 @@ class QualityCaseCenterV2:
         try:
             out = json.loads(text)
             return out
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             return fallback
 
     _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -2770,7 +2771,7 @@ class QualityCaseCenterV2:
         except Exception as exc:  # noqa: BLE001
             self._store_meta["last_error"] = f"persist_failed:{exc}"
 
-    def store_status(self) -> Dict[str, Any]:
+    def store_status(self) -> dict[str, Any]:
         meta = dict(self._store_meta)
         if self._db_path:
             meta["db_path"] = self._db_path
@@ -2782,12 +2783,12 @@ class QualityCaseCenterV2:
         meta["open_case_count"] = sum(1 for x in self._cases.values() if x.get("state") not in {"closed", "cancelled"})
         return meta
 
-    def consistency_check(self) -> Dict[str, Any]:
-        errors: List[Dict[str, Any]] = []
-        warnings: List[Dict[str, Any]] = []
+    def consistency_check(self) -> dict[str, Any]:
+        errors: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
         with self._lock:
             case_ids = set(self._cases.keys())
-            action_ids: Dict[str, str] = {}
+            action_ids: dict[str, str] = {}
             event_count = 0
             for cid, case in self._cases.items():
                 if str(case.get("case_id", "")) != str(cid):
@@ -2866,11 +2867,11 @@ class QualityCaseCenterV2:
         }
 
     @staticmethod
-    def _hash_event(prev_hash: str, payload: Dict[str, Any]) -> str:
+    def _hash_event(prev_hash: str, payload: dict[str, Any]) -> str:
         txt = json.dumps({"prev_hash": prev_hash, "payload": payload}, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(txt.encode("utf-8")).hexdigest()[:24]
 
-    def _append_event(self, case_id: str, event_type: str, actor: str, details: Dict[str, Any]) -> Dict[str, Any]:
+    def _append_event(self, case_id: str, event_type: str, actor: str, details: dict[str, Any]) -> dict[str, Any]:
         rows = self._events[case_id]
         prev = rows[-1]["hash"] if rows else "GENESIS"
         payload = {
@@ -2894,11 +2895,11 @@ class QualityCaseCenterV2:
         severity: str,
         source: str,
         created_by: str,
-        linked_snapshot_id: Optional[str] = None,
-        linked_decision_code: Optional[str] = None,
-        dedup_key: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        linked_snapshot_id: str | None = None,
+        linked_decision_code: str | None = None,
+        dedup_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         dkey = str(dedup_key).strip() if dedup_key else ""
         if dkey and dkey in self._dedup:
             cid = self._dedup[dkey]
@@ -2930,7 +2931,7 @@ class QualityCaseCenterV2:
         self._persist_store()
         return {"opened": True, "deduplicated": False, "case_id": cid, "state": "open"}
 
-    def transition(self, case_id: str, to_state: str, actor: str, reason: str = "") -> Dict[str, Any]:
+    def transition(self, case_id: str, to_state: str, actor: str, reason: str = "") -> dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"ok": False, "error": "case_not_found"}
@@ -2953,11 +2954,11 @@ class QualityCaseCenterV2:
         owner: str,
         description: str,
         actor: str,
-        due_ts: Optional[float] = None,
+        due_ts: float | None = None,
         priority: int = 2,
         mandatory: bool = True,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"ok": False, "error": "case_not_found"}
@@ -2999,9 +3000,9 @@ class QualityCaseCenterV2:
         case_id: str,
         action_id: str,
         actor: str,
-        result: Optional[Dict[str, Any]] = None,
-        effectiveness: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        result: dict[str, Any] | None = None,
+        effectiveness: float | None = None,
+    ) -> dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"ok": False, "error": "case_not_found"}
@@ -3035,13 +3036,13 @@ class QualityCaseCenterV2:
 
     def get_sla_report(
         self,
-        lot_id: Optional[str] = None,
-        case_id: Optional[str] = None,
-        now_ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        lot_id: str | None = None,
+        case_id: str | None = None,
+        now_ts: float | None = None,
+    ) -> dict[str, Any]:
         now = float(now_ts if now_ts is not None else time.time())
-        rows: List[Dict[str, Any]] = []
-        case_ids: List[str]
+        rows: list[dict[str, Any]] = []
+        case_ids: list[str]
         if case_id:
             case_ids = [case_id]
         elif lot_id:
@@ -3089,11 +3090,11 @@ class QualityCaseCenterV2:
         approved_by: str,
         reason: str,
         approver_role: str = "quality_manager",
-        risk_level: Optional[str] = None,
+        risk_level: str | None = None,
         customer_tier: str = "standard",
         waiver_type: str = "release_with_risk",
-        expiry_ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        expiry_ts: float | None = None,
+    ) -> dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"ok": False, "error": "case_not_found"}
@@ -3125,7 +3126,7 @@ class QualityCaseCenterV2:
         self._persist_store()
         return {"ok": True, "case_id": case_id, "waiver_id": rec["waiver_id"]}
 
-    def close_case(self, case_id: str, actor: str, verification: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def close_case(self, case_id: str, actor: str, verification: dict[str, Any] | None = None) -> dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"ok": False, "error": "case_not_found"}
@@ -3155,7 +3156,7 @@ class QualityCaseCenterV2:
         self._persist_store()
         return {"ok": True, "case_id": case_id, "state": "closed"}
 
-    def get_case(self, case_id: str) -> Dict[str, Any]:
+    def get_case(self, case_id: str) -> dict[str, Any]:
         case = self._cases.get(case_id)
         if not case:
             return {"error": "case_not_found", "case_id": case_id}
@@ -3169,7 +3170,7 @@ class QualityCaseCenterV2:
             "event_count": len(self._events.get(case_id, [])),
         }
 
-    def list_cases(self, lot_id: Optional[str] = None, state: Optional[str] = None, last_n: int = 100) -> Dict[str, Any]:
+    def list_cases(self, lot_id: str | None = None, state: str | None = None, last_n: int = 100) -> dict[str, Any]:
         rows = list(self._cases.values())
         if lot_id:
             rows = [x for x in rows if x.get("lot_id") == lot_id]
@@ -3194,7 +3195,7 @@ class RoleViewBuilderV2:
     def _role_key(role: str) -> str:
         return str(role).strip().lower().replace("-", "_").replace(" ", "_")
 
-    def build(self, role: str, assessment: Dict[str, Any]) -> Dict[str, Any]:
+    def build(self, role: str, assessment: dict[str, Any]) -> dict[str, Any]:
         r = self._role_key(role)
         fd = assessment.get("final_decision", {})
         boundary = assessment.get("boundary", {})
@@ -3270,7 +3271,7 @@ class LifecycleRuleCenter:
     """
 
     def __init__(self) -> None:
-        self._packs: List[Dict[str, Any]] = []
+        self._packs: list[dict[str, Any]] = []
         self.register_pack(
             version="LIFE-RULE-2026.04-R1",
             active_from_ts=0.0,
@@ -3305,7 +3306,7 @@ class LifecycleRuleCenter:
         )
 
     @staticmethod
-    def _scope_match(scope: Dict[str, Any], meta: Dict[str, Any]) -> bool:
+    def _scope_match(scope: dict[str, Any], meta: dict[str, Any]) -> bool:
         if not scope:
             return True
         sku = str(meta.get("product_code", meta.get("sku", "")))
@@ -3325,10 +3326,10 @@ class LifecycleRuleCenter:
         self,
         version: str,
         active_from_ts: float,
-        scope: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
+        scope: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
         notes: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         row = {
             "version": str(version),
             "active_from_ts": float(active_from_ts),
@@ -3341,7 +3342,7 @@ class LifecycleRuleCenter:
         self._packs.sort(key=lambda x: x["active_from_ts"])
         return {"registered": True, "version": row["version"], "count": len(self._packs)}
 
-    def resolve(self, meta: Optional[Dict[str, Any]] = None, at_ts: Optional[float] = None, force_version: Optional[str] = None) -> Dict[str, Any]:
+    def resolve(self, meta: dict[str, Any] | None = None, at_ts: float | None = None, force_version: str | None = None) -> dict[str, Any]:
         m = dict(meta or {})
         ts = float(at_ts if at_ts is not None else time.time())
         if force_version:
@@ -3353,12 +3354,12 @@ class LifecycleRuleCenter:
             return {"rule_pack": self._packs[0], "resolved_by": "fallback_first"}
         return {"rule_pack": candidates[-1], "resolved_by": "time_scope"}
 
-    def list_packs(self) -> List[Dict[str, Any]]:
+    def list_packs(self) -> list[dict[str, Any]]:
         return list(self._packs)
 
 
 class ReportFactory:
-    def release_report(self, lot_id: str, decision: Dict[str, Any], metrics: Dict[str, Any], audience: str = "internal") -> Dict[str, Any]:
+    def release_report(self, lot_id: str, decision: dict[str, Any], metrics: dict[str, Any], audience: str = "internal") -> dict[str, Any]:
         base = {
             "lot_id": lot_id,
             "generated_at": _now_iso(),
@@ -3386,7 +3387,7 @@ class ReportFactory:
             },
         }
 
-    def complaint_summary(self, lot_id: str, symptom: str, root_cause: Dict[str, Any], capa: Dict[str, Any]) -> Dict[str, Any]:
+    def complaint_summary(self, lot_id: str, symptom: str, root_cause: dict[str, Any], capa: dict[str, Any]) -> dict[str, Any]:
         return {
             "lot_id": lot_id,
             "symptom": symptom,
@@ -3395,7 +3396,7 @@ class ReportFactory:
             "generated_at": _now_iso(),
         }
 
-    def root_cause_report(self, lot_id: str, symptom: str, suspects: List[Dict[str, Any]], conclusion: str) -> Dict[str, Any]:
+    def root_cause_report(self, lot_id: str, symptom: str, suspects: list[dict[str, Any]], conclusion: str) -> dict[str, Any]:
         return {
             "lot_id": lot_id,
             "symptom": symptom,
@@ -3405,7 +3406,7 @@ class ReportFactory:
         }
 
 class UltimateColorFilmSystemV2Optimized:
-    def __init__(self, case_store_path: Optional[str] = None, case_db_path: Optional[str] = None) -> None:
+    def __init__(self, case_store_path: str | None = None, case_db_path: str | None = None) -> None:
         self.env = EnvironmentCompensatorV2()
         self.substrate = SubstrateAnalyzerV2()
         self.wet_dry = WetToDryPredictorV2()
@@ -3445,15 +3446,15 @@ class UltimateColorFilmSystemV2Optimized:
         self.role_views = RoleViewBuilderV2()
         self.lifecycle_rules = LifecycleRuleCenter()
         self.report_factory = ReportFactory()
-        self._version_links: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self._assessment_snapshots: Dict[str, Dict[str, Any]] = {}
-        self._assessment_idempotency: Dict[str, str] = {}
+        self._version_links: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._assessment_snapshots: dict[str, dict[str, Any]] = {}
+        self._assessment_idempotency: dict[str, str] = {}
 
         self.cal_guard.register_source("lightbox", interval_hours=168)
         self.cal_guard.register_source("color_checker", interval_hours=720)
         self.cal_guard.register_source("camera_profile", interval_hours=2160)
 
-    def pre_flight_check(self, temp: float, humidity: float, operator: Optional[str] = None) -> Dict[str, Any]:
+    def pre_flight_check(self, temp: float, humidity: float, operator: str | None = None) -> dict[str, Any]:
         env = self.env.check_environment(temp, humidity)
         cal = self.cal_guard.check_status()
         issues = []
@@ -3479,10 +3480,10 @@ class UltimateColorFilmSystemV2Optimized:
         self,
         version: str,
         active_from_ts: float,
-        scope: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
+        scope: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
         notes: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.lifecycle_rules.register_pack(
             version=version,
             active_from_ts=active_from_ts,
@@ -3491,7 +3492,7 @@ class UltimateColorFilmSystemV2Optimized:
             notes=notes,
         )
 
-    def list_lifecycle_rule_packs(self) -> List[Dict[str, Any]]:
+    def list_lifecycle_rule_packs(self) -> list[dict[str, Any]]:
         return self.lifecycle_rules.list_packs()
 
     def record_version_link(
@@ -3503,7 +3504,7 @@ class UltimateColorFilmSystemV2Optimized:
         model_version: str,
         pipeline_policy_version: str = "",
         notes: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         row = {
             "recipe_code": recipe_code,
             "recipe_version": int(recipe_version),
@@ -3516,19 +3517,19 @@ class UltimateColorFilmSystemV2Optimized:
         self._version_links[lot_id].append(row)
         return {"recorded": True, "lot_id": lot_id, "count": len(self._version_links[lot_id])}
 
-    def get_version_links(self, lot_id: str) -> Dict[str, Any]:
+    def get_version_links(self, lot_id: str) -> dict[str, Any]:
         return {"lot_id": lot_id, "links": list(self._version_links.get(lot_id, []))}
 
     def add_trace_event(
         self,
         lot_id: str,
         stage: str,
-        data: Dict[str, Any],
-        event_id: Optional[str] = None,
+        data: dict[str, Any],
+        event_id: str | None = None,
         actor: str = "",
-        links: Optional[List[Dict[str, str]]] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        links: list[dict[str, str]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         check = self.data_guard.validate_event_payload(stage=stage, data=data)
         if not check["valid"]:
             return {"recorded": False, "error": "invalid_event_payload", "details": check}
@@ -3546,10 +3547,10 @@ class UltimateColorFilmSystemV2Optimized:
         self,
         lot_id: str,
         target_event_id: str,
-        patch: Dict[str, Any],
+        patch: dict[str, Any],
         actor: str,
         reason: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.lifecycle.add_revision(
             lot_id=lot_id,
             target_event_id=target_event_id,
@@ -3565,7 +3566,7 @@ class UltimateColorFilmSystemV2Optimized:
         actor: str,
         approved_by: str,
         reason: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.lifecycle.add_override(
             lot_id=lot_id,
             decision_ref=decision_ref,
@@ -3578,28 +3579,28 @@ class UltimateColorFilmSystemV2Optimized:
         self,
         lot_id: str,
         elapsed_hours: float,
-        lab: Dict[str, float],
+        lab: dict[str, float],
         stage: str = "recheck",
-        verdict: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        verdict: str | None = None,
+    ) -> dict[str, Any]:
         return self.time_stability.record(lot_id=lot_id, elapsed_hours=elapsed_hours, lab=lab, stage=stage, verdict=verdict)
 
-    def get_time_stability_report(self, lot_id: str) -> Dict[str, Any]:
+    def get_time_stability_report(self, lot_id: str) -> dict[str, Any]:
         return self.time_stability.report(lot_id=lot_id)
 
-    def evaluate_process_coupling(self, params: Dict[str, Any], route: str = "gravure") -> Dict[str, Any]:
+    def evaluate_process_coupling(self, params: dict[str, Any], route: str = "gravure") -> dict[str, Any]:
         return self.process_coupling.evaluate(params=params, route=route)
 
-    def reverse_infer_process(self, color_symptom: Dict[str, Any], params: Dict[str, Any], route: str = "gravure") -> Dict[str, Any]:
+    def reverse_infer_process(self, color_symptom: dict[str, Any], params: dict[str, Any], route: str = "gravure") -> dict[str, Any]:
         return self.process_coupling.reverse_infer(color_symptom=color_symptom, params=params, route=route)
 
     def evaluate_film_appearance(
         self,
-        lab: Dict[str, float],
-        film_props: Dict[str, Any],
-        substrate_bases: Optional[List[Dict[str, Any]]] = None,
-        observer_angles: Optional[List[float]] = None,
-    ) -> Dict[str, Any]:
+        lab: dict[str, float],
+        film_props: dict[str, Any],
+        substrate_bases: list[dict[str, Any]] | None = None,
+        observer_angles: list[float] | None = None,
+    ) -> dict[str, Any]:
         return self.appearance.evaluate(
             lab=lab,
             film_props=film_props,
@@ -3607,16 +3608,16 @@ class UltimateColorFilmSystemV2Optimized:
             observer_angles=observer_angles,
         )
 
-    def register_customer_profile(self, customer_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    def register_customer_profile(self, customer_id: str, profile: dict[str, Any]) -> dict[str, Any]:
         return self.customer.register_profile(customer_id=customer_id, profile=profile)
 
     def evaluate_customer_acceptance(
         self,
         customer_id: str,
         sku: str,
-        scenario: Dict[str, Any],
-        metrics: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        scenario: dict[str, Any],
+        metrics: dict[str, Any],
+    ) -> dict[str, Any]:
         return self.customer.evaluate(customer_id=customer_id, sku=sku, scenario=scenario, metrics=metrics)
 
     def record_retest(
@@ -3625,11 +3626,11 @@ class UltimateColorFilmSystemV2Optimized:
         test_type: str,
         device_id: str,
         operator: str,
-        raw_result: Dict[str, Any],
-        compensated_result: Optional[Dict[str, Any]],
-        judgment_result: Dict[str, Any],
-        review_result: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        raw_result: dict[str, Any],
+        compensated_result: dict[str, Any] | None,
+        judgment_result: dict[str, Any],
+        review_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self.retest.record(
             lot_id=lot_id,
             test_type=test_type,
@@ -3641,16 +3642,16 @@ class UltimateColorFilmSystemV2Optimized:
             review_result=review_result,
         )
 
-    def get_dispute_report(self, lot_id: str) -> Dict[str, Any]:
+    def get_dispute_report(self, lot_id: str) -> dict[str, Any]:
         return self.retest.dispute_report(lot_id=lot_id)
 
-    def record_machine_bias(self, machine_id: str, plant_id: str, sku: str, dL: float, da: float, db: float) -> Dict[str, Any]:
+    def record_machine_bias(self, machine_id: str, plant_id: str, sku: str, dL: float, da: float, db: float) -> dict[str, Any]:
         return self.machine.record(machine_id=machine_id, plant_id=plant_id, sku=sku, dL=dL, da=da, db=db)
 
-    def get_machine_fingerprint(self, machine_id: str, sku: Optional[str] = None) -> Dict[str, Any]:
+    def get_machine_fingerprint(self, machine_id: str, sku: str | None = None) -> dict[str, Any]:
         return self.machine.fingerprint(machine_id=machine_id, sku=sku)
 
-    def get_chronic_machine_bias_report(self) -> Dict[str, Any]:
+    def get_chronic_machine_bias_report(self) -> dict[str, Any]:
         return self.machine.chronic_bias_report()
 
     def record_learning_event(
@@ -3660,7 +3661,7 @@ class UltimateColorFilmSystemV2Optimized:
         actual_cause: str,
         success: bool,
         rule_source: str = "heuristic",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.learning.record(
             context_key=context_key,
             predicted_cause=predicted_cause,
@@ -3669,7 +3670,7 @@ class UltimateColorFilmSystemV2Optimized:
             rule_source=rule_source,
         )
 
-    def get_learning_priorities(self, context_key: str) -> Dict[str, Any]:
+    def get_learning_priorities(self, context_key: str) -> dict[str, Any]:
         return self.learning.cause_priority(context_key=context_key)
 
     def record_measurement_msa(
@@ -3678,9 +3679,9 @@ class UltimateColorFilmSystemV2Optimized:
         sample_id: str,
         device_id: str,
         operator_id: str,
-        lab: Dict[str, float],
-        ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        lab: dict[str, float],
+        ts: float | None = None,
+    ) -> dict[str, Any]:
         return self.measurement_guard.record(
             lot_id=lot_id,
             sample_id=sample_id,
@@ -3690,13 +3691,13 @@ class UltimateColorFilmSystemV2Optimized:
             ts=ts,
         )
 
-    def get_msa_report(self, lot_id: Optional[str] = None, window: int = 500) -> Dict[str, Any]:
+    def get_msa_report(self, lot_id: str | None = None, window: int = 500) -> dict[str, Any]:
         return self.measurement_guard.report(lot_id=lot_id, window=window)
 
-    def record_spc_point(self, stream_id: str, value: float, ts: Optional[float] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def record_spc_point(self, stream_id: str, value: float, ts: float | None = None, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.spc.add_point(stream_id=stream_id, value=value, ts=ts, meta=meta)
 
-    def get_spc_report(self, stream_id: str, window: int = 100) -> Dict[str, Any]:
+    def get_spc_report(self, stream_id: str, window: int = 100) -> dict[str, Any]:
         return self.spc.report(stream_id=stream_id, window=window)
 
     def register_roll(
@@ -3704,11 +3705,11 @@ class UltimateColorFilmSystemV2Optimized:
         lot_id: str,
         roll_id: str,
         length_m: float,
-        parent_roll_id: Optional[str] = None,
-        rework_of: Optional[str] = None,
+        parent_roll_id: str | None = None,
+        rework_of: str | None = None,
         machine_id: str = "",
         shift: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.roll_tracker.register_roll(
             lot_id=lot_id,
             roll_id=roll_id,
@@ -3726,7 +3727,7 @@ class UltimateColorFilmSystemV2Optimized:
         meter_start: float,
         meter_end: float,
         reason: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.roll_tracker.mark_zone(
             roll_id=roll_id,
             zone_type=zone_type,
@@ -3740,10 +3741,10 @@ class UltimateColorFilmSystemV2Optimized:
         roll_id: str,
         meter_pos: float,
         de: float,
-        lab: Optional[Dict[str, float]] = None,
+        lab: dict[str, float] | None = None,
         source: str = "",
-        ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        ts: float | None = None,
+    ) -> dict[str, Any]:
         return self.roll_tracker.add_measurement(
             roll_id=roll_id,
             meter_pos=meter_pos,
@@ -3753,37 +3754,37 @@ class UltimateColorFilmSystemV2Optimized:
             ts=ts,
         )
 
-    def get_roll_summary(self, roll_id: str) -> Dict[str, Any]:
+    def get_roll_summary(self, roll_id: str) -> dict[str, Any]:
         return self.roll_tracker.summary(roll_id=roll_id)
 
-    def get_lot_roll_summary(self, lot_id: str) -> Dict[str, Any]:
+    def get_lot_roll_summary(self, lot_id: str) -> dict[str, Any]:
         return self.roll_tracker.lot_summary(lot_id=lot_id)
 
     def evaluate_metamerism(
         self,
-        lab_d65: Dict[str, float],
-        alt_lights: Optional[Dict[str, Dict[str, float]]] = None,
-        film_props: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        lab_d65: dict[str, float],
+        alt_lights: dict[str, dict[str, float]] | None = None,
+        film_props: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self.metamerism.evaluate(lab_d65=lab_d65, alt_lights=alt_lights, film_props=film_props)
 
     def evaluate_post_process_risk(
         self,
-        lab: Dict[str, float],
-        steps: Optional[List[str]] = None,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        lab: dict[str, float],
+        steps: list[str] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self.post_process.predict(lab=lab, steps=steps, context=context)
 
     def evaluate_storage_transport_risk(
         self,
-        lab: Dict[str, float],
+        lab: dict[str, float],
         storage_days: float,
         temp_c: float,
         humidity_pct: float,
         uv_hours: float = 0.0,
         vibration_index: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.storage_predictor.predict(
             lab=lab,
             storage_days=storage_days,
@@ -3799,9 +3800,9 @@ class UltimateColorFilmSystemV2Optimized:
         to_state: str,
         actor: str,
         reason: str = "",
-        evidence: Optional[Dict[str, Any]] = None,
+        evidence: dict[str, Any] | None = None,
         force: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.state_machine.transition(
             lot_id=lot_id,
             to_state=to_state,
@@ -3811,7 +3812,7 @@ class UltimateColorFilmSystemV2Optimized:
             force=force,
         )
 
-    def get_state_snapshot(self, lot_id: str) -> Dict[str, Any]:
+    def get_state_snapshot(self, lot_id: str) -> dict[str, Any]:
         return self.state_machine.snapshot(lot_id=lot_id)
 
     def register_failure_mode(
@@ -3822,7 +3823,7 @@ class UltimateColorFilmSystemV2Optimized:
         occurrence: int,
         detectability: int,
         category: str = "general",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.failure_modes.register(
             mode_id=mode_id,
             desc=desc,
@@ -3832,10 +3833,10 @@ class UltimateColorFilmSystemV2Optimized:
             category=category,
         )
 
-    def list_failure_modes(self) -> Dict[str, Any]:
+    def list_failure_modes(self) -> dict[str, Any]:
         return self.failure_modes.list_modes()
 
-    def suggest_capa_candidates(self, triggers: List[str]) -> Dict[str, Any]:
+    def suggest_capa_candidates(self, triggers: list[str]) -> dict[str, Any]:
         return self.failure_modes.capa_candidates(triggers=triggers)
 
     def push_alert(
@@ -3844,9 +3845,9 @@ class UltimateColorFilmSystemV2Optimized:
         severity: str,
         message: str,
         source: str,
-        evidence: Optional[Dict[str, Any]] = None,
-        dedup_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        evidence: dict[str, Any] | None = None,
+        dedup_key: str | None = None,
+    ) -> dict[str, Any]:
         return self.alerts.push(
             alert_type=alert_type,
             severity=severity,
@@ -3856,7 +3857,7 @@ class UltimateColorFilmSystemV2Optimized:
             dedup_key=dedup_key,
         )
 
-    def get_alert_summary(self, last_n: int = 50) -> Dict[str, Any]:
+    def get_alert_summary(self, last_n: int = 50) -> dict[str, Any]:
         return self.alerts.summary(last_n=last_n)
 
     def open_quality_case(
@@ -3867,11 +3868,11 @@ class UltimateColorFilmSystemV2Optimized:
         severity: str,
         source: str,
         created_by: str,
-        linked_snapshot_id: Optional[str] = None,
-        linked_decision_code: Optional[str] = None,
-        dedup_key: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        linked_snapshot_id: str | None = None,
+        linked_decision_code: str | None = None,
+        dedup_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self.case_center.open_case(
             lot_id=lot_id,
             case_type=case_type,
@@ -3892,11 +3893,11 @@ class UltimateColorFilmSystemV2Optimized:
         owner: str,
         description: str,
         actor: str,
-        due_ts: Optional[float] = None,
+        due_ts: float | None = None,
         priority: int = 2,
         mandatory: bool = True,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self.case_center.add_action(
             case_id=case_id,
             action_type=action_type,
@@ -3914,9 +3915,9 @@ class UltimateColorFilmSystemV2Optimized:
         case_id: str,
         action_id: str,
         actor: str,
-        result: Optional[Dict[str, Any]] = None,
-        effectiveness: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        result: dict[str, Any] | None = None,
+        effectiveness: float | None = None,
+    ) -> dict[str, Any]:
         return self.case_center.complete_action(
             case_id=case_id,
             action_id=action_id,
@@ -3925,7 +3926,7 @@ class UltimateColorFilmSystemV2Optimized:
             effectiveness=effectiveness,
         )
 
-    def transition_case(self, case_id: str, to_state: str, actor: str, reason: str = "") -> Dict[str, Any]:
+    def transition_case(self, case_id: str, to_state: str, actor: str, reason: str = "") -> dict[str, Any]:
         return self.case_center.transition(case_id=case_id, to_state=to_state, actor=actor, reason=reason)
 
     def add_case_waiver(
@@ -3935,11 +3936,11 @@ class UltimateColorFilmSystemV2Optimized:
         approved_by: str,
         reason: str,
         approver_role: str = "quality_manager",
-        risk_level: Optional[str] = None,
+        risk_level: str | None = None,
         customer_tier: str = "standard",
         waiver_type: str = "release_with_risk",
-        expiry_ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        expiry_ts: float | None = None,
+    ) -> dict[str, Any]:
         return self.case_center.add_waiver(
             case_id=case_id,
             actor=actor,
@@ -3952,39 +3953,39 @@ class UltimateColorFilmSystemV2Optimized:
             expiry_ts=expiry_ts,
         )
 
-    def close_quality_case(self, case_id: str, actor: str, verification: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def close_quality_case(self, case_id: str, actor: str, verification: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.case_center.close_case(case_id=case_id, actor=actor, verification=verification)
 
-    def get_quality_case(self, case_id: str) -> Dict[str, Any]:
+    def get_quality_case(self, case_id: str) -> dict[str, Any]:
         return self.case_center.get_case(case_id=case_id)
 
-    def list_quality_cases(self, lot_id: Optional[str] = None, state: Optional[str] = None, last_n: int = 100) -> Dict[str, Any]:
+    def list_quality_cases(self, lot_id: str | None = None, state: str | None = None, last_n: int = 100) -> dict[str, Any]:
         return self.case_center.list_cases(lot_id=lot_id, state=state, last_n=last_n)
 
-    def get_case_store_status(self) -> Dict[str, Any]:
+    def get_case_store_status(self) -> dict[str, Any]:
         return self.case_center.store_status()
 
-    def get_case_store_consistency(self) -> Dict[str, Any]:
+    def get_case_store_consistency(self) -> dict[str, Any]:
         return self.case_center.consistency_check()
 
     def get_case_sla_report(
         self,
-        lot_id: Optional[str] = None,
-        case_id: Optional[str] = None,
-        now_ts: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        lot_id: str | None = None,
+        case_id: str | None = None,
+        now_ts: float | None = None,
+    ) -> dict[str, Any]:
         return self.case_center.get_sla_report(lot_id=lot_id, case_id=case_id, now_ts=now_ts)
 
-    def build_role_view(self, role: str, assessment: Dict[str, Any]) -> Dict[str, Any]:
+    def build_role_view(self, role: str, assessment: dict[str, Any]) -> dict[str, Any]:
         return self.role_views.build(role=role, assessment=assessment)
 
     def validate_assessment_payload(
         self,
         lot_id: str,
-        base_decision: Dict[str, Any],
-        color_metrics: Dict[str, Any],
-        meta: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        base_decision: dict[str, Any],
+        color_metrics: dict[str, Any],
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
         return self.data_guard.validate_assessment_inputs(
             lot_id=lot_id,
             base_decision=base_decision,
@@ -3992,7 +3993,7 @@ class UltimateColorFilmSystemV2Optimized:
             meta=meta,
         )
 
-    def evaluate_auto_boundary(self, context: Dict[str, Any], meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def evaluate_auto_boundary(self, context: dict[str, Any], meta: dict[str, Any] | None = None) -> dict[str, Any]:
         m = dict(meta or {})
         ts = m.get("decision_ts")
         force_rule = m.get("force_lifecycle_rule_version")
@@ -4025,9 +4026,9 @@ class UltimateColorFilmSystemV2Optimized:
         case_overdue_hard = int(p.get("case_overdue_hard", 2))
         release_allowed_states = set(p.get("release_allowed_states", ["released", "in_run_monitoring", "hold_for_review", "retest", "arbitration"]))
 
-        hard_blocks: List[str] = []
-        review_triggers: List[str] = []
-        arbitration_triggers: List[str] = []
+        hard_blocks: list[str] = []
+        review_triggers: list[str] = []
+        arbitration_triggers: list[str] = []
 
         if str(context.get("sensor_health", "ok")).lower() in {"failed", "offline"}:
             hard_blocks.append("sensor_failure_detected")
@@ -4147,7 +4148,7 @@ class UltimateColorFilmSystemV2Optimized:
             },
         }
 
-    def _business_disposition(self, tier: str, mode: str, risk_score: float, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _business_disposition(self, tier: str, mode: str, risk_score: float, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         m = dict(meta or {})
         urgency = str(m.get("order_urgency", "normal")).lower()
         customer_tier = str(m.get("customer_tier", "standard")).lower()
@@ -4164,7 +4165,7 @@ class UltimateColorFilmSystemV2Optimized:
             "scrap": 14000.0,
             "release_with_risk": 22000.0 * vip_factor * urgency_factor,
         }
-        options: List[Dict[str, Any]] = []
+        options: list[dict[str, Any]] = []
         if mode == "auto_release" and tier == "PASS":
             options.append({"action": "release", "cost": 0.0})
         else:
@@ -4200,23 +4201,23 @@ class UltimateColorFilmSystemV2Optimized:
     def integrated_assessment(
         self,
         lot_id: str,
-        base_decision: Optional[Dict[str, Any]] = None,
-        color_metrics: Optional[Dict[str, Any]] = None,
-        process_params: Optional[Dict[str, Any]] = None,
+        base_decision: dict[str, Any] | None = None,
+        color_metrics: dict[str, Any] | None = None,
+        process_params: dict[str, Any] | None = None,
         process_route: str = "gravure",
-        film_props: Optional[Dict[str, Any]] = None,
-        scenario: Optional[Dict[str, Any]] = None,
-        customer_id: Optional[str] = None,
+        film_props: dict[str, Any] | None = None,
+        scenario: dict[str, Any] | None = None,
+        customer_id: str | None = None,
         sku: str = "",
-        current_lab: Optional[Dict[str, float]] = None,
-        repeatability_std: Optional[float] = None,
-        confidence: Optional[float] = None,
-        meta: Optional[Dict[str, Any]] = None,
-        spc_stream_id: Optional[str] = None,
-        alt_light_labs: Optional[Dict[str, Dict[str, float]]] = None,
-        post_process_steps: Optional[List[str]] = None,
-        storage_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        current_lab: dict[str, float] | None = None,
+        repeatability_std: float | None = None,
+        confidence: float | None = None,
+        meta: dict[str, Any] | None = None,
+        spc_stream_id: str | None = None,
+        alt_light_labs: dict[str, dict[str, float]] | None = None,
+        post_process_steps: list[str] | None = None,
+        storage_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         m = dict(meta or {})
         cm = dict(color_metrics or {})
         bd = dict(base_decision or {})
@@ -4398,7 +4399,7 @@ class UltimateColorFilmSystemV2Optimized:
             if mode == "manual_review"
             else "LIFECYCLE_AUTO_RELEASE"
         )
-        reasons: List[str] = []
+        reasons: list[str] = []
         reasons.extend(boundary["hard_blocks"])
         reasons.extend(boundary["arbitration_triggers"])
         reasons.extend(boundary["review_triggers"])
@@ -4411,7 +4412,7 @@ class UltimateColorFilmSystemV2Optimized:
         )
         symptom = str(m.get("symptom", "偏黄"))
         trace_root = self.lifecycle.find_root_cause(lot_id=lot_id, symptom=symptom)
-        cause_candidates: List[Dict[str, Any]] = []
+        cause_candidates: list[dict[str, Any]] = []
         for s in process_reverse.get("suspects", []):
             cause_candidates.append({"cause": s, "evidence_strength": "medium", "source": "process_coupling"})
         for s in trace_root.get("suspects", []):
@@ -4422,7 +4423,7 @@ class UltimateColorFilmSystemV2Optimized:
         disposition = self._business_disposition(tier=final_tier, mode=mode, risk_score=risk_score, meta=m)
         capa_candidates = self.suggest_capa_candidates(triggers=reasons)
 
-        prioritized_actions: List[Dict[str, Any]] = []
+        prioritized_actions: list[dict[str, Any]] = []
         if boundary["hard_blocks"]:
             prioritized_actions.append({"priority": 1, "owner": "quality_manager", "action": "clear_hard_blocks_before_any_release"})
         if "process_coupling_risk" in boundary["review_triggers"] or "process_coupling_accident_edge" in boundary["arbitration_triggers"]:
@@ -4444,7 +4445,7 @@ class UltimateColorFilmSystemV2Optimized:
         if not prioritized_actions:
             prioritized_actions.append({"priority": 2, "owner": "quality_manager", "action": "routine_monitoring"})
         prioritized_actions = sorted(prioritized_actions, key=lambda x: int(x["priority"]))
-        case_ref: Optional[Dict[str, Any]] = None
+        case_ref: dict[str, Any] | None = None
 
         confidence_parts = [
             float(confidence if _is_number(confidence) else bd.get("confidence", 0.75) or 0.75),
@@ -4453,7 +4454,7 @@ class UltimateColorFilmSystemV2Optimized:
         ]
         combined_conf = round(max(0.05, min(0.99, _safe_mean(confidence_parts))), 4)
 
-        evidence: List[Dict[str, Any]] = []
+        evidence: list[dict[str, Any]] = []
         evidence.extend(input_quality.get("evidence", []))
         evidence.extend(
             [
@@ -4577,7 +4578,7 @@ class UltimateColorFilmSystemV2Optimized:
                     result["prioritized_actions"] = prioritized_actions
 
         preview_roles = m.get("roles_preview", ["operator", "process_engineer", "quality_manager"])
-        role_rows: Dict[str, Any] = {}
+        role_rows: dict[str, Any] = {}
         if isinstance(preview_roles, list):
             for role in preview_roles[:8]:
                 r = str(role).strip()
@@ -4635,10 +4636,10 @@ class UltimateColorFilmSystemV2Optimized:
     def generate_release_report(
         self,
         lot_id: str,
-        assessment: Dict[str, Any],
-        metrics: Dict[str, Any],
+        assessment: dict[str, Any],
+        metrics: dict[str, Any],
         audience: str = "internal",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         fd = assessment.get("final_decision", {})
         decision_doc = {
             "tier": fd.get("tier"),
@@ -4658,7 +4659,7 @@ class UltimateColorFilmSystemV2Optimized:
             },
         }
 
-    def list_assessment_snapshots(self, lot_id: Optional[str] = None, last_n: int = 20) -> Dict[str, Any]:
+    def list_assessment_snapshots(self, lot_id: str | None = None, last_n: int = 20) -> dict[str, Any]:
         rows = list(self._assessment_snapshots.values())
         if lot_id:
             rows = [x for x in rows if x.get("lot_id") == lot_id]
@@ -4668,9 +4669,9 @@ class UltimateColorFilmSystemV2Optimized:
     def replay_assessment(
         self,
         snapshot_id: str,
-        force_lifecycle_rule_version: Optional[str] = None,
-        meta_patch: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        force_lifecycle_rule_version: str | None = None,
+        meta_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         snap = self._assessment_snapshots.get(snapshot_id)
         if not snap:
             return {"error": "snapshot_not_found", "snapshot_id": snapshot_id}
@@ -4707,9 +4708,9 @@ class UltimateColorFilmSystemV2Optimized:
     def simulate_rule_impact(
         self,
         snapshot_id: str,
-        rule_versions: List[str],
-        meta_patch: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        rule_versions: list[str],
+        meta_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         snap = self._assessment_snapshots.get(snapshot_id)
         if not snap:
             return {"error": "snapshot_not_found", "snapshot_id": snapshot_id}
@@ -4718,7 +4719,7 @@ class UltimateColorFilmSystemV2Optimized:
             return {"error": "rule_versions_empty"}
         base_out = snap.get("output", {})
         base_dec = base_out.get("final_decision", {})
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for ver in versions:
             replay = self.replay_assessment(
                 snapshot_id=snapshot_id,
@@ -4756,14 +4757,14 @@ class UltimateColorFilmSystemV2Optimized:
 
     def simulate_rule_impact_batch(
         self,
-        snapshot_ids: List[str],
-        rule_versions: List[str],
-        meta_patch: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        snapshot_ids: list[str],
+        rule_versions: list[str],
+        meta_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         sids = [str(x) for x in snapshot_ids if str(x).strip()]
         if not sids:
             return {"error": "snapshot_ids_empty"}
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for sid in sids:
             one = self.simulate_rule_impact(snapshot_id=sid, rule_versions=rule_versions, meta_patch=meta_patch)
             rows.append({"snapshot_id": sid, "result": one})
@@ -4781,7 +4782,7 @@ class UltimateColorFilmSystemV2Optimized:
             "rows": rows,
         }
 
-    def open_complaint_case(self, lot_id: str, symptom: str, severity: str = "medium") -> Dict[str, Any]:
+    def open_complaint_case(self, lot_id: str, symptom: str, severity: str = "medium") -> dict[str, Any]:
         rc = self.lifecycle.find_root_cause(lot_id, symptom)
         root = rc.get("conclusion", "unknown")
         ranked = []
@@ -4801,7 +4802,7 @@ class UltimateColorFilmSystemV2Optimized:
             "state_snapshot": self.state_machine.snapshot(lot_id),
         }
 
-    def generate_complaint_summary(self, lot_id: str, symptom: str, severity: str = "medium") -> Dict[str, Any]:
+    def generate_complaint_summary(self, lot_id: str, symptom: str, severity: str = "medium") -> dict[str, Any]:
         out = self.open_complaint_case(lot_id=lot_id, symptom=symptom, severity=severity)
         rc = out["root_cause"]
         return self.report_factory.root_cause_report(
@@ -4811,7 +4812,7 @@ class UltimateColorFilmSystemV2Optimized:
             conclusion=rc.get("conclusion", "unknown"),
         )
 
-    def known_boundaries(self) -> Dict[str, Any]:
+    def known_boundaries(self) -> dict[str, Any]:
         """
         Explicitly documents current system boundaries for rollout governance.
         """

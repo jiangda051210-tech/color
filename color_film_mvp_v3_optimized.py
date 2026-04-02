@@ -11,7 +11,8 @@ import math
 import statistics
 import time
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 
 def _now_iso() -> str:
@@ -55,10 +56,10 @@ def _is_number(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(float(x))
 
 
-def _ensure_lab_dict(lab: Any) -> Optional[Dict[str, float]]:
+def _ensure_lab_dict(lab: Any) -> dict[str, float] | None:
     if not isinstance(lab, dict):
         return None
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     for key in ("L", "a", "b"):
         val = lab.get(key)
         if not _is_number(val):
@@ -67,8 +68,8 @@ def _ensure_lab_dict(lab: Any) -> Optional[Dict[str, float]]:
     return out
 
 
-def _lab_physical_flags(lab: Dict[str, float]) -> List[str]:
-    flags: List[str] = []
+def _lab_physical_flags(lab: dict[str, float]) -> list[str]:
+    flags: list[str] = []
     if not (0.0 <= lab["L"] <= 100.0):
         flags.append("L_out_of_range")
     if not (-140.0 <= lab["a"] <= 140.0):
@@ -97,7 +98,7 @@ def _linear_to_srgb(c: float) -> int:
     return int(round(_clamp(s * 255.0, 0.0, 255.0)))
 
 
-def rgb_to_lab(r: float, g: float, b: float) -> Dict[str, float]:
+def rgb_to_lab(r: float, g: float, b: float) -> dict[str, float]:
     lr = _srgb_to_linear(r)
     lg = _srgb_to_linear(g)
     lb = _srgb_to_linear(b)
@@ -116,7 +117,7 @@ def rgb_to_lab(r: float, g: float, b: float) -> Dict[str, float]:
     return {"L": 116.0 * fy - 16.0, "a": 500.0 * (fx - fy), "b": 200.0 * (fy - fz)}
 
 
-def de2000(lab1: Dict[str, float], lab2: Dict[str, float]) -> Dict[str, float]:
+def de2000(lab1: dict[str, float], lab2: dict[str, float]) -> dict[str, float]:
     l1, a1, b1 = lab1["L"], lab1["a"], lab1["b"]
     l2, a2, b2 = lab2["L"], lab2["a"], lab2["b"]
 
@@ -190,7 +191,7 @@ def de2000(lab1: Dict[str, float], lab2: Dict[str, float]) -> Dict[str, float]:
     }
 
 
-def _mat3_inv(m: List[List[float]]) -> Optional[List[List[float]]]:
+def _mat3_inv(m: list[list[float]]) -> list[list[float]] | None:
     if len(m) != 3 or any(len(row) != 3 for row in m):
         return None
     aug = [
@@ -216,7 +217,7 @@ def _mat3_inv(m: List[List[float]]) -> Optional[List[List[float]]]:
     return [[aug[r][3], aug[r][4], aug[r][5]] for r in range(3)]
 
 
-def _mat3_vec_mul(m: List[List[float]], v: Sequence[float]) -> List[float]:
+def _mat3_vec_mul(m: list[list[float]], v: Sequence[float]) -> list[float]:
     return [
         m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
         m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
@@ -246,7 +247,7 @@ class ThresholdPolicyEngine:
         self._application_multipliers = {"exterior": 0.90, "interior": 1.0, "premium": 0.88, "industrial": 1.05}
         self._policy_version = "POLICY-2026.04-R2"
 
-    def resolve(self, meta: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def resolve(self, meta: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         tier = _slug(str(meta.get("customer_tier", "standard"))) or "standard"
         app = _slug(str(meta.get("application", "interior"))) or "interior"
         sku = _slug(str(meta.get("sku_class", "")))
@@ -311,7 +312,7 @@ class RuleGovernanceCenter:
     """
 
     def __init__(self) -> None:
-        self._packs: List[Dict[str, Any]] = []
+        self._packs: list[dict[str, Any]] = []
         self.register_rule_pack(
             version="RULE-2026.04-R2",
             active_from_ts=0.0,
@@ -322,7 +323,7 @@ class RuleGovernanceCenter:
         )
 
     @staticmethod
-    def _scope_match(scope: Dict[str, Any], meta: Dict[str, Any]) -> bool:
+    def _scope_match(scope: dict[str, Any], meta: dict[str, Any]) -> bool:
         if not scope:
             return True
         customer_id = str(meta.get("customer_id", ""))
@@ -342,11 +343,11 @@ class RuleGovernanceCenter:
         self,
         version: str,
         active_from_ts: float,
-        scope: Optional[Dict[str, Any]] = None,
-        threshold_overrides: Optional[Dict[str, Any]] = None,
+        scope: dict[str, Any] | None = None,
+        threshold_overrides: dict[str, Any] | None = None,
         model_version: str = "MODEL-COLOR-V3",
         notes: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         row = {
             "version": str(version),
             "active_from_ts": float(active_from_ts),
@@ -360,7 +361,7 @@ class RuleGovernanceCenter:
         self._packs.sort(key=lambda x: x["active_from_ts"])
         return {"registered": True, "version": row["version"], "count": len(self._packs)}
 
-    def resolve(self, meta: Dict[str, Any], at_ts: Optional[float] = None, force_version: Optional[str] = None) -> Dict[str, Any]:
+    def resolve(self, meta: dict[str, Any], at_ts: float | None = None, force_version: str | None = None) -> dict[str, Any]:
         ts = float(at_ts if at_ts is not None else time.time())
         if force_version:
             rows = [x for x in self._packs if x["version"] == force_version]
@@ -374,7 +375,7 @@ class RuleGovernanceCenter:
             pack = candidates[-1]
         return {"rule_pack": pack, "resolved_by": "time+scope"}
 
-    def list_rule_packs(self) -> List[Dict[str, Any]]:
+    def list_rule_packs(self) -> list[dict[str, Any]]:
         return list(self._packs)
 
 
@@ -383,12 +384,12 @@ class InputQualityGuard:
         self,
         ref_grid: Any,
         sample_grid: Any,
-        grid_shape: Tuple[int, int],
-        measurement_ids: Optional[Sequence[str]] = None,
-        measurement_timestamps: Optional[Sequence[float]] = None,
-    ) -> Dict[str, Any]:
-        errors: List[str] = []
-        warnings: List[str] = []
+        grid_shape: tuple[int, int],
+        measurement_ids: Sequence[str] | None = None,
+        measurement_timestamps: Sequence[float] | None = None,
+    ) -> dict[str, Any]:
+        errors: list[str] = []
+        warnings: list[str] = []
 
         rows, cols = grid_shape
         if rows <= 0 or cols <= 0:
@@ -404,8 +405,8 @@ class InputQualityGuard:
         if len(ref_grid) < 12:
             errors.append("insufficient_sampling_points")
 
-        ref_ok: List[Dict[str, float]] = []
-        sample_ok: List[Dict[str, float]] = []
+        ref_ok: list[dict[str, float]] = []
+        sample_ok: list[dict[str, float]] = []
         physical_flags = 0
         for idx, (r, s) in enumerate(zip(ref_grid, sample_grid)):
             r_lab = _ensure_lab_dict(r)
@@ -463,7 +464,7 @@ class InputQualityGuard:
         }
 
 class ColorCorrectionEngineV3:
-    COLORCHECKER_SRGB: List[Tuple[int, int, int]] = [
+    COLORCHECKER_SRGB: list[tuple[int, int, int]] = [
         (115, 82, 68), (194, 150, 130), (98, 122, 157), (87, 108, 67),
         (133, 128, 177), (103, 189, 170), (214, 126, 44), (80, 91, 166),
         (193, 90, 99), (94, 60, 108), (157, 188, 64), (224, 163, 46),
@@ -473,16 +474,16 @@ class ColorCorrectionEngineV3:
     ]
 
     def __init__(self) -> None:
-        self._ccm: Optional[List[List[float]]] = None
-        self._rmse: Optional[float] = None
+        self._ccm: list[list[float]] | None = None
+        self._rmse: float | None = None
         self._calibrated = False
 
-    def calibrate(self, measured_rgb_24: Sequence[Sequence[float]]) -> Dict[str, Any]:
+    def calibrate(self, measured_rgb_24: Sequence[Sequence[float]]) -> dict[str, Any]:
         if not isinstance(measured_rgb_24, (list, tuple)) or len(measured_rgb_24) != 24:
             return {"status": "error", "message": "measured_rgb_24 must have exactly 24 patches"}
 
-        x: List[List[float]] = []
-        y: List[List[float]] = []
+        x: list[list[float]] = []
+        y: list[list[float]] = []
         for i in range(24):
             m = measured_rgb_24[i]
             if not isinstance(m, (list, tuple)) or len(m) != 3:
@@ -515,7 +516,7 @@ class ColorCorrectionEngineV3:
 
         self._ccm = ccm
         self._calibrated = True
-        sqe: List[float] = []
+        sqe: list[float] = []
         for row, target in zip(x, y):
             pred = self.apply_ccm_linear(row)
             for i in range(3):
@@ -530,22 +531,22 @@ class ColorCorrectionEngineV3:
             "patches_used": 24,
         }
 
-    def apply_ccm_linear(self, linear_rgb: Sequence[float]) -> List[float]:
+    def apply_ccm_linear(self, linear_rgb: Sequence[float]) -> list[float]:
         if self._ccm is None:
             return [float(linear_rgb[0]), float(linear_rgb[1]), float(linear_rgb[2])]
         out = _mat3_vec_mul(self._ccm, linear_rgb)
         return [_clamp(v, 0.0, 1.0) for v in out]
 
-    def correct_rgb(self, r: float, g: float, b: float) -> Tuple[int, int, int]:
+    def correct_rgb(self, r: float, g: float, b: float) -> tuple[int, int, int]:
         lin = [_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b)]
         corr = self.apply_ccm_linear(lin)
         return (_linear_to_srgb(corr[0]), _linear_to_srgb(corr[1]), _linear_to_srgb(corr[2]))
 
-    def correct_to_lab(self, r: float, g: float, b: float) -> Dict[str, float]:
+    def correct_to_lab(self, r: float, g: float, b: float) -> dict[str, float]:
         cr, cg, cb = self.correct_rgb(r, g, b)
         return rgb_to_lab(cr, cg, cb)
 
-    def validate(self) -> Dict[str, Any]:
+    def validate(self) -> dict[str, Any]:
         if not self._calibrated:
             return {"valid": False, "message": "ccm_not_calibrated"}
         rmse = float(self._rmse or 0.0)
@@ -553,7 +554,7 @@ class ColorCorrectionEngineV3:
 
 
 class ThreeStepMatcherV3:
-    def evaluate_match(self, match_result: Dict[str, Any]) -> Dict[str, Any]:
+    def evaluate_match(self, match_result: dict[str, Any]) -> dict[str, Any]:
         method = str(match_result.get("method", "unknown")).lower()
         inlier_ratio = float(match_result.get("inlier_ratio", 0.0) or 0.0)
         ncc = float(match_result.get("ncc_score", 0.0) or 0.0)
@@ -561,7 +562,7 @@ class ThreeStepMatcherV3:
         inlier_count = int(match_result.get("inlier_count", 0) or 0)
 
         score = 0.0
-        reasons: List[str] = []
+        reasons: list[str] = []
         if method == "aruco":
             score = 0.95
             reasons.append("aruco_direct_alignment")
@@ -579,7 +580,7 @@ class ThreeStepMatcherV3:
 
         score = _clamp(score, 0.0, 1.0)
         confidence = "high" if score >= 0.75 else "medium" if score >= 0.45 else "low"
-        warnings: List[str] = []
+        warnings: list[str] = []
         scale = match_result.get("scale_factor")
         if _is_number(scale) and abs(float(scale) - 1.0) > 0.05:
             warnings.append("scale_deviation_gt_5pct")
@@ -595,7 +596,7 @@ class ThreeStepMatcherV3:
             "recommendation": "alignment_ok" if score >= 0.75 else "alignment_usable_manual_verify" if score >= 0.45 else "alignment_retry_or_aruco",
         }
 
-    def suggest_strategy(self, scene: Dict[str, Any]) -> Dict[str, Any]:
+    def suggest_strategy(self, scene: dict[str, Any]) -> dict[str, Any]:
         has_aruco = bool(scene.get("has_aruco"))
         pattern = _slug(str(scene.get("pattern_type", "random")))
         sku_count = int(scene.get("sku_count", 999) or 999)
@@ -622,14 +623,14 @@ class GridAnalyzer:
         if c < cols - 1:
             yield r * cols + (c + 1)
 
-    def analyze(self, ref_grid: List[Dict[str, float]], sample_grid: List[Dict[str, float]], grid_shape: Tuple[int, int], hotspot_threshold: float) -> Dict[str, Any]:
+    def analyze(self, ref_grid: list[dict[str, float]], sample_grid: list[dict[str, float]], grid_shape: tuple[int, int], hotspot_threshold: float) -> dict[str, Any]:
         rows, cols = grid_shape
         n = len(ref_grid)
-        des: List[float] = []
-        dls: List[float] = []
-        das: List[float] = []
-        dbs: List[float] = []
-        point_components: List[Dict[str, float]] = []
+        des: list[float] = []
+        dls: list[float] = []
+        das: list[float] = []
+        dbs: list[float] = []
+        point_components: list[dict[str, float]] = []
         for r, s in zip(ref_grid, sample_grid):
             d = de2000(r, s)
             des.append(float(d["total"]))
@@ -648,13 +649,13 @@ class GridAnalyzer:
         hotspot_ratio = len(hotspot_indices) / n if n else 0.0
         hotspot_set = set(hotspot_indices)
         visited: set[int] = set()
-        clusters: List[List[int]] = []
+        clusters: list[list[int]] = []
         for idx in hotspot_indices:
             if idx in visited:
                 continue
             stack = [idx]
             visited.add(idx)
-            cluster: List[int] = []
+            cluster: list[int] = []
             while stack:
                 cur = stack.pop()
                 cluster.append(cur)
@@ -674,8 +675,8 @@ class GridAnalyzer:
             "db": round(point_components[worst_idx]["raw_db"], 4),
         } if worst_idx is not None else None
 
-        center_vals: List[float] = []
-        edge_vals: List[float] = []
+        center_vals: list[float] = []
+        edge_vals: list[float] = []
         for i, de in enumerate(des):
             rr = i // cols
             cc = i % cols
@@ -686,7 +687,7 @@ class GridAnalyzer:
         edge_avg = _safe_mean(edge_vals)
         center_avg = _safe_mean(center_vals)
 
-        zone_data: Dict[str, List[float]] = {"head": [], "middle": [], "tail": []}
+        zone_data: dict[str, list[float]] = {"head": [], "middle": [], "tail": []}
         for i, de in enumerate(des):
             rr = i // cols
             if rr < rows / 3.0:
@@ -732,7 +733,7 @@ class GridAnalyzer:
 
 
 class VisualAcceptabilityModel:
-    def predict(self, metrics: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
+    def predict(self, metrics: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
         g = metrics["global"]
         u = metrics["uniformity"]
         texture = _slug(str(meta.get("texture_type", "normal")))
@@ -762,7 +763,7 @@ class VisualAcceptabilityModel:
 
 
 class RootCauseEngine:
-    def classify(self, metrics: Dict[str, Any], data_quality: Dict[str, Any]) -> Dict[str, Any]:
+    def classify(self, metrics: dict[str, Any], data_quality: dict[str, Any]) -> dict[str, Any]:
         if not data_quality["valid"]:
             return {"type": "data_quality", "summary": "invalid_measurement_input", "evidence": data_quality["errors"], "confidence": "high"}
         if data_quality["suspicious_ratio"] > 0.2:
@@ -792,15 +793,15 @@ class HardGateEngine:
 
     def evaluate(
         self,
-        data_quality: Dict[str, Any],
-        visual: Dict[str, Any],
-        root_cause: Dict[str, Any],
-        gate_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        data_quality: dict[str, Any],
+        visual: dict[str, Any],
+        root_cause: dict[str, Any],
+        gate_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ctx = dict(gate_context or {})
-        hard_blocks: List[str] = []
-        review_triggers: List[str] = []
-        arbitration_triggers: List[str] = []
+        hard_blocks: list[str] = []
+        review_triggers: list[str] = []
+        arbitration_triggers: list[str] = []
 
         if not data_quality.get("valid", False):
             hard_blocks.append("invalid_input_data")
@@ -847,10 +848,10 @@ class BusinessCostEngine:
 
     def plan(
         self,
-        decision: Dict[str, Any],
-        hard_gate: Dict[str, Any],
-        meta: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        decision: dict[str, Any],
+        hard_gate: dict[str, Any],
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
         costs = {
             "false_release_cost": float(meta.get("false_release_cost", 22000.0)),
             "false_reject_cost": float(meta.get("false_reject_cost", 7000.0)),
@@ -868,7 +869,7 @@ class BusinessCostEngine:
         inventory_factor = 0.9 if inventory in {"short", "critical_low"} else 1.0
 
         # Candidate dispositions.
-        options: List[Dict[str, Any]] = []
+        options: list[dict[str, Any]] = []
         options.append({"action": "remeasure", "cost": costs["remeasure_cost"]})
         options.append({"action": "rework", "cost": costs["rework_cost"] * inventory_factor})
         options.append({"action": "customer_confirm", "cost": costs["customer_confirm_cost"] * urgency_factor})
@@ -912,15 +913,15 @@ class BusinessCostEngine:
 class DecisionArbitrator:
     def arbitrate(
         self,
-        metrics: Dict[str, Any],
-        visual: Dict[str, Any],
-        data_quality: Dict[str, Any],
-        root_cause: Dict[str, Any],
+        metrics: dict[str, Any],
+        visual: dict[str, Any],
+        data_quality: dict[str, Any],
+        root_cause: dict[str, Any],
         profile: ThresholdProfile,
-        hard_gate: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        reasons: List[str] = []
-        conflicts: List[str] = []
+        hard_gate: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        reasons: list[str] = []
+        conflicts: list[str] = []
         hard_gate = dict(hard_gate or {})
 
         if not data_quality["valid"]:
@@ -1031,20 +1032,20 @@ class DecisionArbitrator:
 class ActionRecommender:
     def recommend(
         self,
-        decision: Dict[str, Any],
-        metrics: Dict[str, Any],
-        root_cause: Dict[str, Any],
-        recipe: Optional[Dict[str, Any]] = None,
-        process_params: Optional[Dict[str, Any]] = None,
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        decision: dict[str, Any],
+        metrics: dict[str, Any],
+        root_cause: dict[str, Any],
+        recipe: dict[str, Any] | None = None,
+        process_params: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         meta = dict(meta or {})
         tier = decision["tier"]
         g = metrics["global"]
-        advice: List[str] = []
-        process_checks: List[str] = []
-        recipe_ops: List[str] = []
-        prioritized: List[Dict[str, Any]] = []
+        advice: list[str] = []
+        process_checks: list[str] = []
+        recipe_ops: list[str] = []
+        prioritized: list[dict[str, Any]] = []
 
         if tier == "HOLD":
             advice.extend([
@@ -1106,7 +1107,7 @@ class ActionRecommender:
                 prioritized.append({"priority": 2, "item": "先查工艺参数再决定是否改配方", "owner": "工艺工程师"})
 
         # Anti-oscillation guard for repeated opposite recipe trials.
-        trial_guard: List[str] = []
+        trial_guard: list[str] = []
         recent_adjustments = meta.get("recent_recipe_adjustments")
         if isinstance(recent_adjustments, list) and len(recent_adjustments) >= 4:
             norm = [str(x).lower() for x in recent_adjustments[-6:]]
@@ -1138,11 +1139,11 @@ class ActionRecommender:
 
 class SessionRecorderV3:
     def __init__(self) -> None:
-        self._sessions: List[Dict[str, Any]] = []
+        self._sessions: list[dict[str, Any]] = []
         self._last_hash = "GENESIS"
-        self._idempotency_map: Dict[str, Dict[str, Any]] = {}
+        self._idempotency_map: dict[str, dict[str, Any]] = {}
 
-    def record(self, payload: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+    def record(self, payload: dict[str, Any], idempotency_key: str | None = None) -> dict[str, Any]:
         if idempotency_key and idempotency_key in self._idempotency_map:
             return {"session_id": self._idempotency_map[idempotency_key]["session_id"], "deduplicated": True}
         session_id = f"S-{int(time.time())}-{len(self._sessions)+1:06d}"
@@ -1155,7 +1156,7 @@ class SessionRecorderV3:
             self._idempotency_map[idempotency_key] = body
         return {"session_id": session_id, "hash": body["hash"], "deduplicated": False}
 
-    def history(self, product: Optional[str] = None, last_n: int = 20) -> List[Dict[str, Any]]:
+    def history(self, product: str | None = None, last_n: int = 20) -> list[dict[str, Any]]:
         if product:
             rows = [s for s in self._sessions if s.get("payload", {}).get("meta", {}).get("product_code") == product]
         else:
@@ -1164,7 +1165,7 @@ class SessionRecorderV3:
 
 
 class CaptureSOPGeneratorV3:
-    def generate(self, product_type: str = "decorative_film") -> Dict[str, Any]:
+    def generate(self, product_type: str = "decorative_film") -> dict[str, Any]:
         return {
             "title": f"Capture SOP - {product_type}",
             "version": "v3.0",
@@ -1203,16 +1204,16 @@ class ColorFilmPipelineV3Optimized:
 
     def run(
         self,
-        ref_grid: List[Dict[str, Any]],
-        sample_grid: List[Dict[str, Any]],
-        grid_shape: Tuple[int, int] = (6, 8),
+        ref_grid: list[dict[str, Any]],
+        sample_grid: list[dict[str, Any]],
+        grid_shape: tuple[int, int] = (6, 8),
         capture_quality: str = "GOOD",
-        recipe: Optional[Dict[str, Any]] = None,
-        process_params: Optional[Dict[str, Any]] = None,
-        meta: Optional[Dict[str, Any]] = None,
-        measurement_context: Optional[Dict[str, Any]] = None,
-        policy_overrides: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        recipe: dict[str, Any] | None = None,
+        process_params: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+        measurement_context: dict[str, Any] | None = None,
+        policy_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         meta = dict(meta or {})
         measurement_context = dict(measurement_context or {})
         gate_context = measurement_context.get("gate_context") if isinstance(measurement_context.get("gate_context"), dict) else {}
@@ -1375,11 +1376,11 @@ class ColorFilmPipelineV3Optimized:
         self,
         version: str,
         active_from_ts: float,
-        scope: Optional[Dict[str, Any]] = None,
-        threshold_overrides: Optional[Dict[str, Any]] = None,
+        scope: dict[str, Any] | None = None,
+        threshold_overrides: dict[str, Any] | None = None,
         model_version: str = "MODEL-COLOR-V3",
         notes: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self.rules.register_rule_pack(
             version=version,
             active_from_ts=active_from_ts,
@@ -1389,19 +1390,19 @@ class ColorFilmPipelineV3Optimized:
             notes=notes,
         )
 
-    def list_rule_packs(self) -> List[Dict[str, Any]]:
+    def list_rule_packs(self) -> list[dict[str, Any]]:
         return self.rules.list_rule_packs()
 
     def simulate_rule_versions(
         self,
-        ref_grid: List[Dict[str, Any]],
-        sample_grid: List[Dict[str, Any]],
-        versions: List[str],
-        grid_shape: Tuple[int, int] = (6, 8),
-        meta: Optional[Dict[str, Any]] = None,
-        measurement_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        rows: List[Dict[str, Any]] = []
+        ref_grid: list[dict[str, Any]],
+        sample_grid: list[dict[str, Any]],
+        versions: list[str],
+        grid_shape: tuple[int, int] = (6, 8),
+        meta: dict[str, Any] | None = None,
+        measurement_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
         for ver in versions:
             ctx = dict(measurement_context or {})
             ctx["force_rule_version"] = ver
@@ -1425,7 +1426,7 @@ class ColorFilmPipelineV3Optimized:
 
     @staticmethod
     def _deviation_summary(dL: float, da: float, db: float) -> str:
-        parts: List[str] = []
+        parts: list[str] = []
         if dL > 0.5:
             parts.append("偏亮")
         elif dL < -0.5:
@@ -1452,8 +1453,8 @@ if __name__ == "__main__":
     random.seed(42)
     pipe = ColorFilmPipelineV3Optimized()
 
-    ref: List[Dict[str, float]] = []
-    sample: List[Dict[str, float]] = []
+    ref: list[dict[str, float]] = []
+    sample: list[dict[str, float]] = []
     for i in range(48):
         base = {"L": 62.0 + random.gauss(0.0, 0.12), "a": 3.2 + random.gauss(0.0, 0.05), "b": 14.8 + random.gauss(0.0, 0.08)}
         ref.append(base)

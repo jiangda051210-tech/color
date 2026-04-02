@@ -30,8 +30,12 @@ SENIA 彩膜全生命周期质量系统 — Ultimate Edition
   M19 FullLifecycleTracker   — 全生命周期追溯链
 """
 from __future__ import annotations
-import math, json, time, hashlib, statistics
-from typing import Dict, List, Optional, Any
+import hashlib
+import json
+import math
+import statistics
+import time
+from typing import Any
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -593,7 +597,7 @@ class EdgeEffectAnalyzer:
     检测版面中心区与边缘区的系统性差异
     """
 
-    def analyze(self, de_grid: List[float], grid_shape: tuple = (6, 8)) -> dict:
+    def analyze(self, de_grid: list[float], grid_shape: tuple = (6, 8)) -> dict:
         rows, cols = grid_shape
         if len(de_grid) != rows * cols:
             return {'error': '网格不匹配'}

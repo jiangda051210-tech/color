@@ -3257,7 +3257,6 @@ OBSERVATORY_MODULE_PATH = OBSERVATORY_ASSET_DIR / "senia-elite-observatory.modul
 OBSERVATORY_BUILD_INPUT_PATH = OBSERVATORY_ASSET_DIR / "_observatory_build_input.jsx"
 OBSERVATORY_SOURCE_CANDIDATES = (
     OBSERVATORY_ASSET_DIR / "senia-elite-observatory.jsx",
-    Path(r"C:\Users\86150\Downloads\senia-elite-observatory.jsx"),
 )
 
 OBSERVATORY_FALLBACK_MODULE = """
@@ -3729,7 +3728,7 @@ def _pick_observatory_source_path() -> Path | None:
         try:
             if candidate.exists() and candidate.is_file():
                 return candidate
-        except Exception:
+        except OSError:
             continue
     return None
 
@@ -3745,8 +3744,6 @@ def _resolve_npx_path() -> str | None:
     for candidate in (
         shutil.which("npx"),
         shutil.which("npx.cmd"),
-        r"C:\Program Files\nodejs\npx.cmd",
-        r"C:\Program Files\nodejs\npx.exe",
     ):
         if not candidate:
             continue
