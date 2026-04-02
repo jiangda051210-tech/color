@@ -5067,6 +5067,7 @@ def get_lifecycle_manifest() -> dict[str, Any]:
             "state_snapshot": "/v1/lifecycle/state/snapshot",
             "roll_summary": "/v1/lifecycle/roll/summary",
             "waiver_health": "/v1/lifecycle/decision/waiver-health",
+            "snapshot_verify": "/v1/lifecycle/decision/verify-snapshot",
             "rule_simulation": "/v1/lifecycle/decision/simulate-rules",
             "case_list": "/v1/lifecycle/case/list",
             "case_sla_report": "/v1/lifecycle/case/sla-report",
@@ -5533,6 +5534,7 @@ def get_lifecycle_advanced_manifest() -> dict[str, Any]:
             "version_link": "/v1/lifecycle/version-link/*",
             "integrated_decision": "/v1/lifecycle/decision/integrated",
             "waiver_health": "/v1/lifecycle/decision/waiver-health",
+            "decision_snapshot_verify": "/v1/lifecycle/decision/verify-snapshot",
             "decision_replay": "/v1/lifecycle/decision/replay",
             "decision_rule_simulation": "/v1/lifecycle/decision/simulate-rules",
             "decision_rule_batch_simulation": "/v1/lifecycle/decision/simulate-rules-batch",
@@ -6069,6 +6071,16 @@ def get_lifecycle_decision_waiver_health(
 def get_lifecycle_decision_snapshots(lot_id: str | None = None, last_n: int = 20) -> dict[str, Any]:
     with ULTIMATE_LOCK:
         result = ULTIMATE_SYSTEM.list_assessment_snapshots(lot_id=lot_id, last_n=max(1, int(last_n)))
+    return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
+
+
+@app.get("/v1/lifecycle/decision/verify-snapshot")
+def get_lifecycle_decision_verify_snapshot(snapshot_id: str, deep_replay: bool = False) -> dict[str, Any]:
+    with ULTIMATE_LOCK:
+        result = ULTIMATE_SYSTEM.verify_assessment_snapshot(
+            snapshot_id=snapshot_id,
+            deep_replay=bool(deep_replay),
+        )
     return {"enabled": True, "system": "ultimate_color_film_system", "result": result}
 
 

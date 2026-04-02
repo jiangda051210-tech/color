@@ -14,6 +14,23 @@ from pathlib import Path
 from typing import Any
 
 
+def _ensure_localhost_no_proxy(base_url: str) -> None:
+    try:
+        host = (urllib.parse.urlparse(str(base_url)).hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return
+    existing = (os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "").strip()
+    items = [x.strip() for x in existing.split(",") if x.strip()] if existing else []
+    for candidate in ("127.0.0.1", "localhost", "::1"):
+        if candidate not in items:
+            items.append(candidate)
+    joined = ",".join(items)
+    os.environ["NO_PROXY"] = joined
+    os.environ["no_proxy"] = joined
+
+
 def _tail_lines(text: str, max_lines: int = 40) -> str:
     lines = text.splitlines()
     if len(lines) <= max_lines:
@@ -54,7 +71,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--slo-availability-target", type=float, default=99.5, help="SLO target for availability percentage.")
     parser.add_argument("--slo-p95-target-ms", type=float, default=1200.0, help="SLO target for p95 latency in ms.")
     parser.add_argument("--require-slo-healthy", action="store_true", help="Fail if /v1/system/slo status is not healthy.")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    _ensure_localhost_no_proxy(args.base_url)
+    return args
 
 
 def _request(
@@ -132,6 +151,21 @@ def _parse_host_port(base_url: str) -> tuple[str, int]:
     if parsed.port:
         return parsed.hostname, int(parsed.port)
     return parsed.hostname, 443 if parsed.scheme.lower() == "https" else 80
+
+
+def _wait_until_reachable(base_url: str, timeout_sec: float = 75.0, interval_sec: float = 1.5) -> tuple[bool, str]:
+    deadline = time.time() + max(1.0, float(timeout_sec))
+    last_err = ""
+    while time.time() < deadline:
+        status, body = _request("GET", _url_with_query(base_url, "/health"), timeout=10.0)
+        if status in {200, 503}:
+            return True, f"health_status:{status}"
+        if status == -1:
+            last_err = str(body.get("error", "unknown_connection_error")) if isinstance(body, dict) else "unknown_connection_error"
+        else:
+            last_err = f"status:{status}"
+        time.sleep(max(0.2, float(interval_sec)))
+    return False, last_err or "timeout"
 
 
 def _role_case(
@@ -254,6 +288,24 @@ def main(argv: list[str] | None = None) -> int:
 
     host, port = _parse_host_port(args.base_url)
     env = dict(os.environ)
+
+    reachable_ok, reachable_detail = _wait_until_reachable(args.base_url, timeout_sec=75.0, interval_sec=1.5)
+    result["steps"].append(
+        {
+            "name": "service_reachable_wait",
+            "status": "passed" if reachable_ok else "failed",
+            "detail": reachable_detail,
+        }
+    )
+    if not reachable_ok:
+        result["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        result["elapsed_sec"] = round(time.time() - started_ts, 3)
+        result["ok"] = False
+        out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"release gate report: {out_path}")
+        print("overall ok: False")
+        print("- service_reachable_wait: failed")
+        return 1
 
     quick_cmd = [
         "powershell",

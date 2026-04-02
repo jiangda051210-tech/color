@@ -1921,6 +1921,93 @@ class DataIntegrityGuardV2:
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
 
 
+class ReplaySignatureGuardV2:
+    """
+    Tamper-evident signature helper for assessment snapshots.
+    """
+
+    VERSION = "SIG-V1"
+
+    @classmethod
+    def _normalize(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(k): cls._normalize(value[k]) for k in sorted(value.keys(), key=lambda x: str(x))}
+        if isinstance(value, list):
+            return [cls._normalize(x) for x in value]
+        if isinstance(value, tuple):
+            return [cls._normalize(x) for x in value]
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return None
+            return round(float(value), 8)
+        if isinstance(value, (int, str, bool)) or value is None:
+            return value
+        return str(value)
+
+    @classmethod
+    def _digest(cls, payload: Any) -> str:
+        normalized = cls._normalize(payload)
+        body = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def sign_snapshot(cls, snapshot_input: Dict[str, Any], snapshot_output: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(snapshot_output or {})
+        boundary = dict(out.get("boundary", {}) or {})
+        final_decision = dict(out.get("final_decision", {}) or {})
+        explainability = dict(out.get("explainability", {}) or {})
+        input_hash = cls._digest(snapshot_input or {})
+        rule_hash = cls._digest(boundary.get("rule_trace", {}) or {})
+        decision_hash = cls._digest(
+            {
+                "status": out.get("status"),
+                "risk_score": out.get("risk_score"),
+                "risk_level": out.get("risk_level"),
+                "final_decision": final_decision,
+                "hard_blocks": boundary.get("hard_blocks", []),
+                "review_triggers": boundary.get("review_triggers", []),
+                "arbitration_triggers": boundary.get("arbitration_triggers", []),
+                "release_gate": boundary.get("release_gate", {}),
+                "uncertainty_sources": explainability.get("uncertainty_sources", []),
+            }
+        )
+        snapshot_hash = cls._digest(
+            {
+                "version": cls.VERSION,
+                "input_hash": input_hash,
+                "rule_hash": rule_hash,
+                "decision_hash": decision_hash,
+            }
+        )
+        return {
+            "version": cls.VERSION,
+            "input_hash": input_hash,
+            "rule_hash": rule_hash,
+            "decision_hash": decision_hash,
+            "snapshot_hash": snapshot_hash,
+        }
+
+    @classmethod
+    def verify_snapshot(
+        cls,
+        snapshot_input: Dict[str, Any],
+        snapshot_output: Dict[str, Any],
+        signature: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        signed = dict(signature or {})
+        recomputed = cls.sign_snapshot(snapshot_input=snapshot_input, snapshot_output=snapshot_output)
+        mismatches: List[str] = []
+        for key in ("version", "input_hash", "rule_hash", "decision_hash", "snapshot_hash"):
+            if str(signed.get(key, "")) != str(recomputed.get(key, "")):
+                mismatches.append(key)
+        return {
+            "ok": len(mismatches) == 0,
+            "mismatches": mismatches,
+            "expected": recomputed,
+            "provided": signed,
+        }
+
+
 class MeasurementSystemGuardV2:
     """
     MSA/Gauge capability approximation for runtime blocking decisions.
@@ -2362,10 +2449,57 @@ class FailureModeRegistryV2:
 
 
 class AlertCenterV2:
+    _SEV_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    _SEV_BY_RANK = {v: k for k, v in _SEV_RANK.items()}
+
     def __init__(self, dedup_seconds: int = 600) -> None:
         self._dedup_seconds = max(30, int(dedup_seconds))
         self._alerts: List[Dict[str, Any]] = []
         self._last_seen: Dict[str, Dict[str, Any]] = {}
+        self._repeat_escalation_steps = (3, 6, 10)
+
+    @classmethod
+    def _normalize_severity(cls, severity: str) -> str:
+        sev = str(severity).strip().lower()
+        if sev not in cls._SEV_RANK:
+            return "medium"
+        return sev
+
+    @classmethod
+    def _severity_rank(cls, severity: str) -> int:
+        return int(cls._SEV_RANK.get(cls._normalize_severity(severity), 2))
+
+    @classmethod
+    def _raise_severity(cls, severity: str, steps: int = 1) -> str:
+        rank = cls._severity_rank(severity)
+        target = min(4, rank + max(0, int(steps)))
+        return cls._SEV_BY_RANK[target]
+
+    def _make_row(
+        self,
+        now: float,
+        alert_type: str,
+        severity: str,
+        message: str,
+        source: str,
+        evidence: Optional[Dict[str, Any]],
+        dedup_key: str,
+        repeat_count: int = 1,
+        escalated: bool = False,
+    ) -> Dict[str, Any]:
+        return {
+            "alert_id": f"ALT-{int(now)}-{len(self._alerts)+1:05d}",
+            "type": str(alert_type),
+            "severity": self._normalize_severity(severity),
+            "message": str(message),
+            "source": str(source),
+            "evidence": dict(evidence or {}),
+            "ts": now,
+            "iso": _now_iso(),
+            "count": max(1, int(repeat_count)),
+            "dedup_key": dedup_key,
+            "escalated": bool(escalated),
+        }
 
     def push(
         self,
@@ -2378,34 +2512,101 @@ class AlertCenterV2:
     ) -> Dict[str, Any]:
         now = time.time()
         key = dedup_key or f"{alert_type}|{source}|{message}"
+        sev = self._normalize_severity(severity)
         prev = self._last_seen.get(key)
         if prev and now - prev["ts"] <= self._dedup_seconds:
             prev["count"] += 1
+            prev["ts"] = now
             prev["last_ts"] = _now_iso()
-            return {"recorded": False, "deduped": True, "count": prev["count"], "alert_id": prev["alert_id"]}
-        row = {
-            "alert_id": f"ALT-{int(now)}-{len(self._alerts)+1:05d}",
-            "type": alert_type,
-            "severity": severity,
-            "message": message,
-            "source": source,
-            "evidence": dict(evidence or {}),
-            "ts": now,
-            "iso": _now_iso(),
-            "count": 1,
-        }
+            threshold_hit = prev["count"] in self._repeat_escalation_steps
+            if threshold_hit:
+                escalated = self._raise_severity(prev.get("severity", sev), steps=1)
+                row = self._make_row(
+                    now=now,
+                    alert_type=f"{alert_type}_REPEATED",
+                    severity=escalated,
+                    message=f"repeated_alert:{message}",
+                    source=source,
+                    evidence={**dict(evidence or {}), "repeat_count": prev["count"], "original_alert_id": prev.get("alert_id")},
+                    dedup_key=key,
+                    repeat_count=prev["count"],
+                    escalated=True,
+                )
+                self._alerts.append(row)
+                prev["alert_id"] = row["alert_id"]
+                prev["severity"] = escalated
+                if len(self._alerts) > 10000:
+                    self._alerts = self._alerts[-10000:]
+                return {
+                    "recorded": True,
+                    "deduped": True,
+                    "escalated": True,
+                    "count": prev["count"],
+                    "alert_id": row["alert_id"],
+                    "severity": escalated,
+                }
+            return {
+                "recorded": False,
+                "deduped": True,
+                "escalated": False,
+                "count": prev["count"],
+                "alert_id": prev["alert_id"],
+                "severity": prev.get("severity", sev),
+            }
+        row = self._make_row(
+            now=now,
+            alert_type=alert_type,
+            severity=sev,
+            message=message,
+            source=source,
+            evidence=evidence,
+            dedup_key=key,
+            repeat_count=1,
+            escalated=False,
+        )
         self._alerts.append(row)
-        self._last_seen[key] = {"alert_id": row["alert_id"], "ts": now, "count": 1, "last_ts": row["iso"]}
+        self._last_seen[key] = {"alert_id": row["alert_id"], "ts": now, "count": 1, "last_ts": row["iso"], "severity": row["severity"]}
         if len(self._alerts) > 10000:
             self._alerts = self._alerts[-10000:]
-        return {"recorded": True, "deduped": False, "alert_id": row["alert_id"]}
+        return {"recorded": True, "deduped": False, "alert_id": row["alert_id"], "severity": row["severity"]}
 
     def summary(self, last_n: int = 50) -> Dict[str, Any]:
         rows = self._alerts[-max(1, int(last_n)) :]
         grouped: Dict[str, int] = defaultdict(int)
+        grouped_severity: Dict[str, int] = defaultdict(int)
         for r in rows:
             grouped[r["type"]] += 1
-        return {"count": len(rows), "alerts": rows, "grouped": dict(grouped)}
+            grouped_severity[str(r.get("severity", "medium"))] += 1
+        prioritized = sorted(
+            rows,
+            key=lambda x: (self._severity_rank(str(x.get("severity", "medium"))), float(x.get("ts", 0.0))),
+            reverse=True,
+        )
+        dedup_rows = [
+            {
+                "dedup_key": k,
+                "count": int(v.get("count", 0) or 0),
+                "last_ts": v.get("last_ts"),
+                "severity": str(v.get("severity", "medium")),
+            }
+            for k, v in self._last_seen.items()
+            if int(v.get("count", 0) or 0) >= 2
+        ]
+        dedup_rows.sort(key=lambda x: (x["count"], self._severity_rank(x["severity"])), reverse=True)
+        repeat_total = sum(max(0, int(v.get("count", 0) or 0) - 1) for v in self._last_seen.values())
+        unique_alerts = max(1, len(self._last_seen))
+        fatigue_index = round(min(1.0, repeat_total / (unique_alerts * 3.0)), 4)
+        return {
+            "count": len(rows),
+            "alerts": rows,
+            "grouped": dict(grouped),
+            "severity_counts": dict(grouped_severity),
+            "primary_alert": prioritized[0] if prioritized else None,
+            "secondary_alerts": prioritized[1:6] if len(prioritized) > 1 else [],
+            "dedup_hotspots": dedup_rows[:5],
+            "fatigue_index": fatigue_index,
+            "repeat_total": repeat_total,
+        }
 
 
 class QualityCaseCenterV2:
@@ -3429,6 +3630,7 @@ class UltimateColorFilmSystemV2Optimized:
         self.machine = MultiMachineConsistencyEngine()
         self.learning = LearningLoopEngine()
         self.data_guard = DataIntegrityGuardV2()
+        self.replay_guard = ReplaySignatureGuardV2()
         self.measurement_guard = MeasurementSystemGuardV2()
         self.spc = SPCMonitorV2()
         self.metamerism = MetamerismRiskEngineV2()
@@ -3858,6 +4060,46 @@ class UltimateColorFilmSystemV2Optimized:
 
     def get_alert_summary(self, last_n: int = 50) -> Dict[str, Any]:
         return self.alerts.summary(last_n=last_n)
+
+    @staticmethod
+    def _infer_trigger_severity(trigger: str, layer: str) -> str:
+        if layer == "hard_blocks":
+            return "critical"
+        if layer == "arbitration_triggers":
+            return "high"
+        return "medium"
+
+    def _push_decision_trigger_alerts(self, lot_id: str, boundary: Dict[str, Any], source: str = "integrated_assessment") -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for layer in ("hard_blocks", "arbitration_triggers", "review_triggers"):
+            triggers = boundary.get(layer, [])
+            if not isinstance(triggers, list):
+                continue
+            for trig in triggers[:8]:
+                t = str(trig).strip()
+                if not t:
+                    continue
+                sev = self._infer_trigger_severity(trigger=t, layer=layer)
+                pushed = self.push_alert(
+                    alert_type=f"LIFECYCLE_{layer[:-1].upper()}",
+                    severity=sev,
+                    message=f"{lot_id}:{layer}:{t}",
+                    source=source,
+                    evidence={"trigger": t, "layer": layer, "lot_id": lot_id},
+                    dedup_key=f"{lot_id}|{layer}|{t}",
+                )
+                rows.append({"layer": layer, "trigger": t, **pushed})
+        return rows
+
+    def _build_alert_digest(self) -> Dict[str, Any]:
+        summary = self.get_alert_summary(last_n=120)
+        return {
+            "primary_alert": summary.get("primary_alert"),
+            "secondary_alerts": summary.get("secondary_alerts", []),
+            "fatigue_index": summary.get("fatigue_index", 0.0),
+            "dedup_hotspots": summary.get("dedup_hotspots", []),
+            "severity_counts": summary.get("severity_counts", {}),
+        }
 
     def open_quality_case(
         self,
@@ -4736,6 +4978,13 @@ class UltimateColorFilmSystemV2Optimized:
                 "can_auto_release": boundary["auto_release_allowed"],
                 "uncertainty_sources": [x for x in ["low_confidence" if combined_conf < 0.6 else "", "insufficient_trace" if not trace.get("integrity", True) else ""] if x],
             },
+            "alert_digest": {
+                "primary_alert": None,
+                "secondary_alerts": [],
+                "fatigue_index": 0.0,
+                "dedup_hotspots": [],
+                "severity_counts": {},
+            },
             **envelope,
         }
 
@@ -4788,27 +5037,34 @@ class UltimateColorFilmSystemV2Optimized:
             evidence={"risk_score": risk_score, "mode": mode},
             dedup_key=f"{lot_id}|{decision_code}|{mode}",
         )
+        trigger_alerts = self._push_decision_trigger_alerts(lot_id=lot_id, boundary=boundary, source="integrated_assessment")
+        result["trigger_alerts"] = trigger_alerts
+        result["alert_digest"] = self._build_alert_digest()
 
         snapshot_id = f"AS-{int(time.time())}-{len(self._assessment_snapshots)+1:06d}"
+        snapshot_input = {
+            "base_decision": bd,
+            "color_metrics": cm,
+            "process_params": process_params or {},
+            "process_route": process_route,
+            "film_props": film_props or {},
+            "scenario": sc,
+            "customer_id": customer_id,
+            "sku": sku,
+            "current_lab": current_lab,
+            "repeatability_std": repeatability_std,
+            "confidence": confidence,
+            "meta": m,
+        }
+        replay_signature = self.replay_guard.sign_snapshot(snapshot_input=snapshot_input, snapshot_output=result)
+        result["replay_signature"] = replay_signature
         self._assessment_snapshots[snapshot_id] = {
             "snapshot_id": snapshot_id,
             "lot_id": lot_id,
             "created_at": _now_iso(),
-            "input": {
-                "base_decision": bd,
-                "color_metrics": cm,
-                "process_params": process_params or {},
-                "process_route": process_route,
-                "film_props": film_props or {},
-                "scenario": sc,
-                "customer_id": customer_id,
-                "sku": sku,
-                "current_lab": current_lab,
-                "repeatability_std": repeatability_std,
-                "confidence": confidence,
-                "meta": m,
-            },
+            "input": snapshot_input,
             "output": result,
+            "signature": replay_signature,
         }
         result["snapshot_id"] = snapshot_id
         result["deduplicated"] = False
@@ -4879,6 +5135,66 @@ class UltimateColorFilmSystemV2Optimized:
             rows = [x for x in rows if x.get("lot_id") == lot_id]
         rows = rows[-max(1, int(last_n)) :]
         return {"count": len(rows), "rows": rows}
+
+    def verify_assessment_snapshot(
+        self,
+        snapshot_id: str,
+        deep_replay: bool = False,
+    ) -> Dict[str, Any]:
+        snap = self._assessment_snapshots.get(snapshot_id)
+        if not snap:
+            return {"error": "snapshot_not_found", "snapshot_id": snapshot_id}
+        inp = dict(snap.get("input", {}) or {})
+        out = dict(snap.get("output", {}) or {})
+        sig = dict(snap.get("signature", {}) or {})
+        verify = self.replay_guard.verify_snapshot(snapshot_input=inp, snapshot_output=out, signature=sig)
+        response = {
+            "snapshot_id": snapshot_id,
+            "verified": bool(verify.get("ok", False)),
+            "mismatches": list(verify.get("mismatches", [])),
+            "expected_signature": dict(verify.get("expected", {})),
+            "provided_signature": dict(verify.get("provided", {})),
+            "current_decision": {
+                "tier": out.get("final_decision", {}).get("tier"),
+                "mode": out.get("final_decision", {}).get("mode"),
+                "decision_code": out.get("final_decision", {}).get("decision_code"),
+                "status": out.get("status"),
+            },
+        }
+        if deep_replay:
+            rule_ver = str(
+                out.get("boundary", {}).get("rule_trace", {}).get("rule_version")
+                or out.get("quality_fact_layer", {}).get("rule_trace", {}).get("rule_version")
+                or ""
+            ).strip()
+            replay = self.replay_assessment(
+                snapshot_id=snapshot_id,
+                force_lifecycle_rule_version=(rule_ver or None),
+                meta_patch={"replay_purpose": "snapshot_verification"},
+            )
+            replay_out = dict(replay.get("result", {}) or {})
+            cur_dec = response["current_decision"]
+            rep_dec = dict(replay_out.get("final_decision", {}) or {})
+            decision_drift = (
+                cur_dec.get("tier") != rep_dec.get("tier")
+                or cur_dec.get("mode") != rep_dec.get("mode")
+                or cur_dec.get("decision_code") != rep_dec.get("decision_code")
+            )
+            response["replay_check"] = {
+                "performed": True,
+                "rule_version": rule_ver or None,
+                "new_snapshot_id": replay.get("new_snapshot_id"),
+                "decision_drift": decision_drift,
+                "replay_decision": {
+                    "tier": rep_dec.get("tier"),
+                    "mode": rep_dec.get("mode"),
+                    "decision_code": rep_dec.get("decision_code"),
+                    "status": replay_out.get("status"),
+                },
+            }
+        else:
+            response["replay_check"] = {"performed": False}
+        return response
 
     def replay_assessment(
         self,

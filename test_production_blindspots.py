@@ -433,6 +433,59 @@ def test_release_report_contains_waiver_summary_for_audiences():
     assert c_details["release_control"]["waiver_status"] in {"approved", "missing", "invalid", "not_required"}
 
 
+def test_alert_center_dedup_escalation_and_digest():
+    sys = UltimateColorFilmSystemV2Optimized()
+    key = "LOT-ALERT|hard_blocks|trace_missing_required_events"
+    r1 = sys.push_alert(
+        alert_type="LIFECYCLE_HARD_BLOCK",
+        severity="high",
+        message="LOT-ALERT:trace_missing_required_events",
+        source="unit_test",
+        dedup_key=key,
+    )
+    r2 = sys.push_alert(
+        alert_type="LIFECYCLE_HARD_BLOCK",
+        severity="high",
+        message="LOT-ALERT:trace_missing_required_events",
+        source="unit_test",
+        dedup_key=key,
+    )
+    r3 = sys.push_alert(
+        alert_type="LIFECYCLE_HARD_BLOCK",
+        severity="high",
+        message="LOT-ALERT:trace_missing_required_events",
+        source="unit_test",
+        dedup_key=key,
+    )
+    assert r1["recorded"] is True
+    assert r2["deduped"] is True
+    assert r3["escalated"] is True
+    assert r3["severity"] == "critical"
+    summary = sys.get_alert_summary(last_n=20)
+    assert summary["primary_alert"] is not None
+    assert summary["fatigue_index"] > 0.0
+    assert any(str(x.get("dedup_key")) == key for x in summary.get("dedup_hotspots", []))
+
+
+def test_snapshot_signature_verify_and_tamper_detection():
+    sys = UltimateColorFilmSystemV2Optimized()
+    lot = "LOT-SIGN-VERIFY"
+    _add_trace(sys, lot, complete=True)
+    out = sys.integrated_assessment(**_good_assessment_payload(lot))
+    sid = str(out.get("snapshot_id"))
+    assert sid
+    assert "replay_signature" in out
+    verify_ok = sys.verify_assessment_snapshot(snapshot_id=sid)
+    assert verify_ok["verified"] is True
+    assert verify_ok["mismatches"] == []
+
+    # Tamper simulation: mutate stored decision after snapshot creation.
+    sys._assessment_snapshots[sid]["output"]["final_decision"]["tier"] = "FAIL"  # noqa: SLF001
+    verify_bad = sys.verify_assessment_snapshot(snapshot_id=sid)
+    assert verify_bad["verified"] is False
+    assert "decision_hash" in set(verify_bad["mismatches"]) or "snapshot_hash" in set(verify_bad["mismatches"])
+
+
 def test_trace_revision_and_override_append_only():
     sys = UltimateColorFilmSystemV2Optimized()
     lot = "LOT-TRACE-REV"
@@ -900,6 +953,8 @@ def run_all():
     test_non_release_state_with_valid_waiver_allows_manual_review_only()
     test_release_waiver_health_reports_missing_and_approved()
     test_release_report_contains_waiver_summary_for_audiences()
+    test_alert_center_dedup_escalation_and_digest()
+    test_snapshot_signature_verify_and_tamper_detection()
     test_trace_revision_and_override_append_only()
     test_trace_event_idempotency_deduplicates()
     test_replay_with_new_rule_or_meta()

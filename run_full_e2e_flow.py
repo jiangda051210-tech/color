@@ -12,6 +12,23 @@ from pathlib import Path
 from typing import Any
 
 
+def _ensure_localhost_no_proxy(base_url: str) -> None:
+    try:
+        host = (urllib.parse.urlparse(str(base_url)).hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return
+    existing = (os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "").strip()
+    items = [x.strip() for x in existing.split(",") if x.strip()] if existing else []
+    for candidate in ("127.0.0.1", "localhost", "::1"):
+        if candidate not in items:
+            items.append(candidate)
+    joined = ",".join(items)
+    os.environ["NO_PROXY"] = joined
+    os.environ["no_proxy"] = joined
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Elite API full end-to-end verification flow.",
@@ -56,6 +73,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     chosen_base = (args.base_url or args.legacy_base_url or "").strip()
     args.base_url = chosen_base or "http://127.0.0.1:8877"
+    _ensure_localhost_no_proxy(args.base_url)
 
     if args.api_key:
         os.environ["ELITE_E2E_API_KEY"] = args.api_key
@@ -171,6 +189,21 @@ def _assert_200(name: str, status: int, body: Any) -> None:
         raise RuntimeError(f"{name} failed: status={status}, body={body}")
 
 
+def _wait_until_reachable(base_url: str, timeout_sec: float = 60.0, interval_sec: float = 1.2) -> None:
+    deadline = time.time() + max(1.0, float(timeout_sec))
+    last_err = ""
+    while time.time() < deadline:
+        try:
+            status, _ = _get(base_url, "/health")
+            if int(status) in {200, 503}:
+                return
+            last_err = f"unexpected_status:{status}"
+        except Exception as exc:  # noqa: BLE001
+            last_err = str(exc)
+        time.sleep(max(0.2, float(interval_sec)))
+    raise RuntimeError(f"service not reachable within {timeout_sec}s: {last_err}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     base = args.base_url
@@ -190,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     admin_headers = {"x-api-key": admin_key} if admin_key else None
 
     print("=== E2E start ===")
+    _wait_until_reachable(base_url=base, timeout_sec=75.0, interval_sec=1.5)
     status, body = _get(base, "/health")
     _assert_200("health", status, body)
     print("health ok")
