@@ -989,7 +989,17 @@ def _csv_escape(value: str) -> str:
 
 def _generate_output_dir(prefix: str, requested_dir: str | None) -> Path:
     if requested_dir:
-        out = Path(requested_dir)
+        candidate = Path(requested_dir).resolve()
+        allowed_root = DEFAULT_OUTPUT_ROOT.resolve()
+        # Restrict to the configured output root to prevent path traversal
+        try:
+            candidate.relative_to(allowed_root)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"output_dir must be inside the configured output root ({allowed_root})",
+            )
+        out = candidate
     else:
         out = DEFAULT_OUTPUT_ROOT / f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
     out.mkdir(parents=True, exist_ok=True)
@@ -2043,8 +2053,17 @@ async def request_observability_middleware(request: Request, call_next):  # type
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
-    return {"ok": True, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "version": APP_VERSION}
+def health() -> JSONResponse:
+    payload = _build_readiness_payload()
+    ok = bool(payload.get("ok", True))
+    body: dict[str, Any] = {
+        "ok": ok,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "version": APP_VERSION,
+    }
+    if not ok:
+        body["checks"] = payload.get("checks", [])
+    return JSONResponse(status_code=200 if ok else 503, content=body)
 
 
 def _check_dir_writable(path: Path, probe_prefix: str) -> tuple[bool, str]:

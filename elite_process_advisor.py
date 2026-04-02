@@ -3,7 +3,12 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+from threading import RLock
 from typing import Any
+
+_RULES_CACHE: dict[str, dict[str, Any]] = {}
+_RULES_CACHE_MTIME: dict[str, float] = {}
+_RULES_CACHE_LOCK = RLock()
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -14,12 +19,23 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 
 def load_action_rules(config_path: Path) -> dict[str, Any]:
+    resolved = str(config_path.resolve())
+    try:
+        mtime = config_path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    with _RULES_CACHE_LOCK:
+        if resolved in _RULES_CACHE and _RULES_CACHE_MTIME.get(resolved) == mtime:
+            return _RULES_CACHE[resolved]
     raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise ValueError("action rules config must be a JSON object")
     rules = raw.get("action_rules", [])
     if not isinstance(rules, list):
         raise ValueError("action_rules must be a list")
+    with _RULES_CACHE_LOCK:
+        _RULES_CACHE[resolved] = raw
+        _RULES_CACHE_MTIME[resolved] = mtime
     return raw
 
 

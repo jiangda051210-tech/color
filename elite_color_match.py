@@ -217,6 +217,10 @@ def bgr_to_lab_float(image_bgr: np.ndarray) -> np.ndarray:
     return out
 
 
+# Precomputed CIEDE2000 constants (computed once at import time)
+_C25_7: float = 25.0**7  # = 6103515625.0
+
+
 def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     l1, a1, b1 = lab1[:, 0], lab1[:, 1], lab1[:, 2]
     l2, a2, b2 = lab2[:, 0], lab2[:, 1], lab2[:, 2]
@@ -225,7 +229,8 @@ def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     c2 = np.sqrt(a2**2 + b2**2)
     avg_c = (c1 + c2) / 2.0
 
-    g = 0.5 * (1.0 - np.sqrt((avg_c**7) / (avg_c**7 + 25.0**7 + 1e-12)))
+    avg_c7 = avg_c**7
+    g = 0.5 * (1.0 - np.sqrt(avg_c7 / (avg_c7 + _C25_7 + 1e-12)))
     a1p = (1.0 + g) * a1
     a2p = (1.0 + g) * a2
     c1p = np.sqrt(a1p**2 + b1**2)
@@ -259,7 +264,8 @@ def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     )
 
     delta_theta = 30.0 * np.exp(-(((avg_hp - 275.0) / 25.0) ** 2))
-    rc = 2.0 * np.sqrt((avg_cp**7) / (avg_cp**7 + 25.0**7 + 1e-12))
+    avg_cp7 = avg_cp**7
+    rc = 2.0 * np.sqrt(avg_cp7 / (avg_cp7 + _C25_7 + 1e-12))
     sl = 1.0 + (0.015 * ((avg_l - 50.0) ** 2)) / np.sqrt(20.0 + ((avg_l - 50.0) ** 2))
     sc = 1.0 + 0.045 * avg_cp
     sh = 1.0 + 0.015 * avg_cp * t
