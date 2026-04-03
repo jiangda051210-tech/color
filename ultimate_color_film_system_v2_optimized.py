@@ -147,6 +147,172 @@ class EnvironmentCompensatorV2:
             "day_night_drift_risk": round(shift_drift, 3),
         }
 
+    # ── 户外环境扩展 (v2.6) ──
+
+    LIGHT_SOURCE_PROFILES = {
+        "daylight_direct": {"cct_range": (5500, 6500), "description": "直射日光"},
+        "daylight_overcast": {"cct_range": (6500, 8000), "description": "阴天散射光"},
+        "tungsten": {"cct_range": (2700, 3500), "description": "钨丝灯/白炽灯"},
+        "led_cool": {"cct_range": (4500, 5500), "description": "冷白LED"},
+        "led_warm": {"cct_range": (3000, 4000), "description": "暖白LED"},
+        "mixed": {"cct_range": (3500, 7000), "description": "混合光源"},
+    }
+
+    def detect_lighting_source(self, image_bgr: "np.ndarray") -> dict[str, Any]:
+        """
+        从图像估算主光源类型和色温.
+
+        分析方法:
+          1. R/B/G 通道比值估算色温
+          2. 高光区域光谱分析 (高光最能反映光源特征)
+          3. 亮度分布特征 (日光比人工光动态范围更大)
+        """
+        import cv2
+        import numpy as np
+
+        b = image_bgr[..., 0].astype(np.float64)
+        g = image_bgr[..., 1].astype(np.float64)
+        r = image_bgr[..., 2].astype(np.float64)
+
+        r_mean, g_mean, b_mean = float(r.mean()), float(g.mean()), float(b.mean())
+        rb_ratio = r_mean / max(b_mean, 1e-6)
+
+        # McCamy 简化色温估算
+        estimated_cct = 6500.0 / max(rb_ratio, 0.01)
+        estimated_cct = max(2000.0, min(estimated_cct, 12000.0))
+
+        # 高光区域分析 (亮度 > P90 的像素更能反映光源)
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        bright_mask = gray > np.percentile(gray, 90)
+        if np.count_nonzero(bright_mask) > 100:
+            bright_r = float(r[bright_mask].mean())
+            bright_b = float(b[bright_mask].mean())
+            bright_rb = bright_r / max(bright_b, 1e-6)
+            highlight_cct = 6500.0 / max(bright_rb, 0.01)
+            # 混合: 高光权重 60%, 整体权重 40%
+            estimated_cct = 0.6 * highlight_cct + 0.4 * estimated_cct
+
+        # 判断光源类型
+        source_type = "mixed"
+        confidence = 0.5
+        for src, profile in self.LIGHT_SOURCE_PROFILES.items():
+            lo, hi = profile["cct_range"]
+            if lo <= estimated_cct <= hi:
+                source_type = src
+                # 居中的色温置信度更高
+                mid = (lo + hi) / 2.0
+                span = (hi - lo) / 2.0
+                confidence = 1.0 - abs(estimated_cct - mid) / max(span, 1.0) * 0.3
+                confidence = max(0.4, min(confidence, 0.95))
+                break
+
+        return {
+            "source_type": source_type,
+            "estimated_cct": round(estimated_cct, 0),
+            "confidence": round(confidence, 3),
+            "rb_ratio": round(rb_ratio, 3),
+            "description": self.LIGHT_SOURCE_PROFILES.get(source_type, {}).get("description", "未知"),
+        }
+
+    def compute_outdoor_confidence_penalty(self, env_info: dict[str, Any]) -> dict[str, Any]:
+        """
+        根据户外环境信息计算置信度惩罚因子.
+
+        惩罚规则:
+          - 硬阴影面积 > 15%: penalty 0.10
+          - 光照不均匀 > 50: penalty 0.08
+          - 色温偏离 D65 > 500K: penalty 0.05
+          - 动态范围过大 (>180): penalty 0.05
+          - 累积最大 penalty 0.25
+        """
+        total_penalty = 0.0
+        breakdown: dict[str, float] = {}
+
+        details = env_info.get("details", {})
+
+        # 硬阴影惩罚
+        shadow_ratio = details.get("hard_shadow_ratio", 0.0)
+        if shadow_ratio > 0.15:
+            p = 0.10
+            breakdown["hard_shadow"] = p
+            total_penalty += p
+        elif shadow_ratio > 0.08:
+            p = 0.05
+            breakdown["hard_shadow"] = p
+            total_penalty += p
+
+        # 光照均匀性惩罚 (从 dynamic_range 推断)
+        dr = env_info.get("dynamic_range", 0.0)
+        if dr > 180:
+            p = 0.08
+            breakdown["dynamic_range"] = p
+            total_penalty += p
+        elif dr > 150:
+            p = 0.04
+            breakdown["dynamic_range"] = p
+            total_penalty += p
+
+        # 色温偏离惩罚
+        cct = env_info.get("estimated_cct", 6500)
+        cct_diff = abs(cct - 6500)
+        if cct_diff > 1000:
+            p = 0.08
+            breakdown["cct_deviation"] = p
+            total_penalty += p
+        elif cct_diff > 500:
+            p = 0.05
+            breakdown["cct_deviation"] = p
+            total_penalty += p
+
+        # 累积上限
+        total_penalty = min(total_penalty, 0.25)
+
+        return {
+            "total_penalty": round(total_penalty, 3),
+            "breakdown": breakdown,
+            "adjusted_confidence_hint": f"建议将置信度下调 {total_penalty:.1%}",
+        }
+
+    def suggest_outdoor_capture(self, env_info: dict[str, Any]) -> list[str]:
+        """
+        根据当前环境检测结果, 生成具体的户外拍摄改善建议.
+        """
+        suggestions: list[str] = []
+        details = env_info.get("details", {})
+
+        if env_info.get("hard_shadows_detected", False):
+            consistency = details.get("shadow_direction_consistency", 0)
+            if consistency > 0.5:
+                suggestions.append("检测到强方向性硬阴影 (可能是阳光直射), 请移到建筑阴影下或用遮光板拍摄")
+            else:
+                suggestions.append("检测到多方向阴影, 建议移到均匀散射光环境下拍摄")
+
+        cct = env_info.get("estimated_cct", 6500)
+        if cct > 7500:
+            suggestions.append("色温偏高 ({:.0f}K, 可能是阴天/蓝天), 颜色可能偏蓝, 建议使用灰卡辅助白平衡校准".format(cct))
+        elif cct < 4500:
+            suggestions.append("色温偏低 ({:.0f}K, 可能是傍晚/暖光), 颜色可能偏黄, 建议使用灰卡或在中午拍摄".format(cct))
+
+        dr = env_info.get("dynamic_range", 0)
+        if dr > 180:
+            suggestions.append("动态范围过大 ({:.0f}), 明暗反差极大, 建议用均匀光线或HDR模式拍摄".format(dr))
+
+        shadow_ratio = details.get("hard_shadow_ratio", 0)
+        if shadow_ratio > 0.10:
+            suggestions.append("板面有 {:.0f}% 区域被阴影覆盖, 请确保拍摄者的影子不投射在板面上".format(shadow_ratio * 100))
+
+        if env_info.get("sky_detected", False):
+            suggestions.append("图像中检测到天空, 请调整拍摄角度, 尽量让板材填满画面")
+
+        border_texture = details.get("border_texture_score", 0)
+        if 50 < border_texture < 800:
+            suggestions.append("检测到结构化背景 (如水泥地面), 系统已自动增强前景分离")
+
+        if not suggestions:
+            suggestions.append("户外拍摄条件可接受, 建议尽量保持相同环境连续拍摄以确保一致性")
+
+        return suggestions
+
 
 class SubstrateAnalyzerV2:
     def __init__(self) -> None:

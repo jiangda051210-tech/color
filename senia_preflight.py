@@ -8,6 +8,8 @@ SENIA 图像质量预检 — 在分析前检查照片是否可用
   - 保护膜/湿板警告
   - 闪光灯检测
   - 镜头遮挡检测
+  - 户外环境检测 (v2.6)
+  - 硬阴影检测 (v2.6)
 
 设计原则: 宁可多报警少漏报. 操作员重拍一次只需 5 秒,
 但一个错误的对色判定可能导致整批返工.
@@ -17,6 +19,138 @@ from __future__ import annotations
 from typing import Any
 import cv2
 import numpy as np
+
+
+def detect_outdoor_environment(image_bgr: np.ndarray) -> dict[str, Any]:
+    """
+    检测是否为户外拍摄环境.
+
+    分析维度:
+      1. 色温估算 (R/B比值) — 户外日光偏蓝/中性, 室内钨丝灯偏暖
+      2. 天空区域检测 — 图像上部是否有高亮度+蓝色区域
+      3. 硬阴影检测 — 自然光产生的锐利明暗分界
+      4. 动态范围 — 户外通常比室内灯箱动态范围更大
+      5. 背景纹理 — 水泥/沥青地面的规则纹理模式
+
+    返回:
+      environment_type: "outdoor" | "indoor" | "mixed"
+      confidence: 0.0-1.0
+      details: 各项检测得分与阈值
+    """
+    h, w = image_bgr.shape[:2]
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    outdoor_score = 0.0
+    details: dict[str, Any] = {}
+
+    # ── 1. 色温估算 (基于 R/B 通道比值) ──
+    b_mean = float(image_bgr[..., 0].astype(np.float64).mean())
+    r_mean = float(image_bgr[..., 2].astype(np.float64).mean())
+    rb_ratio = r_mean / max(b_mean, 1e-6)
+    # 日光 D65 约 rb_ratio ~0.95-1.10; 钨丝灯 ~1.3-1.8; LED ~1.0-1.15
+    # 户外阴天偏蓝 ~0.85-0.95
+    estimated_cct = 6500.0  # 默认 D65
+    if rb_ratio > 0.01:
+        # 简化色温估算: McCamy 近似的简化版
+        estimated_cct = 6500.0 / rb_ratio
+    details["estimated_cct"] = round(estimated_cct, 0)
+    details["rb_ratio"] = round(rb_ratio, 3)
+    if estimated_cct > 5000:
+        outdoor_score += 0.20  # 偏日光色温
+
+    # ── 2. 天空区域检测 ──
+    top_strip = image_bgr[:h // 5, :]
+    top_gray = gray[:h // 5, :]
+    top_brightness = float(top_gray.mean())
+    top_b = float(top_strip[..., 0].astype(np.float64).mean())
+    top_r = float(top_strip[..., 2].astype(np.float64).mean())
+    sky_like = top_brightness > 160 and top_b > top_r + 5
+    details["sky_detected"] = sky_like
+    details["top_brightness"] = round(top_brightness, 1)
+    if sky_like:
+        outdoor_score += 0.25
+
+    # ── 3. 硬阴影检测 ──
+    # 硬阴影特征: 亮度梯度突变 (高梯度幅值) 且方向一致
+    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=5)
+    sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=5)
+    grad_mag = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+    # 硬阴影的梯度幅值通常远大于纹理梯度
+    high_grad_threshold = float(np.percentile(grad_mag, 95))
+    hard_shadow_pixels = grad_mag > high_grad_threshold * 0.8
+    # 检测高梯度像素的方向一致性 (硬阴影方向统一)
+    grad_angle = np.arctan2(sobel_y, sobel_x + 1e-6)
+    high_grad_angles = grad_angle[hard_shadow_pixels]
+    if len(high_grad_angles) > 100:
+        # 方向直方图集中度: 用圆形方差衡量
+        sin_sum = float(np.sin(2 * high_grad_angles).mean())
+        cos_sum = float(np.cos(2 * high_grad_angles).mean())
+        direction_consistency = float(np.sqrt(sin_sum ** 2 + cos_sum ** 2))
+        hard_shadow_ratio = float(hard_shadow_pixels.sum()) / max(hard_shadow_pixels.size, 1)
+    else:
+        direction_consistency = 0.0
+        hard_shadow_ratio = 0.0
+    details["hard_shadow_ratio"] = round(hard_shadow_ratio, 4)
+    details["shadow_direction_consistency"] = round(direction_consistency, 3)
+    has_hard_shadows = direction_consistency > 0.3 and hard_shadow_ratio > 0.03
+    details["hard_shadows_detected"] = has_hard_shadows
+    if has_hard_shadows:
+        outdoor_score += 0.25
+
+    # ── 4. 动态范围评估 ──
+    p5 = float(np.percentile(gray, 5))
+    p95 = float(np.percentile(gray, 95))
+    dynamic_range = p95 - p5
+    details["dynamic_range"] = round(dynamic_range, 1)
+    details["brightness_p5"] = round(p5, 1)
+    details["brightness_p95"] = round(p95, 1)
+    if dynamic_range > 150:
+        outdoor_score += 0.15
+    elif dynamic_range > 120:
+        outdoor_score += 0.08
+
+    # ── 5. 背景纹理检测 (水泥/沥青地面) ──
+    # 分析图像四边各 10% 区域的纹理规律性
+    border_h = max(20, h // 10)
+    border_w = max(20, w // 10)
+    border_regions = [
+        gray[:border_h, :],           # 上
+        gray[-border_h:, :],          # 下
+        gray[:, :border_w],            # 左
+        gray[:, -border_w:],           # 右
+    ]
+    texture_scores = []
+    for region in border_regions:
+        if region.size < 400:
+            continue
+        lap_var = float(cv2.Laplacian(region, cv2.CV_32F).var())
+        texture_scores.append(lap_var)
+    avg_border_texture = float(np.mean(texture_scores)) if texture_scores else 0.0
+    details["border_texture_score"] = round(avg_border_texture, 1)
+    # 水泥地面有中等纹理 (比光滑桌面高, 比木纹板低)
+    if 50 < avg_border_texture < 800:
+        outdoor_score += 0.15
+
+    # ── 综合判定 ──
+    outdoor_score = min(outdoor_score, 1.0)
+    if outdoor_score >= 0.45:
+        env_type = "outdoor"
+    elif outdoor_score >= 0.25:
+        env_type = "mixed"
+    else:
+        env_type = "indoor"
+
+    details["outdoor_score"] = round(outdoor_score, 3)
+
+    return {
+        "environment_type": env_type,
+        "confidence": round(outdoor_score, 3),
+        "estimated_cct": details["estimated_cct"],
+        "hard_shadows_detected": has_hard_shadows,
+        "sky_detected": sky_like,
+        "dynamic_range": dynamic_range,
+        "details": details,
+    }
 
 
 def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
@@ -78,6 +212,18 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     if center_bright > 0.1:
         warnings.append("检测到闪光灯高光，请关闭闪光灯")
 
+    # ── 5.5 户外环境检测 ──
+    env_info = detect_outdoor_environment(image_bgr)
+    scores["outdoor_score"] = env_info["confidence"]
+    is_outdoor = env_info["environment_type"] == "outdoor"
+
+    if is_outdoor:
+        warnings.append("检测到户外拍摄环境 (置信度={:.0f}%)，已自动切换户外模式".format(env_info["confidence"] * 100))
+        if env_info["hard_shadows_detected"]:
+            warnings.append("检测到硬阴影，建议移到阴凉处或用遮阳板避免阴影投射到板面")
+        if env_info.get("estimated_cct", 6500) > 7500:
+            warnings.append("色温偏高 (阴天/蓝天)，色彩可能偏蓝，建议使用灰卡辅助校准")
+
     # ── 6. 光照均匀性 ──
     # 四个象限亮度比较
     q1 = float(gray[:h//2, :w//2].mean())
@@ -86,7 +232,9 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     q4 = float(gray[h//2:, w//2:].mean())
     light_range = max(q1, q2, q3, q4) - min(q1, q2, q3, q4)
     scores["lighting_uniformity"] = round(light_range, 1)
-    if light_range > 40:
+    # 户外模式放宽光照均匀性阈值 (40 → 60)
+    uniformity_threshold = 60 if is_outdoor else 40
+    if light_range > uniformity_threshold:
         warnings.append("光照不均匀 (明暗差={:.0f})，建议调整灯光位置或避免窗户侧光".format(light_range))
 
     # ── 7. 图像尺寸检查 ──
@@ -131,6 +279,7 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
         "warnings": warnings,
         "scores": scores,
         "suggestion": _build_suggestion(errors, warnings),
+        "environment": env_info,
     }
 
 

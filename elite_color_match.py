@@ -325,42 +325,139 @@ def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
     return filtered
 
 
-def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray, strength: float = 0.65) -> np.ndarray:
+def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, list[float]]:
+    """
+    户外增强白平衡 — 替代简单的 gray world.
+
+    改进:
+      1. 仅基于板材区域 (mask) 计算增益, 排除背景干扰
+      2. 色温约束: R/B gain 比值限制在 0.8-1.2 (防止极端偏色)
+      3. 白标签锚点: 如果检测到白色标签, 优先用其做白平衡参考
+    """
+    # 先尝试找白色标签作为白平衡锚点
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    white_pixels = (hsv[..., 2] > 200) & (hsv[..., 1] < 40) & mask
+    white_count = int(np.count_nonzero(white_pixels))
+
+    if white_count > 200:
+        # 用白色标签/区域作为锚点
+        anchor = image_bgr[white_pixels].reshape(-1, 3).astype(np.float64)
+        means = anchor.mean(axis=0)
+    else:
+        # 基于板材区域计算 (非整个场景)
+        valid = image_bgr[mask]
+        if valid.size == 0:
+            means = image_bgr.reshape(-1, 3).astype(np.float64).mean(axis=0)
+        else:
+            means = valid.reshape(-1, 3).astype(np.float64).mean(axis=0)
+
+    gray_target = float(np.mean(means))
+    gains = gray_target / np.maximum(means, 1e-6)
+
+    # 色温约束: 限制 R/B gain 比值在 0.8-1.2
+    rb_gain_ratio = gains[2] / max(gains[0], 1e-6)  # R_gain / B_gain
+    if rb_gain_ratio > 1.2:
+        gains[2] = gains[0] * 1.2
+    elif rb_gain_ratio < 0.8:
+        gains[2] = gains[0] * 0.8
+
+    balanced = np.clip(image_bgr.astype(np.float32) * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
+    return balanced, gains.tolist()
+
+
+def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray,
+                             strength: float = 0.65, adaptive: bool = False) -> np.ndarray:
     h, w = image_bgr.shape[:2]
-    sigma = max(8.0, min(h, w) * 0.08)
     lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    l = lab[..., 0]
-    illum = cv2.GaussianBlur(l, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    l_chan = lab[..., 0]
+
+    if adaptive:
+        # 户外模式: 双频分离 — 大sigma去大范围阴影 + 小sigma去局部阴影
+        sigma_large = max(20.0, min(h, w) * 0.15)
+        sigma_small = max(8.0, min(h, w) * 0.04)
+        illum_large = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_large, sigmaY=sigma_large)
+        illum_small = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_small, sigmaY=sigma_small)
+        # 混合: 大频率贡献 70%, 小频率贡献 30%
+        illum = 0.7 * illum_large + 0.3 * illum_small
+        strength = 0.80  # 户外需要更强补偿
+        gain_range = (0.60, 1.40)  # 更宽的增益范围
+    else:
+        sigma = max(8.0, min(h, w) * 0.08)
+        illum = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        gain_range = (0.75, 1.25)
+
     if np.count_nonzero(mask) > 100:
         ref = float(np.median(illum[mask]))
     else:
         ref = float(np.median(illum))
     gain = ref / np.maximum(illum, 1e-3)
-    gain = np.clip(gain, 0.75, 1.25)
+    gain = np.clip(gain, gain_range[0], gain_range[1])
     mix_gain = 1.0 + strength * (gain - 1.0)
-    lab[..., 0] = np.clip(l * mix_gain, 0, 255)
+    lab[..., 0] = np.clip(l_chan * mix_gain, 0, 255)
     out = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
     return out
 
 
-def build_invalid_mask(image_bgr: np.ndarray) -> np.ndarray:
+def build_invalid_mask(image_bgr: np.ndarray, outdoor_mode: bool = False) -> np.ndarray:
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     lab = bgr_to_lab_float(image_bgr)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+    # ── 多尺度文字检测 (细笔+粗笔+大字) ──
+    kernel_s = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    kernel_m = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+    kernel_l = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
+    blackhat_s = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_s)
+    blackhat_m = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_m)
+    blackhat_l = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_l)
 
     dark = gray < np.percentile(gray, 6)
-    text_like = blackhat > np.percentile(blackhat, 90)
+    text_like_s = blackhat_s > np.percentile(blackhat_s, 92)
+    text_like_m = blackhat_m > np.percentile(blackhat_m, 90)
+    text_like_l = blackhat_l > np.percentile(blackhat_l, 90)
+    text_like = text_like_s | text_like_m | text_like_l
+
     highlight = (hsv[..., 2] > 245) & (hsv[..., 1] < 38)
+
+    # ── 彩色笔迹检测 (红/蓝/黑马克笔) ──
+    # 高饱和度小区域 = 彩色笔迹
+    high_sat = hsv[..., 1] > 120
+    # 形态学: 只保留小连通区域 (笔迹而非大面积彩色)
+    high_sat_cleaned = cv2.morphologyEx(high_sat.astype(np.uint8), cv2.MORPH_OPEN,
+                                        np.ones((3, 3), np.uint8))
+    high_sat_cleaned = cv2.morphologyEx(high_sat_cleaned, cv2.MORPH_CLOSE,
+                                        np.ones((5, 5), np.uint8))
+    ink_marks = high_sat_cleaned.astype(bool)
+
+    # ── 白色标签贴纸检测 ──
+    white_label = (hsv[..., 2] > 190) & (hsv[..., 1] < 50) & (gray > 180)
+    white_label = cv2.morphologyEx(white_label.astype(np.uint8), cv2.MORPH_CLOSE,
+                                   np.ones((5, 5), np.uint8))
+    white_label = cv2.morphologyEx(white_label, cv2.MORPH_OPEN,
+                                   np.ones((8, 8), np.uint8))
+    white_label = white_label.astype(bool)
 
     med = np.median(lab.reshape(-1, 3), axis=0)
     mad = np.median(np.abs(lab.reshape(-1, 3) - med), axis=0) + 1e-5
     z = np.abs((lab - med) / mad)
     color_outlier = (z[..., 1] > 7.5) | (z[..., 2] > 7.5)
 
-    invalid = (dark & text_like) | highlight | color_outlier
+    invalid = (dark & text_like) | highlight | color_outlier | ink_marks | white_label
+
+    # ── 户外模式: 硬阴影边界排除 ──
+    if outdoor_mode:
+        sobel_mag = np.sqrt(
+            cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 1, 0, ksize=5) ** 2
+            + cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 0, 1, ksize=5) ** 2
+        )
+        # 硬阴影边界: 高亮度梯度线
+        shadow_edge_threshold = float(np.percentile(sobel_mag, 97))
+        shadow_edges = sobel_mag > shadow_edge_threshold
+        # 膨胀阴影边界两侧各 5px
+        shadow_edges = cv2.dilate(shadow_edges.astype(np.uint8),
+                                  np.ones((11, 11), np.uint8), iterations=1)
+        invalid = invalid | shadow_edges.astype(bool)
+
     invalid = cv2.morphologyEx(invalid.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     invalid = cv2.dilate(invalid, np.ones((3, 3), np.uint8), iterations=1)
     return invalid.astype(bool)
@@ -418,12 +515,19 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
     # 策略2: Otsu 全局阈值 (擅长分离板子和背景, 对真实工厂照片最有效)
     _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
+    # 策略2b: 反向 Otsu (暗板在亮背景上, 如深色板材在水泥地上)
+    _, otsu_rev = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
     # 策略3: 自适应阈值 (擅长局部对比度不均匀)
     adapt = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                   cv2.THRESH_BINARY_INV, 51, 6)
 
-    # 合并三种策略
+    # 策略4: 反向 Canny (反转图像后检测, 增强暗板边缘)
+    edge_canny_inv = cv2.Canny(255 - smooth, 30, 100)
+
+    # 合并所有策略 (含反向策略, 确保暗板也能被检测到)
     combined = cv2.bitwise_or(edge_canny, cv2.bitwise_or(otsu, adapt))
+    combined = cv2.bitwise_or(combined, cv2.bitwise_or(otsu_rev, edge_canny_inv))
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
     combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
 
@@ -456,6 +560,127 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
 
     results.sort(key=lambda c: c.rect_area, reverse=True)
     return results
+
+
+def detect_concrete_background(image_bgr: np.ndarray) -> dict[str, Any]:
+    """
+    检测水泥/沥青地面背景并生成背景掩码.
+
+    利用图像边缘区域 (非板材区域) 的纹理和颜色特征:
+      - 水泥地面: 灰色调, 中等纹理, 低饱和度
+      - 人字形/规则拼接缝: 线性特征, 规则间距
+      - 沥青: 深灰/黑色, 粗糙纹理
+
+    返回:
+      detected: bool
+      background_mask: np.ndarray (True = 背景像素)
+      background_type: "concrete" | "asphalt" | "unknown"
+    """
+    h, w = image_bgr.shape[:2]
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+
+    # 水泥/沥青特征: 低饱和度 + 中等亮度 + 有纹理但不是木纹级别
+    low_sat = hsv[..., 1] < 40  # 低饱和度 (灰色调)
+    mid_val = (hsv[..., 2] > 80) & (hsv[..., 2] < 220)  # 中等亮度
+
+    # 纹理分析: 水泥有中等拉普拉斯响应
+    lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F))
+    mid_texture = (lap > 3) & (lap < 50)
+
+    concrete_like = low_sat & mid_val & mid_texture
+
+    # 用边缘区域验证 (边缘通常是背景)
+    border_mask = np.zeros((h, w), dtype=bool)
+    bh, bw = max(20, h // 8), max(20, w // 8)
+    border_mask[:bh, :] = True
+    border_mask[-bh:, :] = True
+    border_mask[:, :bw] = True
+    border_mask[:, -bw:] = True
+
+    border_concrete_ratio = float(concrete_like[border_mask].mean()) if border_mask.any() else 0.0
+
+    detected = border_concrete_ratio > 0.25
+    bg_type = "unknown"
+    if detected:
+        border_brightness = float(gray[border_mask].mean())
+        bg_type = "concrete" if border_brightness > 100 else "asphalt"
+
+    # 生成完整背景掩码: 结合颜色+纹理+空间连通性
+    bg_mask = concrete_like.astype(np.uint8)
+    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
+    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
+
+    return {
+        "detected": detected,
+        "background_mask": bg_mask.astype(bool),
+        "background_type": bg_type,
+        "border_concrete_ratio": round(border_concrete_ratio, 3),
+    }
+
+
+def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, int],
+                      image_bgr: np.ndarray | None = None) -> list[dict[str, Any]]:
+    """
+    检测图像中的所有板材区域 (不只是最大的一个).
+
+    支持场景:
+      - 单块大板 + 小标样 (传统模式)
+      - 多块板材并排摆放 (一致性检查)
+      - 大小混合 (大货 + 多个小标样)
+
+    返回 list[dict]:
+      每个板材包含 quad, area, center, rectangularity, role (board/sample/plank)
+    """
+    h, w = image_shape[:2]
+    image_area = float(h * w)
+
+    boards: list[dict[str, Any]] = []
+
+    for c in cands:
+        ratio = c.rect_area / image_area
+        # 扩大检测范围: 从 0.14 降低到 0.02, 以检测小板和远距离板材
+        if ratio < 0.02 or ratio > 0.95:
+            continue
+        if c.rectangularity < 0.35:
+            continue
+
+        # 角色推断
+        if ratio > 0.30:
+            role = "board"      # 大货
+        elif ratio > 0.10:
+            role = "plank"      # 单独长条板
+        else:
+            role = "sample"     # 小标样
+
+        board_info: dict[str, Any] = {
+            "quad": c.quad,
+            "area": c.rect_area,
+            "area_ratio": round(ratio, 4),
+            "center": c.center,
+            "rectangularity": round(c.rectangularity, 3),
+            "role": role,
+        }
+
+        # 提取平均颜色 (如果有图像)
+        if image_bgr is not None:
+            mask = np.zeros((h, w), dtype=np.uint8)
+            pts = c.quad.astype(np.int32).reshape(-1, 1, 2)
+            cv2.fillPoly(mask, [pts], 255)
+            valid = image_bgr[mask == 255]
+            if len(valid) > 50:
+                lab = cv2.cvtColor(valid.reshape(1, -1, 3), cv2.COLOR_BGR2LAB).astype(np.float32)
+                lab[..., 0] *= (100.0 / 255.0)
+                lab[..., 1] -= 128.0
+                lab[..., 2] -= 128.0
+                mean_lab = lab.reshape(-1, 3).mean(axis=0)
+                board_info["mean_lab"] = {"L": round(float(mean_lab[0]), 2),
+                                          "a": round(float(mean_lab[1]), 2),
+                                          "b": round(float(mean_lab[2]), 2)}
+
+        boards.append(board_info)
+
+    return boards
 
 
 def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> RectCandidate | None:
@@ -569,9 +794,15 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
 
 
 def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, int, int],
-                            image_bgr: np.ndarray | None = None) -> tuple[RectCandidate | None, RectCandidate | None, dict[str, Any]]:
+                            image_bgr: np.ndarray | None = None,
+                            multi_board: bool = False) -> tuple[RectCandidate | None, RectCandidate | None, dict[str, Any]]:
     h, w = image_shape[:2]
     image_area = float(h * w)
+
+    # 多板材模式: 返回所有板材信息在 diag 中
+    all_boards_info: list[dict[str, Any]] = []
+    if multi_board and image_bgr is not None:
+        all_boards_info = detect_all_boards(cands, image_shape, image_bgr)
 
     board = None
     for c in cands:
@@ -612,7 +843,7 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
     if sample is None and board is not None and image_bgr is not None:
         sample = _find_sample_inside_board(image_bgr, board.quad)
 
-    diag = {
+    diag: dict[str, Any] = {
         "candidates": len(cands),
         "board_area_ratio": float(board.rect_area / image_area) if board is not None else 0.0,
         "board_rectangularity": float(board.rectangularity) if board is not None else 0.0,
@@ -620,6 +851,11 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
         "sample_rectangularity": float(sample.rectangularity) if sample is not None else 0.0,
         "sample_detection_method": "secondary" if (sample is not None and id(sample) not in {id(c) for c in cands}) else "primary",
     }
+    if multi_board and all_boards_info:
+        diag["multi_board"] = {
+            "count": len(all_boards_info),
+            "boards": [{k: v for k, v in b.items() if k != "quad"} for b in all_boards_info],
+        }
     return board, sample, diag
 
 
