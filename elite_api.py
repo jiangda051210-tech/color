@@ -90,6 +90,11 @@ from senia_next_gen import (
     cam16_forward, cam16_delta, metamerism_risk,
     compute_surface_fingerprint, delta_e_to_cost, batch_consistency_index,
 )
+from senia_innovations_v2 import (
+    DriftEarlyWarning, reverse_engineer_color, ColorSearchEngine,
+    CustomerColorProfile, diagnose_machine_from_drift,
+    seasonal_compensation, anisotropy_analysis, generate_ar_preview_data,
+)
 from senia_capture_station import CAPTURE_STATION_BOM, BUILD_STEPS, IPHONE_CAMERA_SETTINGS
 from senia_colorchecker import calibrate_from_photo
 from senia_edge_sdk import analyze_offline as edge_analyze_offline
@@ -201,6 +206,9 @@ SENIA_ANALYZE_SEMAPHORE = AsyncSemaphore(3)
 PRODUCTION_PREDICTOR = ProductionPredictor(store_path=DEFAULT_OUTPUT_ROOT / "senia_predictor.json")
 DEVICE_FINGERPRINT = DeviceFingerprint(store_path=DEFAULT_OUTPUT_ROOT / "senia_device_fp.json")
 KNOWLEDGE_ENGINE = KnowledgeEngine(store_path=DEFAULT_OUTPUT_ROOT / "senia_knowledge.json")
+DRIFT_WARNING = DriftEarlyWarning()
+COLOR_SEARCH = ColorSearchEngine()
+CUSTOMER_PROFILES = CustomerColorProfile()
 WEB_CRAWLER = WebCrawler(cache_dir=DEFAULT_OUTPUT_ROOT / "crawler_cache")
 AUTO_UPGRADER = AutoModelUpgrader(
     knowledge=KNOWLEDGE_ENGINE, crawler=WEB_CRAWLER,
@@ -7362,6 +7370,88 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
 
 
 # ── 管理 API ──────────────────────────────────────────
+
+# ── V2 创新功能 ──────────────────────────────────────────
+
+@app.post("/v1/senia/drift-warning/record")
+def senia_drift_record(line_id: str = Form(...), dE: float = Form(...)) -> dict[str, Any]:
+    """记录色差数据点, 用于趋势预警."""
+    DRIFT_WARNING.record(line_id, dE)
+    return {"ok": True}
+
+
+@app.get("/v1/senia/drift-warning/predict")
+def senia_drift_predict(line_id: str, threshold: float = 2.5) -> dict[str, Any]:
+    """色差趋势预警: 预测几小时后是否超标."""
+    return DRIFT_WARNING.predict(line_id, threshold)
+
+
+@app.post("/v1/senia/color-search/index")
+def senia_color_search_index(
+    product_code: str = Form(...), L: float = Form(...),
+    a: float = Form(...), b: float = Form(...), name: str = Form(""),
+) -> dict[str, Any]:
+    """索引一个产品到色彩搜索引擎."""
+    COLOR_SEARCH.index(product_code, (L, a, b), name)
+    return {"ok": True, "total_indexed": COLOR_SEARCH.count()}
+
+
+@app.get("/v1/senia/color-search/find")
+def senia_color_search_find(
+    L: float, a: float, b: float, top_k: int = 5,
+) -> dict[str, Any]:
+    """色彩搜索: 找和目标颜色最接近的产品."""
+    return {"results": COLOR_SEARCH.search((L, a, b), min(top_k, 20))}
+
+
+@app.post("/v1/senia/customer-profile/record")
+def senia_customer_record(
+    customer_id: str = Form(...), dL: float = Form(...),
+    da: float = Form(...), db: float = Form(...), accepted: bool = Form(...),
+) -> dict[str, Any]:
+    """记录客户接受/退货决定, 用于学习客户偏好."""
+    CUSTOMER_PROFILES.record_decision(customer_id, dL, da, db, accepted)
+    return {"ok": True}
+
+
+@app.get("/v1/senia/customer-profile/sensitivity")
+def senia_customer_sensitivity(customer_id: str) -> dict[str, Any]:
+    """分析客户色彩敏感度: 对哪个方向最挑剔?"""
+    return CUSTOMER_PROFILES.get_sensitivity(customer_id)
+
+
+@app.get("/v1/senia/machine-diagnosis")
+def senia_machine_diagnosis(
+    slope_dL: float = 0, slope_da: float = 0, slope_db: float = 0,
+) -> dict[str, Any]:
+    """从色差漂移诊断印刷机状态."""
+    return diagnose_machine_from_drift(slope_dL, slope_da, slope_db)
+
+
+@app.get("/v1/senia/seasonal-compensation")
+def senia_seasonal(
+    month: int = 6, base_dE: float = 1.5,
+    humidity: float | None = None, temperature: float | None = None,
+) -> dict[str, Any]:
+    """季节性色差补偿建议."""
+    return seasonal_compensation(month, base_dE, humidity, temperature)
+
+
+@app.get("/v1/senia/anisotropy")
+def senia_anisotropy(
+    dE_0deg: float = 1.5, dE_45deg: float | None = None, dE_90deg: float | None = None,
+) -> dict[str, Any]:
+    """多角度色差分析 (纹理各向异性)."""
+    return anisotropy_analysis(dE_0deg, dE_45deg, dE_90deg)
+
+
+@app.get("/v1/senia/ar-preview")
+def senia_ar_preview(
+    L: float = 55, a: float = 0, b: float = 8, illuminant: str = "A",
+) -> dict[str, Any]:
+    """AR预览: 生成指定光源下的地板颜色数据 (给前端WebGL渲染)."""
+    return generate_ar_preview_data((L, a, b), illuminant)
+
 
 # ── Next-Gen 创新功能 ────────────────────────────────────
 
