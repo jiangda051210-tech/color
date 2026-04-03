@@ -59,10 +59,12 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     # ── 3. 过曝检测 (像素饱和) ──
     overexposed_ratio = float(np.mean(gray > 250))
     scores["overexposed_ratio"] = round(overexposed_ratio, 4)
-    if overexposed_ratio > 0.15:
-        errors.append("大面积过曝 ({:.0f}%)，可能是闪光灯或强光，请关闭闪光灯重拍".format(overexposed_ratio * 100))
+    if overexposed_ratio > 0.40:
+        errors.append("严重过曝 ({:.0f}%)，可能是闪光灯或纯白图片，请重拍".format(overexposed_ratio * 100))
+    elif overexposed_ratio > 0.15:
+        warnings.append("部分过曝 ({:.0f}%)，白色背景区域会被自动排除".format(overexposed_ratio * 100))
     elif overexposed_ratio > 0.05:
-        warnings.append("部分区域过曝 ({:.0f}%)，结果可能受影响".format(overexposed_ratio * 100))
+        warnings.append("轻微过曝 ({:.0f}%)".format(overexposed_ratio * 100))
 
     # ── 4. 欠曝检测 ──
     underexposed_ratio = float(np.mean(gray < 15))
