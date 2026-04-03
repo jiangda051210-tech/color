@@ -316,7 +316,7 @@ def analyze_photo(
 
     sample_warp, sample_M, sample_rect = warp_quad(image_bgr, sample_quad)
 
-    # ── 4. 构建遮罩 (去除边框 + 手写/贴纸/反光) ──
+    # ── 4. 构建遮罩 ──
     board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
     board_invalid = build_invalid_mask(board_warp)
     board_mask &= ~board_invalid
@@ -353,15 +353,30 @@ def analyze_photo(
         board_wb = apply_shading_correction(board_wb, board_mask)
         sample_wb = apply_shading_correction(sample_wb, sample_mask)
 
-    # ── 6. 纹理抑制 (木纹膜关键: 对底色不对纹理) ──
-    board_tone = texture_suppress(board_wb)
-    board_lab = bgr_to_lab_float(board_tone)
-    board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
+    # ── 6. 纹理抑制 (自适应: 根据纹理强度自动调节) ──
+    try:
+        from senia_advanced_color import adaptive_texture_suppress, weighted_robust_mean
+        board_tone = adaptive_texture_suppress(board_wb, board_mask.astype(np.uint8) if isinstance(board_mask, np.ndarray) else None)
+        board_lab = bgr_to_lab_float(board_tone)
+        board_mean, _conf = weighted_robust_mean(board_lab, board_mask.astype(np.uint8) if board_mask.dtype == bool else board_mask)
+        board_std = np.zeros(3)
+        board_used = int(np.count_nonzero(board_mask))
+    except Exception:
+        board_tone = texture_suppress(board_wb)
+        board_lab = bgr_to_lab_float(board_tone)
+        board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
 
     # sample is guaranteed present (validated above)
-    sample_tone = texture_suppress(sample_wb)
-    sample_lab = bgr_to_lab_float(sample_tone)
-    sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
+    try:
+        sample_tone = adaptive_texture_suppress(sample_wb, sample_mask.astype(np.uint8) if isinstance(sample_mask, np.ndarray) else None)
+        sample_lab = bgr_to_lab_float(sample_tone)
+        sample_mean, _sconf = weighted_robust_mean(sample_lab, sample_mask.astype(np.uint8) if sample_mask.dtype == bool else sample_mask)
+        sample_std = np.zeros(3)
+        sample_used = int(np.count_nonzero(sample_mask))
+    except Exception:
+        sample_tone = texture_suppress(sample_wb)
+        sample_lab = bgr_to_lab_float(sample_tone)
+        sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
 
     # ── 7. 材质自动识别 ──
     inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
