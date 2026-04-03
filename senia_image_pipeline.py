@@ -430,25 +430,43 @@ def analyze_photo(
     if not all_cells:
         raise RuntimeError("可用采样网格为空, 请检查图像质量")
 
-    # 第二遍: 区分大货格子 vs 标样格子 (标样=异常值)
+    # 第二遍: 区分大货格子 vs 标样格子
+    # 标样特征: ΔE 偏大但 L 值和大货相近 (差 < 8)
+    # 手写字/背景特征: ΔE 偏大且 L 值和大货差很远 (差 > 8)
     all_de_self = [c["de_self"] for c in all_cells]
+    all_L = [float(c["cell_mean"][0]) for c in all_cells]
     import statistics as _stats
+    median_L = _stats.median(all_L) if all_L else 50
     de_median = _stats.median(all_de_self) if all_de_self else 0
     de_mad = _stats.median([abs(d - de_median) for d in all_de_self]) if len(all_de_self) > 2 else 1
-    # 标样阈值: 中位数 + 3 * MAD (稳健异常值检测)
     outlier_threshold = de_median + max(3.0 * de_mad, 1.5)
-    board_cells = [c for c in all_cells if c["de_self"] <= outlier_threshold]
-    sample_cells = [c for c in all_cells if c["de_self"] > outlier_threshold]
 
-    # 如果有标样格子, 用标样均值作为参考; 否则用 sample_mean
-    if sample_cells and len(sample_cells) >= 2:
-        # 标样均值 = 异常格子的平均 Lab
-        sample_lab_arr = np.mean([c["cell_mean"] for c in sample_cells], axis=0)
-        ref_vec = sample_lab_arr.reshape(1, 3)
+    # 标样 = ΔE 高但 L 接近大货; 噪声 = ΔE 高且 L 远离大货
+    sample_cells = []
+    noise_cells = []
+    board_cells = []
+    for c in all_cells:
+        if c["de_self"] > outlier_threshold:
+            L_diff = abs(float(c["cell_mean"][0]) - median_L)
+            if L_diff < 8:
+                sample_cells.append(c)  # L 接近 → 可能是标样
+            else:
+                noise_cells.append(c)   # L 远离 → 手写字/背景
+        else:
+            board_cells.append(c)
+
+    # 参考值选择: 标样格子均值 → 大货均值 (内部一致性)
+    if sample_cells and len(sample_cells) >= 1:
+        ref_lab = np.mean([c["cell_mean"] for c in sample_cells], axis=0)
+        ref_vec = ref_lab.reshape(1, 3)
+    elif board_cells:
+        # 无标样: 用大货格子均值作为参考 → 测量内部一致性
+        ref_lab = np.mean([c["cell_mean"] for c in board_cells], axis=0)
+        ref_vec = ref_lab.reshape(1, 3)
     else:
         ref_vec = sample_mean.reshape(1, 3)
 
-    # 第三遍: 大货格子 vs 标样参考值 → 真实色差
+    # 第三遍: 大货格子 vs 参考值 → 色差
     de_values: list[float] = []
     for cell_info in board_cells:
         de = float(ciede2000_np(cell_info["cell_mean"].reshape(1, 3), ref_vec)[0])
