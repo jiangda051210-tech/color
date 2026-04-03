@@ -90,6 +90,10 @@ from senia_next_gen import (
     cam16_forward, cam16_delta, metamerism_risk,
     compute_surface_fingerprint, delta_e_to_cost, batch_consistency_index,
 )
+from senia_synergy import (
+    predictive_maintenance, customer_specific_risk,
+    one_click_color_match, batch_stability_monitor, smart_decision,
+)
 from senia_innovations_v2 import (
     DriftEarlyWarning, reverse_engineer_color, ColorSearchEngine,
     CustomerColorProfile, diagnose_machine_from_drift,
@@ -7370,6 +7374,51 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
 
 
 # ── 管理 API ──────────────────────────────────────────
+
+# ── 智能决策 (能力叠加) ──────────────────────────────────
+
+@app.post("/v1/senia/smart-decision")
+def senia_smart_decision(
+    dE: float = Form(...), dL: float = Form(0), da: float = Form(0), db: float = Form(0),
+    profile: str = Form("wood"), customer_id: str = Form(""),
+    illuminant: str = Form("D65"), batch_sqm: float = Form(500),
+) -> dict[str, Any]:
+    """
+    智能决策中心: 综合色差+客户+光源+季节+批次, 给出最终建议.
+    所有能力联合叠加, 比任何单一判断都更准确.
+    """
+    sensitivity = None
+    if customer_id:
+        sensitivity = CUSTOMER_PROFILES.get_sensitivity(customer_id)
+        if not sensitivity.get("analyzed"):
+            sensitivity = None
+    return smart_decision(dE, dL, da, db, profile, customer_id, sensitivity, illuminant, batch_sqm)
+
+
+@app.post("/v1/senia/predictive-maintenance")
+def senia_predictive_maintenance(
+    drift_json: str = Form(...),
+    threshold: float = Form(2.5),
+) -> dict[str, Any]:
+    """
+    预测性维护: 色差趋势+设备诊断 = 提前告诉你哪个部件要出问题.
+    """
+    try:
+        data = json.loads(drift_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return predictive_maintenance(data, threshold)
+
+
+@app.post("/v1/senia/one-click-match")
+def senia_one_click_match(
+    L: float = Form(...), a: float = Form(...), b: float = Form(...),
+) -> dict[str, Any]:
+    """
+    一键配色: 搜索+逆向+预测, 从目标颜色到推荐配方.
+    """
+    return one_click_color_match((L, a, b), COLOR_SEARCH, RECIPE_TWIN)
+
 
 # ── V2 创新功能 ──────────────────────────────────────────
 
