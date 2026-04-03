@@ -213,61 +213,126 @@ def generate_color_match_report(
         cands, image_bgr.shape, image_bgr, multi_board=True,
     )
 
-    # ── 2. 识别大货和标样 ──
-    # 策略: 最大的是大货, 在大货上面或旁边最小的是标样
+    # ── 2. 智能识别大货和标样 ──
+    # 关键原则:
+    #   a. 标样和大货颜色必须相近 (dE < 15), 否则不是同一个色号
+    #   b. 标样通常比大货小得多 (面积 < 大货的 50%)
+    #   c. 如果所有板材颜色相近且大小相似 → 多板材一致性检查模式
+    #   d. 最大的候选不一定是大货 → 用"多数派颜色"确定真正的产品板材
     boards_sorted = sorted(all_boards, key=lambda b: b["area_ratio"], reverse=True)
-    main_board = boards_sorted[0] if boards_sorted else None
-    sample_board = None
-    planks = []
+    boards_with_lab = [b for b in boards_sorted if b.get("mean_lab")]
 
-    for b in boards_sorted:
-        if b is main_board:
-            continue
-        if b["area_ratio"] < main_board["area_ratio"] * 0.3 and sample_board is None:
-            sample_board = b  # 第一个比大货小很多的 = 标样
+    # Step 1: 用"多数派"方法找产品板材群
+    # 两两计算色差, 找最大的颜色聚类
+    main_board = None
+    sample_board = None
+    similar_planks = []
+    other_objects = []
+    layout = "unknown"
+
+    if len(boards_with_lab) >= 2:
+        # 为每块板计算"与其他板颜色相近的数量"
+        for b in boards_with_lab:
+            close_count = 0
+            for other in boards_with_lab:
+                if other is b:
+                    continue
+                de = _ciede2000_detail(b["mean_lab"], other["mean_lab"])["dE00"]
+                if de < 15.0:
+                    close_count += 1
+            b["_close_count"] = close_count
+
+        # 主板 = 颜色朋友最多的板 (多数派代表), 同票数时选最大的
+        boards_by_popularity = sorted(boards_with_lab,
+                                      key=lambda b: (b["_close_count"], b["area_ratio"]),
+                                      reverse=True)
+        main_board = boards_by_popularity[0]
+
+        # 重新分组: 与主板颜色相近的 vs 不相近的
+        for b in boards_with_lab:
+            if b is main_board:
+                continue
+            de = _ciede2000_detail(main_board["mean_lab"], b["mean_lab"])
+            b["_de_to_main"] = de["dE00"]
+            if de["dE00"] < 15.0:
+                similar_planks.append(b)
+            else:
+                other_objects.append(b)
+
+    elif len(boards_with_lab) == 1:
+        main_board = boards_with_lab[0]
+
+    # Step 2: 判断布局模式
+    if main_board:
+        if len(similar_planks) >= 3:
+            layout = "multi_plank"
+            small_similar = [b for b in similar_planks
+                             if b["area_ratio"] < main_board["area_ratio"] * 0.5]
+            if small_similar:
+                sample_board = min(small_similar, key=lambda b: b["_de_to_main"])
+        elif len(similar_planks) >= 1:
+            small_similar = [b for b in similar_planks
+                             if b["area_ratio"] < main_board["area_ratio"] * 0.5]
+            if small_similar:
+                layout = "board_and_sample"
+                sample_board = min(small_similar, key=lambda b: b["_de_to_main"])
+            else:
+                layout = "multi_plank"
         else:
-            planks.append(b)
+            layout = "single_board"
+
+    # 一致性分析只用相似板材 (排除背景/柱体/标签等杂物)
+    consistency_boards = [main_board] + similar_planks if main_board else []
 
     # ── 3. 测量色差 ──
     color_match = None
-    if main_board and main_board.get("mean_lab") and sample_board and sample_board.get("mean_lab"):
-        de_detail = _ciede2000_detail(main_board["mean_lab"], sample_board["mean_lab"])
+    if main_board and sample_board and sample_board.get("mean_lab"):
+        de_detail = _ciede2000_detail(sample_board["mean_lab"], main_board["mean_lab"])
         color_match = {
             "delta_e": de_detail,
             "directions": _color_direction(de_detail),
             "judgment": _judge_result(de_detail["dE00"], profile),
             "adjust_suggestions": _adjust_suggestion(de_detail),
         }
-    elif main_board and main_board.get("mean_lab") and len(planks) > 0:
-        # 没找到明确标样, 用最大板和第二大板对比
-        second = planks[0] if planks else boards_sorted[1] if len(boards_sorted) > 1 else None
-        if second and second.get("mean_lab"):
-            de_detail = _ciede2000_detail(main_board["mean_lab"], second["mean_lab"])
+    elif layout == "multi_plank" and len(similar_planks) >= 1:
+        # 多板材模式: 取板间最大色差作为判定依据
+        worst_de = 0
+        worst_pair = None
+        for b in similar_planks:
+            de_val = b.get("_de_to_main", 0)
+            if de_val > worst_de:
+                worst_de = de_val
+                worst_pair = b
+        if worst_pair:
+            de_detail = _ciede2000_detail(main_board["mean_lab"], worst_pair["mean_lab"])
             color_match = {
                 "delta_e": de_detail,
                 "directions": _color_direction(de_detail),
                 "judgment": _judge_result(de_detail["dE00"], profile),
                 "adjust_suggestions": _adjust_suggestion(de_detail),
-                "note": "未找到明确标样，使用最大两块板材对比",
+                "note": f"多板材模式: {len(similar_planks)+1}块相似板中最大色差",
             }
 
-    # ── 4. 板面一致性 (多块板之间) ──
+    # ── 4. 板面一致性 (只计算颜色相近的板材) ──
     consistency = None
-    boards_with_lab = [b for b in all_boards if b.get("mean_lab")]
-    if len(boards_with_lab) >= 2:
+    if len(consistency_boards) >= 2:
         pairs = []
-        for i in range(len(boards_with_lab)):
-            for j in range(i + 1, len(boards_with_lab)):
-                de = _ciede2000_detail(boards_with_lab[i]["mean_lab"],
-                                       boards_with_lab[j]["mean_lab"])
-                pairs.append(de["dE00"])
-        consistency = {
-            "板材数量": len(boards_with_lab),
-            "板间最小色差": round(min(pairs), 2),
-            "板间最大色差": round(max(pairs), 2),
-            "板间平均色差": round(float(np.mean(pairs)), 2),
-            "一致性评价": "良好" if max(pairs) < 2.0 else "一般" if max(pairs) < 4.0 else "较差",
-        }
+        for i in range(len(consistency_boards)):
+            for j in range(i + 1, len(consistency_boards)):
+                if consistency_boards[i].get("mean_lab") and consistency_boards[j].get("mean_lab"):
+                    de = _ciede2000_detail(consistency_boards[i]["mean_lab"],
+                                           consistency_boards[j]["mean_lab"])
+                    pairs.append(de["dE00"])
+        if pairs:
+            consistency = {
+                "板材数量": len(consistency_boards),
+                "板间最小色差": round(min(pairs), 2),
+                "板间最大色差": round(max(pairs), 2),
+                "板间平均色差": round(float(np.mean(pairs)), 2),
+                "一致性评价": "良好" if max(pairs) < 2.0 else "一般" if max(pairs) < 4.0 else "较差",
+            }
+            if other_objects:
+                consistency["已排除非产品区域"] = len(other_objects)
 
     # ── 5. 环境评估 ──
     env_comp = EnvironmentCompensatorV2()
@@ -299,8 +364,17 @@ def generate_color_match_report(
     }
 
     # 检测结果
+    layout_names = {
+        "board_and_sample": "大货+标样",
+        "multi_plank": "多板材一致性",
+        "single_board": "单板",
+        "unknown": "未识别",
+    }
     report["检测结果"] = {
         "检测到板材数": len(all_boards),
+        "识别为产品的板材": len(consistency_boards),
+        "排除的非产品区域": len(other_objects),
+        "布局模式": layout_names.get(layout, layout),
         "大货": {
             "检测到": main_board is not None,
             "面积占比": f"{main_board['area_ratio']*100:.1f}%" if main_board else "N/A",
@@ -310,6 +384,7 @@ def generate_color_match_report(
             "检测到": sample_board is not None,
             "面积占比": f"{sample_board['area_ratio']*100:.1f}%" if sample_board else "N/A",
             "LAB": sample_board.get("mean_lab") if sample_board else None,
+            "与大货色差": f"{sample_board.get('_de_to_main', 0):.2f}" if sample_board else "N/A",
         },
     }
 
