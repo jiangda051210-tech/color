@@ -492,54 +492,16 @@ def grabcut_foreground_mask(image_bgr: np.ndarray) -> np.ndarray:
         pass
     return np.ones((h, w), dtype=bool)
 
-def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
-    """
-    检测图像中的矩形区域 (大货/标样).
-
-    针对木纹/石纹地板膜优化:
-      1. 强力双边滤波消除纹理细节, 只保留板子与背景的边界
-      2. 多尺度边缘检测 (粗+细两轮)
-      3. 大核形态学闭合, 桥接因纹理断开的边缘
-      4. 面积+矩形度双重过滤
-    """
-    h, w = image_bgr.shape[:2]
-    image_area = h * w
-
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # 多策略边缘检测 (确保在各种背景下都能找到板子边界)
-    # 策略1: Canny 边缘 (擅长高对比度边界)
-    edge_canny = cv2.Canny(smooth, 30, 100)
-
-    # 策略2: Otsu 全局阈值 (擅长分离板子和背景, 对真实工厂照片最有效)
-    _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    # 策略2b: 反向 Otsu (暗板在亮背景上, 如深色板材在水泥地上)
-    _, otsu_rev = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # 策略3: 自适应阈值 (擅长局部对比度不均匀)
-    adapt = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY_INV, 51, 6)
-
-    # 策略4: 反向 Canny (反转图像后检测, 增强暗板边缘)
-    edge_canny_inv = cv2.Canny(255 - smooth, 30, 100)
-
-    # 合并所有策略 (含反向策略, 确保暗板也能被检测到)
-    combined = cv2.bitwise_or(edge_canny, cv2.bitwise_or(otsu, adapt))
-    combined = cv2.bitwise_or(combined, cv2.bitwise_or(otsu_rev, edge_canny_inv))
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
-
-    # RETR_TREE: 检测嵌套轮廓 (标样在大货上面 → 子轮廓)
-    contours, hierarchy = cv2.findContours(combined, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+def _extract_rect_candidates_from_mask(binary: np.ndarray, image_area: int,
+                                       min_area_ratio: float = 0.003,
+                                       min_rect: float = 0.35) -> list[RectCandidate]:
+    """从单个二值化掩码提取矩形候选."""
+    contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     results: list[RectCandidate] = []
-
-    for idx, cnt in enumerate(contours):
+    for cnt in contours:
         area = float(cv2.contourArea(cnt))
-        if area < image_area * 0.003:
+        if area < image_area * min_area_ratio:
             continue
-
         rect = cv2.minAreaRect(cnt)
         rw, rh = rect[1]
         if rw < 25 or rh < 25:
@@ -547,29 +509,181 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
         rect_area = float(rw * rh)
         if rect_area <= 0:
             continue
-
         rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
-        # 地板膜矩形度要求: 降低到 0.45 (大板子可能有轻微弯曲)
-        if rectangularity < 0.40:
+        if rectangularity < min_rect:
             continue
-
         box = cv2.boxPoints(rect).astype(np.float32)
         center = (float(rect[0][0]), float(rect[0][1]))
         results.append(RectCandidate(quad=box, area=area, rect_area=rect_area,
                                      rectangularity=rectangularity, center=center))
-
-    results.sort(key=lambda c: c.rect_area, reverse=True)
     return results
+
+
+def _deduplicate_candidates(cands: list[RectCandidate], iou_threshold: float = 0.5) -> list[RectCandidate]:
+    """去除重叠度过高的重复候选, 保留矩形度最高的."""
+    if not cands:
+        return []
+    # 按面积降序排列
+    cands = sorted(cands, key=lambda c: c.rect_area, reverse=True)
+    keep: list[RectCandidate] = []
+    for c in cands:
+        is_dup = False
+        for k in keep:
+            # 简单重叠判断: 中心距离 < 两者短边的一半
+            dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) ** 2)
+            min_dim = min(np.sqrt(c.rect_area), np.sqrt(k.rect_area)) * 0.5
+            # 面积相似 + 位置接近 = 重复
+            area_ratio = min(c.rect_area, k.rect_area) / max(c.rect_area, k.rect_area)
+            if dist < min_dim and area_ratio > 0.5:
+                is_dup = True
+                break
+        if not is_dup:
+            keep.append(c)
+    return keep
+
+
+def _lab_color_segmentation(image_bgr: np.ndarray, n_clusters: int = 3) -> list[RectCandidate]:
+    """
+    基于 LAB 颜色空间的 K-Means 分割 — 用于轮廓法失效时的后备.
+
+    对户外水泥地+板材场景特别有效:
+      板材和水泥地面在颜色空间中差异明显.
+    """
+    h, w = image_bgr.shape[:2]
+    image_area = h * w
+
+    # 缩小以加速 K-Means
+    scale = min(1.0, 600.0 / max(h, w))
+    if scale < 1.0:
+        small = cv2.resize(image_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    else:
+        small = image_bgr
+    sh, sw = small.shape[:2]
+
+    # 双边滤波去纹理后再分割
+    filtered = cv2.bilateralFilter(small, d=9, sigmaColor=50, sigmaSpace=15)
+    lab = cv2.cvtColor(filtered, cv2.COLOR_BGR2LAB).astype(np.float32)
+    pixels = lab.reshape(-1, 3)
+
+    # K-Means 聚类
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    _, labels, centers = cv2.kmeans(pixels, n_clusters, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
+    labels = labels.reshape(sh, sw)
+
+    results: list[RectCandidate] = []
+
+    for cluster_id in range(n_clusters):
+        cluster_mask = (labels == cluster_id).astype(np.uint8) * 255
+        # 形态学清理
+        cluster_mask = cv2.morphologyEx(cluster_mask, cv2.MORPH_CLOSE,
+                                        np.ones((7, 7), np.uint8), iterations=2)
+        cluster_mask = cv2.morphologyEx(cluster_mask, cv2.MORPH_OPEN,
+                                        np.ones((5, 5), np.uint8), iterations=2)
+
+        # 找连通区域
+        contours, _ = cv2.findContours(cluster_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            # 最小面积: 缩放后图像的 2%
+            if area < sh * sw * 0.02:
+                continue
+            rect = cv2.minAreaRect(cnt)
+            rw, rh = rect[1]
+            if rw < 15 or rh < 15:
+                continue
+            rect_area = float(rw * rh)
+            if rect_area <= 0:
+                continue
+            rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
+            if rectangularity < 0.35:
+                continue
+
+            # 映射回原始尺寸
+            box = cv2.boxPoints(rect).astype(np.float32) / scale
+            orig_rect_area = rect_area / (scale * scale)
+            orig_area = area / (scale * scale)
+            center = (float(rect[0][0]) / scale, float(rect[0][1]) / scale)
+
+            results.append(RectCandidate(
+                quad=box, area=orig_area, rect_area=orig_rect_area,
+                rectangularity=rectangularity, center=center,
+            ))
+
+    return results
+
+
+def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
+    """
+    检测图像中的矩形区域 (大货/标样).
+
+    v2.6 多策略独立检测架构:
+      不再把所有策略 OR 到一起 (会导致 100% 前景),
+      而是每个策略独立提取候选, 最后去重合并.
+
+      新增 LAB 颜色分割后备路径:
+      当轮廓法只找到1个巨大轮廓时, 自动切换到颜色分割.
+    """
+    h, w = image_bgr.shape[:2]
+    image_area = h * w
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    all_candidates: list[RectCandidate] = []
+
+    # ── 策略组A: 原始前景检测 (亮板暗背景) ──
+    edge_canny = cv2.Canny(smooth, 30, 100)
+    _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    adapt = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY_INV, 51, 6)
+    combined_a = cv2.bitwise_or(edge_canny, cv2.bitwise_or(otsu, adapt))
+    combined_a = cv2.morphologyEx(combined_a, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+    combined_a = cv2.morphologyEx(combined_a, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    all_candidates.extend(_extract_rect_candidates_from_mask(combined_a, image_area))
+
+    # ── 策略组B: 反向前景检测 (暗板亮背景) ── 独立运行, 不与A合并
+    _, otsu_rev = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    edge_canny_inv = cv2.Canny(255 - smooth, 30, 100)
+    combined_b = cv2.bitwise_or(otsu_rev, edge_canny_inv)
+    combined_b = cv2.morphologyEx(combined_b, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+    combined_b = cv2.morphologyEx(combined_b, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    all_candidates.extend(_extract_rect_candidates_from_mask(combined_b, image_area))
+
+    # ── 策略组C: 纯 Otsu (不加 Canny/Adaptive, 减少噪声) ──
+    otsu_clean = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=3)
+    otsu_clean = cv2.morphologyEx(otsu_clean, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8), iterations=2)
+    all_candidates.extend(_extract_rect_candidates_from_mask(otsu_clean, image_area))
+
+    # 去重合并
+    all_candidates = _deduplicate_candidates(all_candidates)
+
+    # ── 后备策略: LAB 颜色分割 ──
+    # 如果轮廓法只找到0-1个巨大候选 (>90% 面积), 说明轮廓法失效
+    useful = [c for c in all_candidates if c.rect_area / image_area < 0.90]
+    if len(useful) < 1:
+        color_candidates = _lab_color_segmentation(image_bgr, n_clusters=3)
+        color_useful = [c for c in color_candidates if c.rect_area / image_area < 0.90]
+        if color_useful:
+            all_candidates = color_useful
+        else:
+            # 尝试更多聚类
+            color_candidates_5 = _lab_color_segmentation(image_bgr, n_clusters=5)
+            color_useful_5 = [c for c in color_candidates_5 if c.rect_area / image_area < 0.90]
+            if color_useful_5:
+                all_candidates = color_useful_5
+
+    all_candidates.sort(key=lambda c: c.rect_area, reverse=True)
+    return all_candidates
 
 
 def detect_concrete_background(image_bgr: np.ndarray) -> dict[str, Any]:
     """
     检测水泥/沥青地面背景并生成背景掩码.
 
-    利用图像边缘区域 (非板材区域) 的纹理和颜色特征:
-      - 水泥地面: 灰色调, 中等纹理, 低饱和度
-      - 人字形/规则拼接缝: 线性特征, 规则间距
-      - 沥青: 深灰/黑色, 粗糙纹理
+    v2.6 增强版: 放宽检测条件, 适应更多真实场景.
+      - 水泥地面: 低饱和度, 广泛亮度范围
+      - 人字形拼接缝: 边缘区域的线性特征
+      - 用 LAB 色度 (chroma) 代替 HSV 饱和度, 对灰色调更敏感
 
     返回:
       detected: bool
@@ -577,45 +691,51 @@ def detect_concrete_background(image_bgr: np.ndarray) -> dict[str, Any]:
       background_type: "concrete" | "asphalt" | "unknown"
     """
     h, w = image_bgr.shape[:2]
-    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
 
-    # 水泥/沥青特征: 低饱和度 + 中等亮度 + 有纹理但不是木纹级别
-    low_sat = hsv[..., 1] < 40  # 低饱和度 (灰色调)
-    mid_val = (hsv[..., 2] > 80) & (hsv[..., 2] < 220)  # 中等亮度
+    # LAB 色度: C = sqrt(a^2 + b^2), 水泥/沥青的色度很低
+    a_centered = lab[..., 1] - 128.0
+    b_centered = lab[..., 2] - 128.0
+    chroma = np.sqrt(a_centered ** 2 + b_centered ** 2)
 
-    # 纹理分析: 水泥有中等拉普拉斯响应
-    lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F))
-    mid_texture = (lap > 3) & (lap < 50)
+    # 水泥特征: 低色度 (< 15) + 宽泛亮度
+    low_chroma = chroma < 15
 
-    concrete_like = low_sat & mid_val & mid_texture
-
-    # 用边缘区域验证 (边缘通常是背景)
+    # 用边缘区域验证 (边缘通常是背景/地面)
     border_mask = np.zeros((h, w), dtype=bool)
-    bh, bw = max(20, h // 8), max(20, w // 8)
-    border_mask[:bh, :] = True
-    border_mask[-bh:, :] = True
-    border_mask[:, :bw] = True
-    border_mask[:, -bw:] = True
+    bh_size, bw_size = max(30, h // 6), max(30, w // 6)
+    border_mask[:bh_size, :] = True
+    border_mask[-bh_size:, :] = True
+    border_mask[:, :bw_size] = True
+    border_mask[:, -bw_size:] = True
 
-    border_concrete_ratio = float(concrete_like[border_mask].mean()) if border_mask.any() else 0.0
+    border_low_chroma_ratio = float(low_chroma[border_mask].mean()) if border_mask.any() else 0.0
 
-    detected = border_concrete_ratio > 0.25
+    # 也检查边缘的亮度均值和方差 (水泥地面亮度相对一致)
+    border_brightness = float(gray[border_mask].mean()) if border_mask.any() else 128
+    border_brightness_std = float(gray[border_mask].std()) if border_mask.any() else 50
+
+    # 判定: 边缘低色度占比 > 15% (放宽阈值) 且亮度在合理范围
+    detected = (border_low_chroma_ratio > 0.15 and
+                30 < border_brightness < 230 and
+                border_brightness_std < 60)
+
     bg_type = "unknown"
     if detected:
-        border_brightness = float(gray[border_mask].mean())
-        bg_type = "concrete" if border_brightness > 100 else "asphalt"
+        bg_type = "concrete" if border_brightness > 90 else "asphalt"
 
-    # 生成完整背景掩码: 结合颜色+纹理+空间连通性
-    bg_mask = concrete_like.astype(np.uint8)
-    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=2)
+    # 生成完整背景掩码
+    bg_mask = low_chroma.astype(np.uint8)
+    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=2)
     bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
 
     return {
         "detected": detected,
         "background_mask": bg_mask.astype(bool),
         "background_type": bg_type,
-        "border_concrete_ratio": round(border_concrete_ratio, 3),
+        "border_low_chroma_ratio": round(border_low_chroma_ratio, 3),
+        "border_brightness": round(border_brightness, 1),
     }
 
 
