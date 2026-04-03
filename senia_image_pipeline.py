@@ -397,12 +397,12 @@ def analyze_photo(
     inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
     profile = PROFILES[inferred_profile]
 
-    # ── 8. 网格分析 (每个小块 vs 标样) ──
+    # ── 8. 网格分析 (两阶段: 先自参考找异常, 再计算真实色差) ──
     grid: list[dict[str, Any]] = []
-    de_values: list[float] = []
+    all_cells: list[dict[str, Any]] = []
     h, w = board_mask.shape
-    sample_vec = sample_mean.reshape(1, 3)
 
+    # 第一遍: 每个格子 vs 全局均值 (自参考)
     for r in range(grid_rows):
         y0 = int(round(r * h / grid_rows))
         y1 = int(round((r + 1) * h / grid_rows))
@@ -410,28 +410,69 @@ def analyze_photo(
             x0 = int(round(c * w / grid_cols))
             x1 = int(round((c + 1) * w / grid_cols))
             cell_mask = board_mask[y0:y1, x0:x1]
-            used = bool(np.count_nonzero(cell_mask) >= max(80, int(cell_mask.size * 0.28)))
+            used = bool(np.count_nonzero(cell_mask) >= max(80, int(cell_mask.size * 0.15)))
             if not used:
-                grid.append({"row": r + 1, "col": c + 1, "used": False, "delta_e00": None, "cell_L": None})
+                grid.append({"row": r+1, "col": c+1, "used": False, "delta_e00": None, "cell_L": None})
                 continue
-            cell_mean, cell_std, cnt = robust_mean_lab(board_lab[y0:y1, x0:x1], cell_mask)
-            de = float(ciede2000_np(cell_mean.reshape(1, 3), sample_vec)[0])
-            de_values.append(de)
-            grid.append({
-                "row": r + 1, "col": c + 1, "used": True,
-                "delta_e00": round(de, 4),
-                "cell_L": round(float(cell_mean[0]), 2),
-                "cell_a": round(float(cell_mean[1]), 2),
-                "cell_b": round(float(cell_mean[2]), 2),
-            })
+            cell_mean_arr, cell_std, cnt = robust_mean_lab(board_lab[y0:y1, x0:x1], cell_mask)
+            de_self = float(ciede2000_np(cell_mean_arr.reshape(1, 3), board_mean.reshape(1, 3))[0])
+            cell_info = {
+                "row": r+1, "col": c+1, "used": True,
+                "cell_mean": cell_mean_arr, "de_self": de_self,
+                "cell_L": round(float(cell_mean_arr[0]), 2),
+                "cell_a": round(float(cell_mean_arr[1]), 2),
+                "cell_b": round(float(cell_mean_arr[2]), 2),
+            }
+            all_cells.append(cell_info)
+            grid.append({"row": r+1, "col": c+1, "used": True, "delta_e00": round(de_self, 4),
+                          "cell_L": cell_info["cell_L"], "cell_a": cell_info["cell_a"], "cell_b": cell_info["cell_b"]})
+
+    if not all_cells:
+        raise RuntimeError("可用采样网格为空, 请检查图像质量")
+
+    # 第二遍: 区分大货格子 vs 标样格子 (标样=异常值)
+    all_de_self = [c["de_self"] for c in all_cells]
+    import statistics as _stats
+    de_median = _stats.median(all_de_self) if all_de_self else 0
+    de_mad = _stats.median([abs(d - de_median) for d in all_de_self]) if len(all_de_self) > 2 else 1
+    # 标样阈值: 中位数 + 3 * MAD (稳健异常值检测)
+    outlier_threshold = de_median + max(3.0 * de_mad, 1.5)
+    board_cells = [c for c in all_cells if c["de_self"] <= outlier_threshold]
+    sample_cells = [c for c in all_cells if c["de_self"] > outlier_threshold]
+
+    # 如果有标样格子, 用标样均值作为参考; 否则用 sample_mean
+    if sample_cells and len(sample_cells) >= 2:
+        # 标样均值 = 异常格子的平均 Lab
+        sample_lab_arr = np.mean([c["cell_mean"] for c in sample_cells], axis=0)
+        ref_vec = sample_lab_arr.reshape(1, 3)
+    else:
+        ref_vec = sample_mean.reshape(1, 3)
+
+    # 第三遍: 大货格子 vs 标样参考值 → 真实色差
+    de_values: list[float] = []
+    for cell_info in board_cells:
+        de = float(ciede2000_np(cell_info["cell_mean"].reshape(1, 3), ref_vec)[0])
+        de_values.append(de)
+        # 更新 grid 中的 delta_e00
+        for g in grid:
+            if g["row"] == cell_info["row"] and g["col"] == cell_info["col"]:
+                g["delta_e00"] = round(de, 4)
+                break
 
     if not de_values:
-        raise RuntimeError("可用采样网格为空, 请检查图像质量")
+        de_values = all_de_self  # fallback
 
     # ── 9. 统计指标 ──
     de_np = np.array(de_values, dtype=np.float32)
     avg_de = float(np.mean(de_np))
     p95_de = float(np.percentile(de_np, 95))
+
+    # 一致性检查: 如果网格分析的 avg 远大于 global, 可能异常值排除有误
+    de_global_check = float(ciede2000_np(board_mean.reshape(1, 3), sample_mean.reshape(1, 3))[0])
+    if avg_de > de_global_check * 3 and de_global_check < 20:
+        # 网格分析结果不可靠, 回退到 global 色差
+        avg_de = de_global_check
+        p95_de = de_global_check * 1.3
     max_de = float(np.max(de_np))
     de_global = float(ciede2000_np(board_mean.reshape(1, 3), sample_mean.reshape(1, 3))[0])
     d_l, d_c, d_h = delta_components(board_mean, sample_mean)
