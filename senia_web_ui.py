@@ -265,6 +265,73 @@ body::after {{
   border: 1px solid var(--border);
 }}
 
+/* ── AI 思考动画 ── */
+.ai-thinking {{
+  display: none; text-align: center; padding: 40px 20px; margin-bottom: 24px;
+  background: var(--bg-card); backdrop-filter: blur(20px);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  position: relative; overflow: hidden;
+}}
+.ai-thinking.active {{ display: block; animation: fadeInUp .4s ease; }}
+.ai-thinking::before {{
+  content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+  background: conic-gradient(from 0deg, transparent, rgba(78,168,255,0.05), transparent, rgba(0,230,138,0.05), transparent);
+  animation: scan-rotate 4s linear infinite;
+}}
+@keyframes scan-rotate {{ to {{ transform: rotate(360deg); }} }}
+.ai-brain {{
+  position: relative; z-index: 1;
+  width: 80px; height: 80px; margin: 0 auto 20px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(78,168,255,0.15) 0%, transparent 70%);
+  animation: brain-pulse 2s ease-in-out infinite;
+  display: flex; align-items: center; justify-content: center; font-size: 36px;
+}}
+@keyframes brain-pulse {{
+  0%,100% {{ transform: scale(1); box-shadow: 0 0 20px var(--accent-glow); }}
+  50% {{ transform: scale(1.08); box-shadow: 0 0 50px var(--accent-glow), 0 0 80px rgba(0,230,138,0.08); }}
+}}
+.ai-steps {{
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column; gap: 4px; max-width: 360px; margin: 0 auto;
+}}
+.ai-step {{
+  display: flex; align-items: center; gap: 10px; padding: 7px 14px;
+  border-radius: 8px; font-size: 13px; color: var(--text-dim);
+  transition: all .4s; border-left: 2px solid transparent;
+}}
+.ai-step.active {{ color: var(--accent); background: rgba(78,168,255,0.06); border-left-color: var(--accent); }}
+.ai-step.done {{ color: var(--pass); border-left-color: var(--pass); }}
+.ai-step .dot {{
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-dim); flex-shrink: 0; transition: all .3s;
+}}
+.ai-step.active .dot {{ background: var(--accent); box-shadow: 0 0 6px var(--accent); }}
+.ai-step.done .dot {{ background: var(--pass); }}
+
+/* ── 判定指示灯 ── */
+.verdict-light {{
+  width: 100px; height: 100px; border-radius: 50%; margin: 0 auto 16px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 36px; font-weight: 800; font-family: var(--mono);
+  animation: light-on 0.6s ease-out;
+}}
+.verdict-light.pass {{
+  background: radial-gradient(circle, var(--pass) 30%, rgba(0,230,138,0.15) 70%);
+  color: #06080f; box-shadow: 0 0 40px rgba(0,230,138,0.3);
+}}
+.verdict-light.marginal {{
+  background: radial-gradient(circle, var(--marginal) 30%, rgba(255,193,77,0.15) 70%);
+  color: #06080f; box-shadow: 0 0 40px rgba(255,193,77,0.3);
+}}
+.verdict-light.fail {{
+  background: radial-gradient(circle, var(--fail) 30%, rgba(255,92,114,0.15) 70%);
+  color: #fff; box-shadow: 0 0 40px rgba(255,92,114,0.3);
+}}
+@keyframes light-on {{
+  from {{ transform: scale(0.5); opacity: 0; }}
+  to {{ transform: scale(1); opacity: 1; }}
+}}
+
 /* 底部 */
 .footer {{
   text-align: center; padding: 32px 0; color: var(--text-dim); font-size: 12px;
@@ -429,10 +496,10 @@ body::after {{
     <button class="btn-analyze" id="btnAnalyze" disabled>开始对色</button>
   </div>
 
-  <!-- 进度条 -->
-  <div class="progress-bar" id="progressBar">
-    <div class="progress-steps" id="progressSteps"></div>
-    <div class="progress-label" id="progressLabel"></div>
+  <!-- AI 分析动画 -->
+  <div class="ai-thinking" id="aiThinking">
+    <div class="ai-brain">🧠</div>
+    <div class="ai-steps" id="aiSteps"></div>
   </div>
 
   <!-- 结果区 -->
@@ -510,25 +577,26 @@ if (!localStorage.getItem('senia_guide_seen')) {{
   document.getElementById('cameraGuide').style.display = 'block';
 }}
 
-const STEPS = [
-  '正在识别大货和标样...',
-  '透视校正中...',
-  '过滤手写和贴纸...',
-  '提取底色中...',
-  '计算色差 (CIEDE2000)...',
-  '三级判定中...',
-  '生成调色建议...',
+const AI_STEPS = [
+  '识别大货和标样区域',
+  '透视校正与几何对齐',
+  '过滤手写/贴纸/反光',
+  '自适应纹理抑制提取底色',
+  'CIEDE2000 色差计算',
+  'AI 三级判定 + 偏差分析',
+  '调色建议 + 风险评估',
+  '同色异谱预警检查',
 ];
 
-function showProgress(stepIdx) {{
-  progressBar.classList.add('active');
+function showAIStep(idx) {{
+  const el = $('aiThinking');
+  el.classList.add('active');
   let html = '';
-  for (let i = 0; i < STEPS.length; i++) {{
-    const cls = i < stepIdx ? 'done' : i === stepIdx ? 'active' : '';
-    html += `<div class="progress-step ${{cls}}"></div>`;
+  for (let i = 0; i < AI_STEPS.length; i++) {{
+    const cls = i < idx ? 'done' : i === idx ? 'active' : '';
+    html += `<div class="ai-step ${{cls}}"><span class="dot"></span>${{AI_STEPS[i]}}</div>`;
   }}
-  $('progressSteps').innerHTML = html;
-  $('progressLabel').textContent = STEPS[Math.min(stepIdx, STEPS.length - 1)];
+  $('aiSteps').innerHTML = html;
 }}
 
 // ── 分析请求 ──
@@ -538,12 +606,11 @@ btnAnalyze.addEventListener('click', async () => {{
   resultArea.classList.remove('active');
   resultArea.innerHTML = '';
 
-  // 模拟进度
   let step = 0;
-  const timer = setInterval(() => {{ if (step < STEPS.length - 1) showProgress(++step); }}, 600);
+  const timer = setInterval(() => {{ if (step < AI_STEPS.length - 1) showAIStep(++step); }}, 500);
 
   try {{
-    showProgress(0);
+    showAIStep(0);
     const form = new FormData();
     let url;
     if (currentMode === 'dual') {{
@@ -561,7 +628,7 @@ btnAnalyze.addEventListener('click', async () => {{
 
     const resp = await fetch(url, {{ method: 'POST', body: form }});
     clearInterval(timer);
-    showProgress(STEPS.length);
+    showAIStep(AI_STEPS.length);
 
     if (!resp.ok) {{
       const err = await resp.json().catch(() => ({{ detail: resp.statusText }}));
@@ -569,10 +636,10 @@ btnAnalyze.addEventListener('click', async () => {{
     }}
 
     const data = await resp.json();
-    setTimeout(() => {{ renderResult(data); progressBar.classList.remove('active'); }}, 500);
+    setTimeout(() => {{ renderResult(data); $('aiThinking').classList.remove('active'); }}, 400);
   }} catch (err) {{
     clearInterval(timer);
-    progressBar.classList.remove('active');
+    $('aiThinking').classList.remove('active');
     resultArea.innerHTML = `<div class="verdict-card fail"><div class="verdict-header">
       <div class="verdict-badge fail">分析失败</div>
       <div style="font-size:14px;line-height:1.6">${{esc(err.message)}}</div></div>
@@ -609,24 +676,23 @@ function renderResult(d) {{
   const now = new Date();
   const timeStr = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0')+':'+now.getSeconds().toString().padStart(2,'0');
 
-  // 判定卡片
+  // 判定卡片 (带指示灯)
   html += `<div class="verdict-card ${{tierCls}}">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;font-size:12px;color:var(--text-dim)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;font-size:12px;color:var(--text-dim)">
       <span>${{d.lot_id ? '批次 '+esc(d.lot_id) : ''}} ${{d.product_code ? '· 产品 '+esc(d.product_code) : ''}}</span>
       <span>${{timeStr}} · ${{(d.elapsed_sec||0).toFixed(1)}}s</span>
     </div>
-    <div class="verdict-header">
-      <div class="verdict-badge ${{tierCls}}">${{tierLabel}}</div>
-      <div class="verdict-de"><strong>${{(summary.avg_delta_e00||0).toFixed(2)}}</strong> 色差
-        &nbsp;&middot;&nbsp; p95: ${{(summary.p95_delta_e00||0).toFixed(2)}}
-        &nbsp;&middot;&nbsp; 最大: ${{(summary.max_delta_e00||0).toFixed(2)}}</div>
+    <div class="verdict-light ${{tierCls}}">${{tierLabel}}</div>
+    <div style="text-align:center;margin-bottom:16px">
+      <div style="font-size:36px;font-weight:700;font-family:var(--mono)">${{(summary.avg_delta_e00||0).toFixed(2)}}</div>
+      <div style="font-size:13px;color:var(--text-secondary)">ΔE00 色差 &nbsp;|&nbsp; p95: ${{(summary.p95_delta_e00||0).toFixed(2)}} &nbsp;|&nbsp; max: ${{(summary.max_delta_e00||0).toFixed(2)}}</div>
     </div>
-    <div class="verdict-dirs">
+    <div class="verdict-dirs" style="justify-content:center">
       ${{dirs.map(d => `<span class="dir-tag">${{esc(d)}}</span>`).join('')}}
       ${{dirs.length === 0 ? '<span class="dir-tag" style="border-color:var(--pass)">色差极小</span>' : ''}}
     </div>
-    <div style="margin-top:16px;display:flex;gap:10px;justify-content:center">
-      <button onclick="document.getElementById('uploadZone').click()" class="btn-analyze"
+    <div style="margin-top:20px;display:flex;gap:10px;justify-content:center">
+      <button onclick="setMode(currentMode);selectedFile=null;refFile=null;smpFile=null;resultArea.classList.remove('active');resultArea.innerHTML='';checkReady()" class="btn-analyze"
         style="font-size:13px;padding:8px 20px">📷 重新拍摄</button>
       <button onclick="window.print()" style="padding:8px 20px;border-radius:var(--radius-sm);border:1px solid var(--border);
         background:var(--bg-glass);color:var(--text-secondary);cursor:pointer;font-size:13px">🖨 打印结果</button>
