@@ -99,6 +99,7 @@ from senia_ai_brain import (
     parse_operator_input, proactive_suggestions,
 )
 from senia_lifelong_learning import LifelongLearner
+from senia_self_evolution import EvolutionEngine
 from senia_innovations_v2 import (
     DriftEarlyWarning, reverse_engineer_color, ColorSearchEngine,
     CustomerColorProfile, diagnose_machine_from_drift,
@@ -218,6 +219,7 @@ KNOWLEDGE_ENGINE = KnowledgeEngine(store_path=DEFAULT_OUTPUT_ROOT / "senia_knowl
 DRIFT_WARNING = DriftEarlyWarning()
 AI_MEMORY = ExperienceMemory(store_path=DEFAULT_OUTPUT_ROOT / "senia_ai_memory.json")
 LIFELONG = LifelongLearner(store_dir=DEFAULT_OUTPUT_ROOT)
+EVOLUTION = EvolutionEngine(store_path=DEFAULT_OUTPUT_ROOT / "senia_evolution.json")
 COLOR_SEARCH = ColorSearchEngine()
 CUSTOMER_PROFILES = CustomerColorProfile()
 WEB_CRAWLER = WebCrawler(cache_dir=DEFAULT_OUTPUT_ROOT / "crawler_cache")
@@ -6951,6 +6953,20 @@ async def senia_analyze_endpoint(
     except Exception:
         report["history"] = {"has_baseline": False}
 
+    # ── 自动喂入进化引擎 (每次分析都让系统变强) ──
+    try:
+        EVOLUTION.record({
+            "system_tier": tier,
+            "dE": avg_de,
+            "profile": used_profile,
+            "confidence": report.get("result", {}).get("confidence", {}).get("overall", 0),
+            "lot_id": lot_id,
+            "product_code": product_code,
+        })
+        LIFELONG.learn_from_feedback(used_profile, avg_de, tier)
+    except Exception:
+        pass
+
     return report
 
 
@@ -7381,6 +7397,29 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
 
 
 # ── 管理 API ──────────────────────────────────────────
+
+# ── 自我进化 ─────────────────────────────────────────────
+
+@app.post("/v1/senia/evolve")
+def senia_evolve() -> dict[str, Any]:
+    """
+    执行一次完整进化周期: 评估→诊断→升级→刷新→爬虫.
+    建议每天自动运行一次 (可设 cron).
+    """
+    return EVOLUTION.evolve(lifelong=LIFELONG, knowledge=KNOWLEDGE_ENGINE)
+
+
+@app.get("/v1/senia/evolve/status")
+def senia_evolve_status() -> dict[str, Any]:
+    """进化状态: 当前第几代, 各项评分."""
+    return EVOLUTION.status()
+
+
+@app.get("/v1/senia/evolve/curve")
+def senia_evolve_curve() -> dict[str, Any]:
+    """进化曲线: 每一代的评分, 可用于画折线图."""
+    return {"curve": EVOLUTION.get_evolution_curve()}
+
 
 # ── 终身学习 ─────────────────────────────────────────────
 
