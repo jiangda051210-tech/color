@@ -98,6 +98,7 @@ from senia_ai_brain import (
     ExperienceMemory, CaseMemory, expert_reasoning_chain,
     parse_operator_input, proactive_suggestions,
 )
+from senia_lifelong_learning import LifelongLearner
 from senia_innovations_v2 import (
     DriftEarlyWarning, reverse_engineer_color, ColorSearchEngine,
     CustomerColorProfile, diagnose_machine_from_drift,
@@ -216,6 +217,7 @@ DEVICE_FINGERPRINT = DeviceFingerprint(store_path=DEFAULT_OUTPUT_ROOT / "senia_d
 KNOWLEDGE_ENGINE = KnowledgeEngine(store_path=DEFAULT_OUTPUT_ROOT / "senia_knowledge.json")
 DRIFT_WARNING = DriftEarlyWarning()
 AI_MEMORY = ExperienceMemory(store_path=DEFAULT_OUTPUT_ROOT / "senia_ai_memory.json")
+LIFELONG = LifelongLearner(store_dir=DEFAULT_OUTPUT_ROOT)
 COLOR_SEARCH = ColorSearchEngine()
 CUSTOMER_PROFILES = CustomerColorProfile()
 WEB_CRAWLER = WebCrawler(cache_dir=DEFAULT_OUTPUT_ROOT / "crawler_cache")
@@ -7379,6 +7381,54 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
 
 
 # ── 管理 API ──────────────────────────────────────────
+
+# ── 终身学习 ─────────────────────────────────────────────
+
+@app.post("/v1/senia/learn/feedback")
+def senia_learn_feedback(
+    profile: str = Form(...), dE: float = Form(...), actual_tier: str = Form(...),
+) -> dict[str, Any]:
+    """L1 即时学习: 每次反馈都让阈值更准."""
+    return LIFELONG.learn_from_feedback(profile, dE, actual_tier)
+
+
+@app.post("/v1/senia/learn/batch")
+def senia_learn_batch(
+    product_code: str = Form(...), samples_json: str = Form(...),
+) -> dict[str, Any]:
+    """L2 批次学习: 每批结束后汇总提取知识."""
+    try:
+        samples = json.loads(samples_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return LIFELONG.learn_from_batch(product_code, samples)
+
+
+@app.post("/v1/senia/learn/refresh")
+def senia_learn_refresh() -> dict[str, Any]:
+    """L3 周期学习: 重新拟合所有模型 (建议每周运行)."""
+    return LIFELONG.refresh_models()
+
+
+@app.post("/v1/senia/learn/transfer")
+def senia_learn_transfer(
+    source: str = Form(...), target: str = Form(...), similarity: float = Form(0.8),
+) -> dict[str, Any]:
+    """L4 迁移学习: 新产品从已有产品迁移知识."""
+    return LIFELONG.transfer(source, target, max(0.1, min(1.0, similarity)))
+
+
+@app.get("/v1/senia/learn/distill")
+def senia_learn_distill() -> dict[str, Any]:
+    """L5 知识蒸馏: 把所有学到的知识压缩成人类可读规则."""
+    return LIFELONG.distill(AI_MEMORY)
+
+
+@app.get("/v1/senia/learn/status")
+def senia_learn_status() -> dict[str, Any]:
+    """终身学习状态总览."""
+    return LIFELONG.status()
+
 
 # ── AI 推理引擎 ──────────────────────────────────────────
 
