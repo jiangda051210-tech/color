@@ -214,16 +214,11 @@ def generate_color_match_report(
     )
 
     # ── 2. 智能识别大货和标样 ──
-    # 关键原则:
-    #   a. 标样和大货颜色必须相近 (dE < 15), 否则不是同一个色号
-    #   b. 标样通常比大货小得多 (面积 < 大货的 50%)
-    #   c. 如果所有板材颜色相近且大小相似 → 多板材一致性检查模式
-    #   d. 最大的候选不一定是大货 → 用"多数派颜色"确定真正的产品板材
+    # 优化: 阈值10(原15太松), 多数派投票, 光照校正后重测
+    SIMILARITY_THRESHOLD = 10.0
     boards_sorted = sorted(all_boards, key=lambda b: b["area_ratio"], reverse=True)
     boards_with_lab = [b for b in boards_sorted if b.get("mean_lab")]
 
-    # Step 1: 用"多数派"方法找产品板材群
-    # 两两计算色差, 找最大的颜色聚类
     main_board = None
     sample_board = None
     similar_planks = []
@@ -231,30 +226,28 @@ def generate_color_match_report(
     layout = "unknown"
 
     if len(boards_with_lab) >= 2:
-        # 为每块板计算"与其他板颜色相近的数量"
         for b in boards_with_lab:
             close_count = 0
             for other in boards_with_lab:
                 if other is b:
                     continue
                 de = _ciede2000_detail(b["mean_lab"], other["mean_lab"])["dE00"]
-                if de < 15.0:
+                if de < SIMILARITY_THRESHOLD:
                     close_count += 1
             b["_close_count"] = close_count
 
-        # 主板 = 颜色朋友最多的板 (多数派代表), 同票数时选最大的
         boards_by_popularity = sorted(boards_with_lab,
                                       key=lambda b: (b["_close_count"], b["area_ratio"]),
                                       reverse=True)
         main_board = boards_by_popularity[0]
 
-        # 重新分组: 与主板颜色相近的 vs 不相近的
         for b in boards_with_lab:
             if b is main_board:
                 continue
             de = _ciede2000_detail(main_board["mean_lab"], b["mean_lab"])
             b["_de_to_main"] = de["dE00"]
-            if de["dE00"] < 15.0:
+            b["_de_detail_to_main"] = de
+            if de["dE00"] < SIMILARITY_THRESHOLD:
                 similar_planks.append(b)
             else:
                 other_objects.append(b)
@@ -262,7 +255,6 @@ def generate_color_match_report(
     elif len(boards_with_lab) == 1:
         main_board = boards_with_lab[0]
 
-    # Step 2: 判断布局模式
     if main_board:
         if len(similar_planks) >= 3:
             layout = "multi_plank"
@@ -281,8 +273,49 @@ def generate_color_match_report(
         else:
             layout = "single_board"
 
-    # 一致性分析只用相似板材 (排除背景/柱体/标签等杂物)
     consistency_boards = [main_board] + similar_planks if main_board else []
+
+    # ── 2b. 自动检测材质 ──
+    if profile == "auto" and main_board and main_board.get("mean_lab"):
+        lab_m = main_board["mean_lab"]
+        chroma = (lab_m["a"] ** 2 + lab_m["b"] ** 2) ** 0.5
+        if chroma < 3:
+            profile = "solid"
+        elif lab_m["L"] > 70 and chroma > 10:
+            profile = "high_gloss"
+        else:
+            profile = "wood"
+
+    # ── 2c. 户外光照校正后重新提取颜色 ──
+    if is_outdoor and len(consistency_boards) >= 1:
+        corrected_img = apply_outdoor_white_balance(
+            image_bgr, np.ones((h, w), dtype=bool))[0]
+        corrected_img = apply_shading_correction(
+            corrected_img, np.ones((h, w), dtype=bool), adaptive=True)
+        for b in consistency_boards:
+            quad = b.get("quad")
+            if quad is None:
+                continue
+            mask = np.zeros((h, w), dtype=np.uint8)
+            pts = quad.astype(np.int32).reshape(-1, 1, 2)
+            cv2.fillPoly(mask, [pts], 255)
+            valid = corrected_img[mask == 255]
+            if len(valid) > 50:
+                lab_arr = cv2.cvtColor(valid.reshape(1, -1, 3),
+                                       cv2.COLOR_BGR2LAB).astype(np.float32)
+                lab_arr[..., 0] *= (100.0 / 255.0)
+                lab_arr[..., 1] -= 128.0
+                lab_arr[..., 2] -= 128.0
+                ml = lab_arr.reshape(-1, 3).mean(axis=0)
+                b["mean_lab"] = {"L": round(float(ml[0]), 2),
+                                 "a": round(float(ml[1]), 2),
+                                 "b": round(float(ml[2]), 2)}
+        # 重新计算校正后色差
+        if main_board:
+            for b in similar_planks:
+                de = _ciede2000_detail(main_board["mean_lab"], b["mean_lab"])
+                b["_de_to_main"] = de["dE00"]
+                b["_de_detail_to_main"] = de
 
     # ── 3. 测量色差 ──
     color_match = None
@@ -313,17 +346,24 @@ def generate_color_match_report(
                 "note": f"多板材模式: {len(similar_planks)+1}块相似板中最大色差",
             }
 
-    # ── 4. 板面一致性 (只计算颜色相近的板材) ──
+    # ── 4. 板面一致性 + 偏差最大板材标注 ──
     consistency = None
     if len(consistency_boards) >= 2:
         pairs = []
+        board_avg_de: dict[int, list[float]] = {}
         for i in range(len(consistency_boards)):
             for j in range(i + 1, len(consistency_boards)):
                 if consistency_boards[i].get("mean_lab") and consistency_boards[j].get("mean_lab"):
                     de = _ciede2000_detail(consistency_boards[i]["mean_lab"],
                                            consistency_boards[j]["mean_lab"])
                     pairs.append(de["dE00"])
+                    board_avg_de.setdefault(i, []).append(de["dE00"])
+                    board_avg_de.setdefault(j, []).append(de["dE00"])
         if pairs:
+            # 找偏差最大的板材
+            worst_idx = max(board_avg_de,
+                            key=lambda k: float(np.mean(board_avg_de[k]))) if board_avg_de else None
+            worst_avg = round(float(np.mean(board_avg_de[worst_idx])), 2) if worst_idx is not None else 0
             consistency = {
                 "板材数量": len(consistency_boards),
                 "板间最小色差": round(min(pairs), 2),
@@ -331,6 +371,8 @@ def generate_color_match_report(
                 "板间平均色差": round(float(np.mean(pairs)), 2),
                 "一致性评价": "良好" if max(pairs) < 2.0 else "一般" if max(pairs) < 4.0 else "较差",
             }
+            if worst_idx is not None and worst_avg > 2.0:
+                consistency["偏差最大板"] = f"第{worst_idx+1}块 (平均色差={worst_avg})"
             if other_objects:
                 consistency["已排除非产品区域"] = len(other_objects)
 
@@ -355,12 +397,43 @@ def generate_color_match_report(
         if suggestions:
             environment["改善建议"] = suggestions[:2]
 
-    # ── 6. 组装报告单 ──
+    # ── 6. 置信度计算 ──
+    confidence = 0.90  # 基线
+    conf_factors = []
+    # 预检质量
+    if preflight.get("quality") == "good":
+        pass
+    elif preflight.get("quality") == "acceptable":
+        confidence -= 0.05
+        conf_factors.append("拍摄质量一般 -5%")
+    else:
+        confidence -= 0.15
+        conf_factors.append("拍摄质量差 -15%")
+    # 户外惩罚
+    if is_outdoor:
+        env_comp_check = EnvironmentCompensatorV2()
+        pen = env_comp_check.compute_outdoor_confidence_penalty(env_info)
+        confidence -= pen["total_penalty"]
+        if pen["total_penalty"] > 0:
+            conf_factors.append(f"户外环境 -{pen['total_penalty']:.0%}")
+    # 检测到标样
+    if sample_board is None and layout != "single_board":
+        confidence -= 0.10
+        conf_factors.append("未检测到标样 -10%")
+    # 产品板数量
+    if len(consistency_boards) >= 3:
+        confidence += 0.05
+        conf_factors.append("多板交叉验证 +5%")
+    confidence = round(max(0.30, min(1.0, confidence)), 2)
+
+    # ── 7. 组装报告单 ──
     report: dict[str, Any] = {
         "报告标题": "SENIA 自动对色报告单",
         "报告时间": report_time,
         "图片尺寸": f"{w}x{h}",
         "材质类型": profile,
+        "置信度": f"{confidence:.0%}",
+        "置信度因素": conf_factors if conf_factors else ["标准条件"],
     }
 
     # 检测结果
@@ -429,7 +502,7 @@ def print_report(report: dict[str, Any]) -> str:
     lines = []
     lines.append("=" * 50)
     lines.append(f"  {report.get('报告标题', 'SENIA 对色报告')}")
-    lines.append(f"  {report.get('报告时间', '')}")
+    lines.append(f"  {report.get('报告时间', '')}  |  材质: {report.get('材质类型', '?')}  |  置信度: {report.get('置信度', '?')}")
     lines.append("=" * 50)
 
     # 对色判定 (最醒目)
@@ -461,6 +534,10 @@ def print_report(report: dict[str, Any]) -> str:
         lines.append("")
         lines.append("  ── 板面一致性 ──")
         lines.append(f"  板材数: {cons['板材数量']}  |  板间色差: {cons['板间最小色差']}~{cons['板间最大色差']}  |  评价: {cons['一致性评价']}")
+        if "偏差最大板" in cons:
+            lines.append(f"  ⚠ 偏差最大: {cons['偏差最大板']}")
+        if cons.get("已排除非产品区域"):
+            lines.append(f"  已排除 {cons['已排除非产品区域']} 个非产品区域(背景/柱体等)")
 
     # 环境
     env = report.get("拍摄环境", {})

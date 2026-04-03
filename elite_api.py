@@ -3855,6 +3855,26 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
     return resp
 
 
+@app.post("/v1/analyze/color-report")
+def analyze_color_report(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
+    """
+    一键对色报告 — 替代人工对色员的完整输出.
+
+    输入一张照片, 输出:
+      - OK/NG/临界判定
+      - 色差值+偏色方向
+      - 工艺调整建议
+      - 板面一致性
+      - 置信度评分
+    """
+    from senia_color_report import generate_color_match_report
+
+    image = _load_image(req.image)
+    profile = req.profile if req.profile != "auto" else "auto"
+    report = generate_color_match_report(image, profile=profile)
+    return report
+
+
 @app.post("/v1/analyze/multi-board")
 def analyze_multi_board(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
     """
