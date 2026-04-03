@@ -94,6 +94,10 @@ from senia_synergy import (
     predictive_maintenance, customer_specific_risk,
     one_click_color_match, batch_stability_monitor, smart_decision,
 )
+from senia_ai_brain import (
+    ExperienceMemory, CaseMemory, expert_reasoning_chain,
+    parse_operator_input, proactive_suggestions,
+)
 from senia_innovations_v2 import (
     DriftEarlyWarning, reverse_engineer_color, ColorSearchEngine,
     CustomerColorProfile, diagnose_machine_from_drift,
@@ -211,6 +215,7 @@ PRODUCTION_PREDICTOR = ProductionPredictor(store_path=DEFAULT_OUTPUT_ROOT / "sen
 DEVICE_FINGERPRINT = DeviceFingerprint(store_path=DEFAULT_OUTPUT_ROOT / "senia_device_fp.json")
 KNOWLEDGE_ENGINE = KnowledgeEngine(store_path=DEFAULT_OUTPUT_ROOT / "senia_knowledge.json")
 DRIFT_WARNING = DriftEarlyWarning()
+AI_MEMORY = ExperienceMemory(store_path=DEFAULT_OUTPUT_ROOT / "senia_ai_memory.json")
 COLOR_SEARCH = ColorSearchEngine()
 CUSTOMER_PROFILES = CustomerColorProfile()
 WEB_CRAWLER = WebCrawler(cache_dir=DEFAULT_OUTPUT_ROOT / "crawler_cache")
@@ -7374,6 +7379,73 @@ def senia_knowledge_standard(name: str = "decorative_film_industry") -> dict[str
 
 
 # ── 管理 API ──────────────────────────────────────────
+
+# ── AI 推理引擎 ──────────────────────────────────────────
+
+@app.post("/v1/senia/ai/reason")
+def senia_ai_reason(
+    dE: float = Form(...), dL: float = Form(0), da: float = Form(0), db: float = Form(0),
+    profile: str = Form("wood"), customer_id: str = Form(""),
+    lot_id: str = Form(""), product_code: str = Form(""),
+    context_tags: str = Form(""),
+) -> dict[str, Any]:
+    """
+    AI 推理链: 像经验丰富的调色师傅一样, 一步步思考给出建议.
+    不是简单的阈值判定, 而是综合考虑历史案例+上下文+趋势.
+    """
+    tags = [t.strip() for t in context_tags.split(",") if t.strip()] if context_tags else []
+    return expert_reasoning_chain(dE, dL, da, db, profile, customer_id, lot_id, product_code, tags, AI_MEMORY)
+
+
+@app.post("/v1/senia/ai/remember")
+def senia_ai_remember(
+    dE: float = Form(...), dL: float = Form(0), da: float = Form(0), db: float = Form(0),
+    profile: str = Form("wood"), product_code: str = Form(""),
+    lot_id: str = Form(""), customer_id: str = Form(""),
+    system_tier: str = Form(""), operator_override: str = Form(""),
+    context_tags: str = Form(""), notes: str = Form(""),
+) -> dict[str, Any]:
+    """记录一个决策案例到 AI 经验记忆库."""
+    tags = [t.strip() for t in context_tags.split(",") if t.strip()] if context_tags else []
+    case = CaseMemory(
+        dE=dE, dL=dL, da=da, db=db, profile=profile,
+        product_code=product_code, lot_id=lot_id, customer_id=customer_id,
+        system_tier=system_tier, operator_override=operator_override,
+        context_tags=tags, notes=notes,
+    )
+    AI_MEMORY.remember(case)
+    return {"ok": True, "case_id": case.case_id}
+
+
+@app.post("/v1/senia/ai/close-case")
+def senia_ai_close_case(
+    case_id: str = Form(...), customer_accepted: bool = Form(...), notes: str = Form(""),
+) -> dict[str, Any]:
+    """案例闭环: 记录客户最终是否接受, 用于系统学习."""
+    AI_MEMORY.learn_from_outcome(case_id, customer_accepted, notes)
+    return {"ok": True}
+
+
+@app.get("/v1/senia/ai/error-patterns")
+def senia_ai_error_patterns() -> dict[str, Any]:
+    """分析系统判错的模式: 什么情况下判错最多?"""
+    return AI_MEMORY.get_error_patterns()
+
+
+@app.post("/v1/senia/ai/parse-text")
+def senia_ai_parse_text(text: str = Form(...)) -> dict[str, Any]:
+    """自然语言理解: 把操作员的话转为结构化数据."""
+    return parse_operator_input(text)
+
+
+@app.get("/v1/senia/ai/suggestions")
+def senia_ai_suggestions(
+    dE: float = 1.5, dL: float = 0, da: float = 0, db: float = 0,
+    profile: str = "wood",
+) -> dict[str, Any]:
+    """主动建议: 不等操作员问, 系统主动提醒该注意什么."""
+    return {"suggestions": proactive_suggestions(dE, dL, da, db, profile, memory=AI_MEMORY)}
+
 
 # ── 智能决策 (能力叠加) ──────────────────────────────────
 
