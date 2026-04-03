@@ -316,8 +316,23 @@ def analyze_photo(
 
     sample_warp, sample_M, sample_rect = warp_quad(image_bgr, sample_quad)
 
-    # ── 4. 构建遮罩 ──
-    board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
+    # ── 4. 构建遮罩 (K-means 分割 + fallback) ──
+    try:
+        from senia_advanced_color import smart_board_segment
+        orig_seg = smart_board_segment(image_bgr)
+        bh, bw = board_warp.shape[:2]
+        seg_warped = cv2.warpPerspective(
+            (orig_seg * 255).astype(np.uint8), board_M, (bw, bh),
+            flags=cv2.INTER_NEAREST
+        )
+        board_mask = seg_warped > 127
+        border_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.03)
+        board_mask &= border_mask
+        # fallback: 如果 K-means 过滤太多 (<30% 有效), 用标准 mask
+        if np.count_nonzero(board_mask) < board_mask.size * 0.30:
+            board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
+    except Exception:
+        board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
     board_invalid = build_invalid_mask(board_warp)
     board_mask &= ~board_invalid
 
@@ -488,12 +503,20 @@ def analyze_photo(
         board_sharpness=0, sample_sharpness=0,
     )
 
+    # 智能建议: 单拍 ΔE 偏高时建议双拍复核
+    smart_tip = ""
+    if avg_de > 5.0:
+        smart_tip = "💡 建议使用「两张照片」模式复核 — 标样和大货分别拍摄，精度更高"
+    elif avg_de > 3.0:
+        smart_tip = "ℹ️ 如需更精确的结果，可切换到「两张照片」模式"
+
     report = {
         "mode": "auto_match",
         "image": str(image_path),
         "lot_id": lot_id,
         "product_code": product_code,
         "elapsed_sec": round(elapsed, 3),
+        "smart_tip": smart_tip,
 
         # ★ 核心输出: 操作员直接看这些
         "tier": tier_result["tier"],             # "PASS" / "MARGINAL" / "FAIL"

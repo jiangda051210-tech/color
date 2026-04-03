@@ -580,9 +580,6 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
             board = c
             break
 
-    # 退回策略: 真实工厂照片中大货可能占满整个画面
-    # 如果没有 14%-95% 的候选, 取最大的候选作为 board
-    # (操作员拍照时总是对准大货, 所以最大区域=大货)
     if board is None and cands:
         board = cands[0]
 
@@ -590,23 +587,21 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
     if board is not None:
         board_poly = order_quad(board.quad).reshape(-1, 1, 2)
         best_score = -1.0
-        # 计算 board 对角线长度 (用于判断"附近")
         bq = order_quad(board.quad)
         board_diag = float(np.linalg.norm(bq[2] - bq[0]))
-        near_threshold = board_diag * 0.15  # 15% 对角线距离内算"附近"
+        near_threshold = board_diag * 0.15
 
         for c in cands:
             if c is board:
                 continue
             rel = c.rect_area / max(board.rect_area, 1.0)
-            if not (0.008 <= rel <= 0.60):  # 放宽: 0.8%~60% (支持更小标样)
+            if not (0.008 <= rel <= 0.60):
                 continue
-            # 允许标样在 board 内部 或 附近 (解决"标样在旁边"的场景)
+
             dist = cv2.pointPolygonTest(board_poly, c.center, measureDist=True)
-            inside_or_near = dist >= -near_threshold  # 负值=在外面, 但距离在阈值内
+            inside_or_near = dist >= -near_threshold
             if not inside_or_near:
                 continue
-            # 优先选内部的, 其次选附近的
             inside_bonus = 1.0 if dist >= 0 else 0.7
             score = c.rect_area * (0.45 + 0.55 * c.rectangularity) * inside_bonus
             if score > best_score:
