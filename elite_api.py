@@ -84,15 +84,11 @@ from elite_innovation_state import (
     upsert_acceptance_profile,
 )
 from elite_backup import BackupManager
-from senia_auto_match import auto_match as senia_auto_match_pixels
+from senia_auto_match import auto_match as senia_auto_match_pixels  # noqa: F401
 from senia_dual_shot import analyze_dual_shot as senia_dual_shot
-from senia_next_gen import (
-    cam16_forward, cam16_delta, metamerism_risk,
-    compute_surface_fingerprint, delta_e_to_cost, batch_consistency_index,
-)
+from senia_next_gen import metamerism_risk, delta_e_to_cost, batch_consistency_index
 from senia_synergy import (
-    predictive_maintenance, customer_specific_risk,
-    one_click_color_match, batch_stability_monitor, smart_decision,
+    predictive_maintenance, smart_decision, one_click_color_match,
 )
 from senia_ai_brain import (
     ExperienceMemory, CaseMemory, expert_reasoning_chain,
@@ -101,14 +97,14 @@ from senia_ai_brain import (
 from senia_lifelong_learning import LifelongLearner
 from senia_self_evolution import EvolutionEngine
 from senia_innovations_v2 import (
-    DriftEarlyWarning, reverse_engineer_color, ColorSearchEngine,
-    CustomerColorProfile, diagnose_machine_from_drift,
-    seasonal_compensation, anisotropy_analysis, generate_ar_preview_data,
+    DriftEarlyWarning, ColorSearchEngine, CustomerColorProfile,
+    diagnose_machine_from_drift, seasonal_compensation,
+    anisotropy_analysis, generate_ar_preview_data,
 )
 from senia_capture_station import CAPTURE_STATION_BOM, BUILD_STEPS, IPHONE_CAMERA_SETTINGS
 from senia_colorchecker import calibrate_from_photo
 from senia_edge_sdk import analyze_offline as edge_analyze_offline
-from senia_instant import process_instant, InstantResult
+from senia_instant import process_instant
 from senia_knowledge_crawler import KnowledgeEngine, WebCrawler, AutoModelUpgrader
 from senia_spa import render_senia_spa
 from senia_predictor import ProductionPredictor, DeviceFingerprint
@@ -122,18 +118,13 @@ from senia_learning import (
 )
 from senia_history import compute_lot_trend, compare_with_baseline
 from senia_image_pipeline import analyze_photo as senia_analyze_photo
-from senia_models import (
-    SeniaAnalyzeResponse,
-    SeniaCalibrationResponse,
-    SeniaLotTrendResponse,
-    SeniaThresholdResponse,
-)
+# senia_models available for future response_model typing
 from senia_threshold_store import ThresholdStore
 from senia_web_ui import render_senia_home
 from elite_batch_parallel import run_parallel_batch
 from elite_config_reload import ConfigStore
 from elite_event_bus import EventBus, FileQueueSubscriber, QualityDecisionEvent
-from elite_i18n import get_locale, set_locale, t
+from elite_i18n import t  # get_locale, set_locale available if needed
 from elite_image_store import ImageStore
 from elite_logging import get_logger, setup_logging
 from elite_report_pdf import generate_report

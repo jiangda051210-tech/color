@@ -361,7 +361,7 @@ def analyze_photo(
         board_mean, _conf = weighted_robust_mean(board_lab, board_mask.astype(np.uint8) if board_mask.dtype == bool else board_mask)
         board_std = np.zeros(3)
         board_used = int(np.count_nonzero(board_mask))
-    except Exception:
+    except (ImportError, ValueError, cv2.error):  # fallback to basic if advanced unavailable
         board_tone = texture_suppress(board_wb)
         board_lab = bgr_to_lab_float(board_tone)
         board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
@@ -373,7 +373,7 @@ def analyze_photo(
         sample_mean, _sconf = weighted_robust_mean(sample_lab, sample_mask.astype(np.uint8) if sample_mask.dtype == bool else sample_mask)
         sample_std = np.zeros(3)
         sample_used = int(np.count_nonzero(sample_mask))
-    except Exception:
+    except (ImportError, ValueError, cv2.error):  # fallback to basic
         sample_tone = texture_suppress(sample_wb)
         sample_lab = bgr_to_lab_float(sample_tone)
         sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
@@ -455,7 +455,7 @@ def analyze_photo(
         from senia_next_gen import metamerism_risk, delta_e_to_cost
         metamerism = metamerism_risk((float(board_mean[0]), float(board_mean[1]), float(board_mean[2])))
         cost = delta_e_to_cost(avg_de)
-    except Exception:
+    except (ImportError, ValueError, TypeError):
         metamerism = {"risk_level": "unknown"}
         cost = {}
 

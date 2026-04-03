@@ -213,7 +213,7 @@ def analyze_dual_shot(
 
     # ── Next-Gen 分析 (自动附加) ──
     from senia_next_gen import (
-        metamerism_risk, delta_e_to_cost, batch_consistency_index,
+        metamerism_risk, delta_e_to_cost,
         compute_surface_fingerprint,
     )
     metamerism = metamerism_risk((float(ref_mean[0]), float(ref_mean[1]), float(ref_mean[2])))
