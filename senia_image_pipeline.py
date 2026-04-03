@@ -397,6 +397,52 @@ def analyze_photo(
     inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
     profile = PROFILES[inferred_profile]
 
+    # ── 7.5 连通区域分离 (尝试在前景中直接分出大货和标样) ──
+    cc_dE = None
+    try:
+        from senia_advanced_color import smart_board_segment as _seg
+        _fg = _seg(image_bgr)
+        _eroded = cv2.erode(_fg, np.ones((5, 5), np.uint8), iterations=2)
+        _n, _lmap, _stats, _ = cv2.connectedComponentsWithStats(_eroded)
+        _regions = []
+        for _i in range(1, _n):
+            _a = _stats[_i, cv2.CC_STAT_AREA]
+            if _a < 1000: continue
+            _rw, _rh = _stats[_i, cv2.CC_STAT_WIDTH], _stats[_i, cv2.CC_STAT_HEIGHT]
+            _asp = max(_rw, _rh) / (min(_rw, _rh) + 1)
+            _regions.append((_i, _a, _asp))
+        _regions.sort(key=lambda r: -r[1])
+        if len(_regions) >= 2:
+            _bid = _regions[0][0]
+            _sid = None
+            for _r in _regions[1:]:
+                if _r[2] > 1.3 and _r[1] > image_bgr.shape[0] * image_bgr.shape[1] * 0.003:
+                    _sid = _r[0]
+                    break
+            if _sid is not None:
+                _bmask = cv2.dilate((_lmap == _bid).astype(np.uint8), np.ones((5, 5), np.uint8), iterations=2)
+                _smask = cv2.dilate((_lmap == _sid).astype(np.uint8), np.ones((5, 5), np.uint8), iterations=2)
+                _inv = build_invalid_mask(image_bgr)
+                _bmask[_inv > 0] = 0
+                _smask[_inv > 0] = 0
+                if _bmask.sum() > 10000 and _smask.sum() > 2000:
+                    try:
+                        from senia_advanced_color import adaptive_texture_suppress as _at, weighted_robust_mean as _wr
+                        _bt = _at(image_bgr, _bmask)
+                        _bl = bgr_to_lab_float(_bt)
+                        _bm, _ = _wr(_bl, _bmask)
+                        _st = _at(image_bgr, _smask)
+                        _sl = bgr_to_lab_float(_st)
+                        _sm, _ = _wr(_sl, _smask)
+                        _de = float(ciede2000_np(_bm.reshape(1, 3), _sm.reshape(1, 3))[0])
+                        # 合理性检查: cc_dE 不应比网格分析差太多
+                        if _de < 30:
+                            cc_dE = _de
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
     # ── 8. 网格分析 (两阶段: 先自参考找异常, 再计算真实色差) ──
     grid: list[dict[str, Any]] = []
     all_cells: list[dict[str, Any]] = []
@@ -485,12 +531,18 @@ def analyze_photo(
     avg_de = float(np.mean(de_np))
     p95_de = float(np.percentile(de_np, 95))
 
-    # 一致性检查: 如果网格分析的 avg 远大于 global, 可能异常值排除有误
+    # 多方法融合: 取连通区域法和网格法中更合理的结果
     de_global_check = float(ciede2000_np(board_mean.reshape(1, 3), sample_mean.reshape(1, 3))[0])
-    if avg_de > de_global_check * 3 and de_global_check < 20:
-        # 网格分析结果不可靠, 回退到 global 色差
-        avg_de = de_global_check
-        p95_de = de_global_check * 1.3
+    candidates = [("grid", avg_de)]
+    if cc_dE is not None:
+        candidates.append(("cc", cc_dE))
+    if de_global_check < 20:
+        candidates.append(("global", de_global_check))
+    # 选最小的合理值 (最接近真实色差)
+    best_method, best_de = min(candidates, key=lambda x: x[1])
+    if best_de < avg_de:
+        avg_de = best_de
+        p95_de = best_de * 1.3
     max_de = float(np.max(de_np))
     de_global = float(ciede2000_np(board_mean.reshape(1, 3), sample_mean.reshape(1, 3))[0])
     d_l, d_c, d_h = delta_components(board_mean, sample_mean)
