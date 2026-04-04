@@ -22,7 +22,6 @@ Usage:
 from __future__ import annotations
 
 import html
-import json
 import time
 from pathlib import Path
 from typing import Any

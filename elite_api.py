@@ -7,7 +7,6 @@ import hmac
 import json
 import math
 import os
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -128,7 +127,6 @@ from senia_web_ui import render_senia_home
 from elite_batch_parallel import run_parallel_batch
 from elite_config_reload import ConfigStore
 from elite_event_bus import EventBus, FileQueueSubscriber, QualityDecisionEvent
-from elite_i18n import t  # get_locale, set_locale available if needed
 from elite_image_store import ImageStore
 from elite_logging import get_logger, setup_logging
 from elite_report_pdf import generate_report

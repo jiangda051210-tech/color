@@ -218,11 +218,17 @@ dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) **
 |------|------|------|
 | `elite_api.py` | ~7194 | `run_id = f"senia_{int(time.time())}_{lot_id or 'auto'}"` 计算后从未传给 `record_run()`，纯死代��� |
 
-### 23. 未使用的导入
+### 23. 未使用的导入（多文件）
 
-| 文件 | 行号 | 描述 |
+| 文件 | 导入 | 状态 |
 |------|------|------|
-| `elite_api.py` | 92 | `from senia_auto_match import auto_match as senia_auto_match_pixels  # noqa: F401` — 导入后从未使用，用 noqa 压制警告 |
+| `elite_api.py` | `senia_auto_match_pixels` (noqa: F401) | **已删除** |
+| `elite_api.py` | `import sys` | **已删除** |
+| `elite_api.py` | `from elite_i18n import t` (从未调用) | **已删除** |
+| `elite_backup.py` | `import gzip`, `field` | **已删除** |
+| `elite_image_store.py` | `import json`, `import shutil` | **已删除** |
+| `elite_innovation_engine.py` | `dataclass`, `field`, `asdict`, `deque`, `copy` | **已删除** |
+| `elite_report_pdf.py` | `import json` | **已删除** |
 
 ### 24. 未接入流程的类
 

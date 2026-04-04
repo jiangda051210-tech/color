@@ -19,8 +19,6 @@ Usage:
 from __future__ import annotations
 
 import hashlib
-import json
-import shutil
 import sqlite3
 import time
 from dataclasses import dataclass

@@ -22,10 +22,8 @@ import json
 import hashlib
 import time
 import statistics
-from dataclasses import dataclass, field, asdict
 from typing import Any
-from collections import deque, defaultdict
-import copy
+from collections import defaultdict
 
 # ─────────────────────────────────────────────
 # 基础色彩科学工具
