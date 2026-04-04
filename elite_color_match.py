@@ -782,21 +782,66 @@ def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, i
             "role": role,
         }
 
-        # 提取平均颜色 (如果有图像)
+        # 精确颜色提取 — 完整对色级预处理链
         if image_bgr is not None:
-            mask = np.zeros((h, w), dtype=np.uint8)
-            pts = c.quad.astype(np.int32).reshape(-1, 1, 2)
-            cv2.fillPoly(mask, [pts], 255)
-            valid = image_bgr[mask == 255]
-            if len(valid) > 50:
-                lab = cv2.cvtColor(valid.reshape(1, -1, 3), cv2.COLOR_BGR2LAB).astype(np.float32)
-                lab[..., 0] *= (100.0 / 255.0)
-                lab[..., 1] -= 128.0
-                lab[..., 2] -= 128.0
-                mean_lab = lab.reshape(-1, 3).mean(axis=0)
-                board_info["mean_lab"] = {"L": round(float(mean_lab[0]), 2),
-                                          "a": round(float(mean_lab[1]), 2),
-                                          "b": round(float(mean_lab[2]), 2)}
+            quad = order_quad(c.quad)
+            widths = [np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[3])]
+            heights = [np.linalg.norm(quad[3] - quad[0]), np.linalg.norm(quad[2] - quad[1])]
+            bw, bh = int(max(widths)), int(max(heights))
+
+            if bw > 40 and bh > 40:
+                # Step 1: 透视校正 — 消除拍摄角度影响
+                dst = np.array([[0, 0], [bw, 0], [bw, bh], [0, bh]], dtype=np.float32)
+                M = cv2.getPerspectiveTransform(quad, dst)
+                warped = cv2.warpPerspective(image_bgr, M, (bw, bh))
+
+                # Step 2: 纹理抑制 — 消除木纹/石纹, 只保留底色
+                tone = texture_suppress(warped)
+
+                # Step 3: 排除无效区域 (文字/标签/高光/阴影)
+                invalid = build_invalid_mask(tone)
+                mat_mask = build_material_mask(tone.shape[:2], border_ratio=0.05)
+                valid_mask = mat_mask & (~invalid)
+                valid_count = int(np.count_nonzero(valid_mask))
+
+                if valid_count > 50:
+                    # Step 4: 白平衡校正
+                    wb, _ = apply_gray_world(tone, valid_mask)
+                    # Step 5: LAB 转换
+                    lab = bgr_to_lab_float(wb)
+                    # Step 6: 稳健统计 (IQR 去除异常值)
+                    try:
+                        mean_lab, std_lab, used = robust_mean_lab(lab, valid_mask)
+                        board_info["mean_lab"] = {
+                            "L": round(float(mean_lab[0]), 2),
+                            "a": round(float(mean_lab[1]), 2),
+                            "b": round(float(mean_lab[2]), 2),
+                        }
+                        board_info["std_lab"] = {
+                            "L": round(float(std_lab[0]), 2),
+                            "a": round(float(std_lab[1]), 2),
+                            "b": round(float(std_lab[2]), 2),
+                        }
+                        board_info["valid_pixel_ratio"] = round(valid_count / max(bw * bh, 1), 3)
+                        board_info["used_pixels"] = used
+                    except ValueError:
+                        pass  # 有效像素不够, 跳过颜色提取
+                else:
+                    # 有效像素太少, 用简化提取
+                    pixels = tone[mat_mask]
+                    if len(pixels) > 50:
+                        lab_simple = cv2.cvtColor(pixels.reshape(1, -1, 3),
+                                                  cv2.COLOR_BGR2LAB).astype(np.float32)
+                        lab_simple[..., 0] *= (100.0 / 255.0)
+                        lab_simple[..., 1] -= 128.0
+                        lab_simple[..., 2] -= 128.0
+                        ml = lab_simple.reshape(-1, 3).mean(axis=0)
+                        board_info["mean_lab"] = {
+                            "L": round(float(ml[0]), 2),
+                            "a": round(float(ml[1]), 2),
+                            "b": round(float(ml[2]), 2),
+                        }
+                        board_info["valid_pixel_ratio"] = round(valid_count / max(bw * bh, 1), 3)
 
         boards.append(board_info)
 

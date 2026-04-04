@@ -286,33 +286,12 @@ def generate_color_match_report(
         else:
             profile = "wood"
 
-    # ── 2c. 户外光照校正后重新提取颜色 ──
-    if is_outdoor and len(consistency_boards) >= 1:
-        corrected_img = apply_outdoor_white_balance(
-            image_bgr, np.ones((h, w), dtype=bool))[0]
-        corrected_img = apply_shading_correction(
-            corrected_img, np.ones((h, w), dtype=bool), adaptive=True)
-        for b in consistency_boards:
-            quad = b.get("quad")
-            if quad is None:
-                continue
-            mask = np.zeros((h, w), dtype=np.uint8)
-            pts = quad.astype(np.int32).reshape(-1, 1, 2)
-            cv2.fillPoly(mask, [pts], 255)
-            valid = corrected_img[mask == 255]
-            if len(valid) > 50:
-                lab_arr = cv2.cvtColor(valid.reshape(1, -1, 3),
-                                       cv2.COLOR_BGR2LAB).astype(np.float32)
-                lab_arr[..., 0] *= (100.0 / 255.0)
-                lab_arr[..., 1] -= 128.0
-                lab_arr[..., 2] -= 128.0
-                ml = lab_arr.reshape(-1, 3).mean(axis=0)
-                b["mean_lab"] = {"L": round(float(ml[0]), 2),
-                                 "a": round(float(ml[1]), 2),
-                                 "b": round(float(ml[2]), 2)}
-        # 重新计算校正后色差
-        if main_board:
-            for b in similar_planks:
+    # ── 2c. 颜色已在 detect_all_boards 中精确测量 ──
+    # (透视校正 → 纹理抑制 → 无效掩码 → 白平衡 → IQR稳健统计)
+    # 重新计算板间色差 (使用精确值)
+    if main_board:
+        for b in similar_planks:
+            if b.get("mean_lab") and main_board.get("mean_lab"):
                 de = _ciede2000_detail(main_board["mean_lab"], b["mean_lab"])
                 b["_de_to_main"] = de["dE00"]
                 b["_de_detail_to_main"] = de
