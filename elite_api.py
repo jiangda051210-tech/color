@@ -89,7 +89,6 @@ from elite_innovation_state import (
     upsert_acceptance_profile,
 )
 from elite_backup import BackupManager
-from senia_auto_match import auto_match as senia_auto_match_pixels  # noqa: F401
 from senia_dual_shot import analyze_dual_shot as senia_dual_shot
 from senia_next_gen import metamerism_risk, delta_e_to_cost, batch_consistency_index
 from senia_synergy import (
@@ -7191,7 +7190,6 @@ async def senia_analyze_endpoint(
 
     # ── 持久化: 写入质量历史数据库 ──
     try:
-        run_id = f"senia_{int(time.time())}_{lot_id or 'auto'}"
         record_run(
             db_path=DEFAULT_HISTORY_DB, report=report,
             line_id=report.get("detection", {}).get("sample_source", ""),

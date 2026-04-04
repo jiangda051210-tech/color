@@ -196,11 +196,100 @@ dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) **
 
 ---
 
+---
+
+## 九、死代码和孤立模块 (Dead Code & Orphaned Modules)
+
+### 21. 完全孤立的模块 — 从未被任何文件导入
+
+| 文件 | 行数 | ��述 |
+|------|------|------|
+| `color_match_engine.py` | 534 | `elite_color_match.py` 的旧版本，功能完全重复 |
+| `senia_advanced_industry.py` | 431 | 定义了 `CausalRootCauseAnalyzer`、`MultiSiteAgreement`、`SustainabilityTracker`���但无人使用 |
+| `senia_label_detector.py` | 165 | 白色标签定位器 `find_sample_by_white_label()`，从未被调用 |
+| `senia_models.py` | 172 | 定义了完整的 Pydantic 响应模型（`SeniaAnalyzeResponse` 等），但 API 端点未使用 `response_model` |
+| `senia_pipeline.py` | 249 | `SessionRecord` 仅在自身文件内使用，从未被外部导入 |
+
+**总计 1551 行完全无用代码。**
+
+### 22. 死变量和未使用的赋值
+
+| 文件 | 行号 | 描述 |
+|------|------|------|
+| `elite_api.py` | ~7194 | `run_id = f"senia_{int(time.time())}_{lot_id or 'auto'}"` 计算后从未传给 `record_run()`，纯死代��� |
+
+### 23. 未使用的导入
+
+| 文件 | 行号 | 描述 |
+|------|------|------|
+| `elite_api.py` | 92 | `from senia_auto_match import auto_match as senia_auto_match_pixels  # noqa: F401` — 导入后从未使用，用 noqa 压制警告 |
+
+### 24. 未接入流程的类
+
+| 文件 | 类名 | 描述 |
+|------|------|------|
+| `senia_industry.py` | `ProductionDriftTracker` | 已定义但从未被实例化或使用 |
+| `senia_next_gen.py` | `SurfaceFingerprint` | 已定义并在模块内部使用，但从未被外部导入 |
+| `senia_advanced_industry.py` | 全部 3 个类 | 整个模块未接入 |
+
+---
+
+## 十、代码重复 (Code Duplication)
+
+### 25. `ciede2000` 实现重复 5 次
+
+同一个 CIEDE2000 色差算法在 5 ��文件中独立实现：
+
+| 文件 | 函数名 | 说明 |
+|------|--------|------|
+| `senia_calibration.py:147` | `ciede2000()` | **标准版**（标量），被 10+ 个模块导入 |
+| `elite_color_match.py:220` | `ciede2000()` | 向量化 numpy 版，独立实现 |
+| `color_match_engine.py:184` | `ciede2000()` | 孤立旧版，完全冗余 |
+| `senia_edge_sdk.py:54` | `ciede2000()` | 又一个独立标量版 |
+| `senia_color_report.py:29` | `_ciede2000_detail()` | 返回详细分量的变体 |
+
+**建议**: 统一为一个模块（如 `color_math.py`），提供标量版和向量化版，其他文件统一导入。
+
+### 26. `ROI` 类和 `parse_roi` 重复
+
+| 文件 | 描述 |
+|------|------|
+| `elite_color_match.py:21,76` | `class ROI` + `def parse_roi()` |
+| `color_match_engine.py:14,21` | 完全相同的 `class ROI` + `def parse_roi()` |
+
+### 27. `_to_float` 辅助函数重复 3 次
+
+| 文件 | 行号 |
+|------|------|
+| `elite_quality_history.py` | 122 |
+| `elite_counterfactual.py` | 15 |
+| `senia_color_report.py` | (类似实现) |
+
+---
+
+## 十一、已修复的问题 (Fixed)
+
+以下问题已在本次审查中修复：
+
+- [x] #1 异常静默吞掉 → 添加 `_log.warning()` 日志
+- [x] #2 ACCEPTANCE_SYNC_CACHE 内存泄漏 → 添加 TTL 清理 + 上限 10000
+- [x] #4 SQL 注入 → 添加标识符白名单校验
+- [x] #6 信号量无超时 → 添加 30 秒超时 + 503 响应
+- [x] #7 Content-Type 验证 → 添加白名单校验
+- [x] #11 依赖版本 ��� 添加上限约束 + scipy 声明
+- [x] #14 NaN 传播 → `_to_float()` 添加 NaN/Inf 检查
+- [x] #15 数值稳定性 → `np.hypot()` 替代
+- [x] SQLite WAL 模式 → `init_db()` 启用
+
+---
+
 ## 优先级总结
 
 | 优先级 | 问题 | 建议行动 |
 |--------|------|---------|
-| **P0 紧急** | #1 异常处理、#2 内存泄漏、#4 SQL注入、#5 认证 | 立即修复 |
-| **P1 高** | #3 并发、#6 限流、#7 验证、#8 拆分大文件 | 短期内修复 |
-| **P2 中** | #9 全局状态、#10 CI/CD、#11 依赖、#12 测试框架、#14 NaN | 中期改善 |
-| **P3 低** | #13 覆盖率、#15 数值、#16-20 运维和风格 | 逐步改善 |
+| **P0 紧急** | ~~#1 异常处理~~、~~#2 内存泄漏~~、~~#4 SQL注入~~、#5 认证 | ~~已修复~~ / 添加认证 |
+| **P1 高** | ~~#3 并发~~、~~#6 限流~~、~~#7 验证~~、#8 拆分大文件 | ~~已修复~~ / 拆分文件 |
+| **P2 中** | #9 全局状态、#10 CI/CD、~~#11 依赖~~、#12 测试框架、~~#14 NaN~~ | 改善架构 |
+| **P2 中** | #21 孤立模块(1551行)、#22 死变量、#23 未使用导入 | 清理死代码 |
+| **P2 中** | #25 ciede2000 重复5次、#26 ROI重复、#27 _to_float重复 | 统一实现 |
+| **P3 低** | #13 覆盖率、~~#15 数值~~、#16-20 运维和风格、#24 未接入类 | 逐步改善 |
