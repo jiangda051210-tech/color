@@ -1,4 +1,4 @@
-﻿"""
+"""
 Production-grade lifecycle system for decorative film quality.
 Covers environment -> substrate -> run monitoring -> traceability -> CAPA closure.
 No third-party dependencies.
@@ -4034,13 +4034,13 @@ class UltimateColorFilmSystemV2Optimized:
             hard_blocks.append("sensor_failure_detected")
         if int(context.get("calibration_overdue_count", 0) or 0) > 0:
             hard_blocks.append("calibration_overdue")
-        if bool(context.get("trace_integrity", True)) is False:
+        if not context.get("trace_integrity", True):
             hard_blocks.append("trace_integrity_broken")
         if int(context.get("trace_missing_required", 0) or 0) > 0:
             hard_blocks.append("trace_missing_required_events")
-        if bool(context.get("data_valid", True)) is False:
+        if not context.get("data_valid", True):
             hard_blocks.append("invalid_measurement_data")
-        if bool(context.get("inspection_chain_integrity", True)) is False:
+        if not context.get("inspection_chain_integrity", True):
             hard_blocks.append("inspection_chain_broken")
         if float(context.get("suspicious_ratio", 0.0) or 0.0) > 0.25:
             hard_blocks.append("suspicious_data_ratio_high")

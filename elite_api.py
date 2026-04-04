@@ -1558,8 +1558,8 @@ def _add_history_assessment(report: dict[str, Any], history: "HistoryConfig | No
     if not flags:
         return
 
-    quality_flags = report.get("result", {}).setdefault("quality_flags", [])
-    guidance = report.get("result", {}).setdefault("capture_guidance", [])
+    quality_flags = report.setdefault("result", {}).setdefault("quality_flags", [])
+    guidance = report.setdefault("result", {}).setdefault("capture_guidance", [])
     for flag in flags:
         _append_unique(quality_flags, str(flag))
     if "history_drift_uptrend" in flags:

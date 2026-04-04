@@ -198,6 +198,7 @@ def run_validation() -> bool:
         print("\n" + "=" * 60)
         print("CIEDE2000 Validation: color_match_engine.ciede2000_array")
         print("=" * 60)
+        fail_count = 0
         for idx, pair in enumerate(SHARMA_PAIRS, 1):
             L1, a1, b1, L2, a2, b2, expected = pair
             lab1 = np.array([[[L1, a1, b1]]], dtype=np.float32)

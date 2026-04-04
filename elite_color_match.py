@@ -1,4 +1,4 @@
-﻿
+
 from __future__ import annotations
 
 import argparse
@@ -2340,8 +2340,8 @@ def main() -> None:
         )
         report["history_assessment"] = assessment
         if assessment.get("enabled") and assessment.get("flags"):
-            flags = report.get("result", {}).setdefault("quality_flags", [])
-            guidance = report.get("result", {}).setdefault("capture_guidance", [])
+            flags = report.setdefault("result", {}).setdefault("quality_flags", [])
+            guidance = report.setdefault("result", {}).setdefault("capture_guidance", [])
             for flag in assessment.get("flags", []):
                 _append_unique(flags, str(flag))
             if "history_drift_uptrend" in assessment.get("flags", []):

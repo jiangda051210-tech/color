@@ -1,4 +1,4 @@
-﻿"""
+"""
 Production-grade core color pipeline for decorative film quality control.
 No third-party dependencies.
 """

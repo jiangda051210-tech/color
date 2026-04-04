@@ -218,7 +218,8 @@ class AutoUpgrader:
                 upgrade["auto_applicable"] = False
 
             elif "材质" in area:
-                profile_name = area.split()[-2] if "材质" in area else "unknown"
+                parts = area.split()
+                profile_name = parts[-2] if len(parts) >= 2 else "unknown"
                 upgrade["action"] = f"增加 {profile_name} 的安全余量 (收紧 10%)"
                 upgrade["auto_applicable"] = True
 
