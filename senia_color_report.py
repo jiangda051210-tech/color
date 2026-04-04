@@ -351,18 +351,24 @@ def generate_color_match_report(
             }
 
     # ── 4. 板面一致性 + 偏差最大板材标注 ──
+    # 只统计同产品板对 (dE < 5), 排除误检入的非同产品区域
     consistency = None
     if len(consistency_boards) >= 2:
-        pairs = []
+        all_pairs = []
+        same_product_pairs = []
         board_avg_de: dict[int, list[float]] = {}
         for i in range(len(consistency_boards)):
             for j in range(i + 1, len(consistency_boards)):
                 if consistency_boards[i].get("mean_lab") and consistency_boards[j].get("mean_lab"):
                     de = _ciede2000_detail(consistency_boards[i]["mean_lab"],
                                            consistency_boards[j]["mean_lab"])
-                    pairs.append(de["dE00"])
+                    all_pairs.append(de["dE00"])
+                    # 只有dE<5的板对才计入一致性 (超过5说明不是同一产品)
+                    if de["dE00"] < 5.0:
+                        same_product_pairs.append(de["dE00"])
                     board_avg_de.setdefault(i, []).append(de["dE00"])
                     board_avg_de.setdefault(j, []).append(de["dE00"])
+        pairs = same_product_pairs if same_product_pairs else all_pairs
         if pairs:
             worst_idx = max(board_avg_de,
                             key=lambda k: float(np.mean(board_avg_de[k]))) if board_avg_de else None

@@ -319,8 +319,16 @@ def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
     重纹理 (深木纹/石纹) → 强力滤波, 彻底消除纹理只留底色
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    mean_brightness = float(gray.mean())
     # 测量纹理强度: 拉普拉斯方差
     lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    # 极深色板 (L<35): 信噪比低, 需要更强的噪声抑制
+    if mean_brightness < 45:
+        filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=80, sigmaSpace=20)
+        filtered = cv2.bilateralFilter(filtered, d=9, sigmaColor=60, sigmaSpace=15)
+        filtered = cv2.medianBlur(filtered, 7)
+        return filtered
 
     if lap_var < 50:
         # 轻纹理: 轻度滤波
@@ -870,7 +878,11 @@ def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, i
                         board_info["valid_pixel_ratio"] = round(valid_count / max(bw * bh, 1), 3)
                         board_info["used_pixels"] = used
                         board_info["grid_cells_used"] = len(cell_means) if cell_means else 0
-                        if float(std_lab[0]) > 12.0:
+                        # 质量门控: 网格间 std_L 阈值按亮度自适应
+                        # 深色板(L<35)噪声天然高, 阈值放宽; 浅色板阈值严格
+                        board_L = float(mean_lab[0])
+                        std_threshold = max(6.0, 15.0 * (35.0 / max(board_L, 1.0)))
+                        if float(std_lab[0]) > std_threshold:
                             board_info["quality_warning"] = "high_variance"
                     except ValueError:
                         pass  # 有效像素不够, 跳过颜色提取
