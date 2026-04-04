@@ -1195,6 +1195,7 @@ SMART_HOME_PAGE_TEMPLATE = """
           <div class="seg" id="mode-seg">
             <button type="button" data-mode="single" class="active">单图智能识别</button>
             <button type="button" data-mode="dual">样板-彩膜对比</button>
+            <button type="button" data-mode="saci">SACI一键对色</button>
           </div>
           <div class="mode-hint" id="mode-hint">单图模式适合现场拍照快速抽检，系统自动识别区域并给出结论。</div>
           <div class="workflow" id="workflow_row">
@@ -1576,13 +1577,16 @@ SMART_HOME_PAGE_TEMPLATE = """
     }
 
     function syncModeUI() {
-      const single = state.mode === "single";
+      const single = state.mode === "single" || state.mode === "saci";
       q("#single-input-wrap").style.display = single ? "" : "none";
       q("#dual-reference-wrap").style.display = single ? "none" : "";
       q("#dual-film-wrap").style.display = single ? "none" : "";
-      q("#mode-hint").textContent = single
-        ? "单图模式适合现场拍照快速抽检，系统自动识别区域并给出结论。"
-        : "双图模式适合样板和彩膜的标准化比对，结果更稳定、可追溯。";
+      const hints = {
+        "single": "单图模式适合现场拍照快速抽检，系统自动识别区域并给出结论。",
+        "dual": "双图模式适合样板和彩膜的标准化比对，结果更稳定、可追溯。",
+        "saci": "SACI一键对色：水泥地自校准+智能板材识别+行业分析+自动配方。适合户外/复杂场景。",
+      };
+      q("#mode-hint").textContent = hints[state.mode] || hints["single"];
       q("#mode-seg").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.mode === state.mode));
       updateWorkflowStatus();
       refreshCaptureAssessment();
@@ -1763,6 +1767,14 @@ SMART_HOME_PAGE_TEMPLATE = """
       if (customerId) fd.append("customer_id", customerId);
       if (customerTier) fd.append("customer_tier", customerTier);
 
+      if (state.mode === "saci") {
+        const f = q("#single-image").files?.[0];
+        if (!f) throw new Error("请先上传现场图。");
+        const saciFd = new FormData();
+        saciFd.append("image", f);
+        saciFd.append("profile", q("#profile")?.value || "auto");
+        return { path: "/v1/web/analyze/saci-upload", formData: saciFd };
+      }
       if (state.mode === "single") {
         const f = q("#single-image").files?.[0];
         if (!f) throw new Error("请先上传现场图。");

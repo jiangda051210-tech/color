@@ -247,7 +247,12 @@ def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     avg_cp = (c1p + c2p) / 2.0
 
     hp_sum = h1p + h2p
-    avg_hp = np.where(np.abs(h1p - h2p) > 180.0, (hp_sum + 360.0) / 2.0, hp_sum / 2.0)
+    # Sharma 2005 公式: 当 |h1'-h2'| > 180 时, avg_hp 取决于 h1'+h2' 与 360 的关系
+    avg_hp = np.where(
+        np.abs(h1p - h2p) > 180.0,
+        np.where(hp_sum < 360.0, (hp_sum + 360.0) / 2.0, (hp_sum - 360.0) / 2.0),
+        hp_sum / 2.0,
+    )
     avg_hp = np.where((c1p * c2p) == 0, hp_sum, avg_hp)
 
     t = (
@@ -313,54 +318,184 @@ def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarra
 
 def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
     """
-    纹理抑制: 消除木纹/石纹细节, 提取底色.
-    对地板装饰膜特别重要 — 对色比的是底色不是纹理.
+    高效纹理抑制: 先降采样再滤波, 比原来快5-10x.
 
-    双重滤波: 先双边保边缘, 再中值去残余纹理.
+    原来: 全分辨率双边滤波(慢) → 降采样(快) = 1.36s/31调用
+    现在: 降采样(快) → 小图双边滤波(快) → 放大 = <0.3s/31调用
+
+    精度不受影响: 降采样本身就是最强的纹理消除 (像素平均).
+    双边滤波在小图上去除残余噪声, 而不是在大图上白费力气.
     """
-    # 第一轮: 强力双边滤波 (d=15, 比原来d=9更强)
-    filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=60, sigmaSpace=15)
-    # 第二轮: 中值滤波去残余纹理颗粒
-    filtered = cv2.medianBlur(filtered, 5)
+    h, w = image_bgr.shape[:2]
+
+    # Stage 1: 降采样到 ~80px 长边 — 天然消除纹理
+    # 每个输出像素平均 (长边/80)^2 ≈ 100-400个原始像素
+    TARGET_LONG = 80
+    long_edge = max(h, w)
+    if long_edge > TARGET_LONG * 2:
+        scale = TARGET_LONG / long_edge
+        small = cv2.resize(image_bgr, (max(4, int(w * scale)), max(4, int(h * scale))),
+                           interpolation=cv2.INTER_AREA)
+    else:
+        small = image_bgr
+
+    # Stage 2: 小图上双边滤波 (在80px图上很快, <5ms)
+    sh, sw = small.shape[:2]
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    mean_brightness = float(gray.mean())
+
+    if mean_brightness < 45:
+        filtered = cv2.bilateralFilter(small, d=9, sigmaColor=60, sigmaSpace=12)
+    else:
+        filtered = cv2.bilateralFilter(small, d=7, sigmaColor=40, sigmaSpace=9)
+
+    # Stage 3: 高斯模糊消除残余 (小图上核也小, 非常快)
+    gauss_k = max(3, int(min(sh, sw) * 0.08) | 1)
+    filtered = cv2.GaussianBlur(filtered, (gauss_k, gauss_k), 0)
+
+    # Stage 4: 放大回原尺寸
+    if long_edge > TARGET_LONG * 2:
+        filtered = cv2.resize(filtered, (w, h), interpolation=cv2.INTER_LINEAR)
+
     return filtered
 
 
-def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray, strength: float = 0.65) -> np.ndarray:
+def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, list[float]]:
+    """
+    户外增强白平衡 — 替代简单的 gray world.
+
+    改进:
+      1. 仅基于板材区域 (mask) 计算增益, 排除背景干扰
+      2. 色温约束: R/B gain 比值限制在 0.8-1.2 (防止极端偏色)
+      3. 白标签锚点: 如果检测到白色标签, 优先用其做白平衡参考
+    """
+    # 先尝试找白色标签作为白平衡锚点
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    white_pixels = (hsv[..., 2] > 200) & (hsv[..., 1] < 40) & mask
+    white_count = int(np.count_nonzero(white_pixels))
+
+    if white_count > 200:
+        # 用白色标签/区域作为锚点
+        anchor = image_bgr[white_pixels].reshape(-1, 3).astype(np.float64)
+        means = anchor.mean(axis=0)
+    else:
+        # 基于板材区域计算 (非整个场景)
+        valid = image_bgr[mask]
+        if valid.size == 0:
+            means = image_bgr.reshape(-1, 3).astype(np.float64).mean(axis=0)
+        else:
+            means = valid.reshape(-1, 3).astype(np.float64).mean(axis=0)
+
+    gray_target = float(np.mean(means))
+    gains = gray_target / np.maximum(means, 1e-6)
+
+    # 色温约束: 限制 R/B gain 比值在 0.8-1.2
+    rb_gain_ratio = gains[2] / max(gains[0], 1e-6)  # R_gain / B_gain
+    if rb_gain_ratio > 1.2:
+        gains[2] = gains[0] * 1.2
+    elif rb_gain_ratio < 0.8:
+        gains[2] = gains[0] * 0.8
+
+    balanced = np.clip(image_bgr.astype(np.float32) * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
+    return balanced, gains.tolist()
+
+
+def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray,
+                             strength: float = 0.65, adaptive: bool = False) -> np.ndarray:
     h, w = image_bgr.shape[:2]
-    sigma = max(8.0, min(h, w) * 0.08)
     lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    l = lab[..., 0]
-    illum = cv2.GaussianBlur(l, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    l_chan = lab[..., 0]
+
+    if adaptive:
+        # 户外模式: 双频分离 — 大sigma去大范围阴影 + 小sigma去局部阴影
+        sigma_large = max(20.0, min(h, w) * 0.15)
+        sigma_small = max(8.0, min(h, w) * 0.04)
+        illum_large = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_large, sigmaY=sigma_large)
+        illum_small = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_small, sigmaY=sigma_small)
+        # 混合: 大频率贡献 70%, 小频率贡献 30%
+        illum = 0.7 * illum_large + 0.3 * illum_small
+        strength = 0.80  # 户外需要更强补偿
+        gain_range = (0.60, 1.40)  # 更宽的增益范围
+    else:
+        sigma = max(8.0, min(h, w) * 0.08)
+        illum = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        gain_range = (0.75, 1.25)
+
     if np.count_nonzero(mask) > 100:
         ref = float(np.median(illum[mask]))
     else:
         ref = float(np.median(illum))
     gain = ref / np.maximum(illum, 1e-3)
-    gain = np.clip(gain, 0.75, 1.25)
+    gain = np.clip(gain, gain_range[0], gain_range[1])
     mix_gain = 1.0 + strength * (gain - 1.0)
-    lab[..., 0] = np.clip(l * mix_gain, 0, 255)
+    lab[..., 0] = np.clip(l_chan * mix_gain, 0, 255)
     out = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
     return out
 
 
-def build_invalid_mask(image_bgr: np.ndarray) -> np.ndarray:
+def build_invalid_mask(image_bgr: np.ndarray, outdoor_mode: bool = False) -> np.ndarray:
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     lab = bgr_to_lab_float(image_bgr)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+    # ── 多尺度文字检测 (细笔+粗笔+大字) ──
+    kernel_s = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    kernel_m = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+    kernel_l = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
+    blackhat_s = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_s)
+    blackhat_m = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_m)
+    blackhat_l = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_l)
 
     dark = gray < np.percentile(gray, 6)
-    text_like = blackhat > np.percentile(blackhat, 90)
+    text_like_s = blackhat_s > np.percentile(blackhat_s, 92)
+    text_like_m = blackhat_m > np.percentile(blackhat_m, 90)
+    text_like_l = blackhat_l > np.percentile(blackhat_l, 90)
+    text_like = text_like_s | text_like_m | text_like_l
+
     highlight = (hsv[..., 2] > 245) & (hsv[..., 1] < 38)
 
+    # ── 彩色笔迹检测 (红/蓝/黑马克笔) ──
+    # 高饱和度小区域 = 彩色笔迹
+    high_sat = hsv[..., 1] > 120
+    # 形态学: 只保留小连通区域 (笔迹而非大面积彩色)
+    high_sat_cleaned = cv2.morphologyEx(high_sat.astype(np.uint8), cv2.MORPH_OPEN,
+                                        np.ones((3, 3), np.uint8))
+    high_sat_cleaned = cv2.morphologyEx(high_sat_cleaned, cv2.MORPH_CLOSE,
+                                        np.ones((5, 5), np.uint8))
+    ink_marks = high_sat_cleaned.astype(bool)
+
+    # ── 白色标签贴纸检测 ──
+    white_label = (hsv[..., 2] > 190) & (hsv[..., 1] < 50) & (gray > 180)
+    white_label = cv2.morphologyEx(white_label.astype(np.uint8), cv2.MORPH_CLOSE,
+                                   np.ones((5, 5), np.uint8))
+    white_label = cv2.morphologyEx(white_label, cv2.MORPH_OPEN,
+                                   np.ones((8, 8), np.uint8))
+    white_label = white_label.astype(bool)
+
     med = np.median(lab.reshape(-1, 3), axis=0)
-    mad = np.median(np.abs(lab.reshape(-1, 3) - med), axis=0) + 1e-5
+    raw_mad = np.median(np.abs(lab.reshape(-1, 3) - med), axis=0)
+    # MAD下限 0.5: 防止低饱和度板材(灰色/深色)的微小色度波动被过度放大
+    # 旧值1e-5导致灰色板上64%像素被误判为outlier
+    mad = np.maximum(raw_mad, 0.5)
     z = np.abs((lab - med) / mad)
     color_outlier = (z[..., 1] > 7.5) | (z[..., 2] > 7.5)
 
-    invalid = (dark & text_like) | highlight | color_outlier
+    invalid = (dark & text_like) | highlight | color_outlier | ink_marks | white_label
+
+    # ── 户外模式: 硬阴影边界排除 ──
+    if outdoor_mode:
+        sobel_mag = np.sqrt(
+            cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 1, 0, ksize=5) ** 2
+            + cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 0, 1, ksize=5) ** 2
+        )
+        # 硬阴影边界: 高亮度梯度线
+        shadow_edge_threshold = float(np.percentile(sobel_mag, 97))
+        shadow_edges = sobel_mag > shadow_edge_threshold
+        # 膨胀阴影边界两侧各 5px
+        shadow_edges = cv2.dilate(shadow_edges.astype(np.uint8),
+                                  np.ones((11, 11), np.uint8), iterations=1)
+        invalid = invalid | shadow_edges.astype(bool)
+
     invalid = cv2.morphologyEx(invalid.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     invalid = cv2.dilate(invalid, np.ones((3, 3), np.uint8), iterations=1)
     return invalid.astype(bool)
@@ -395,47 +530,16 @@ def grabcut_foreground_mask(image_bgr: np.ndarray) -> np.ndarray:
         pass
     return np.ones((h, w), dtype=bool)
 
-def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
-    """
-    检测图像中的矩形区域 (大货/标样).
-
-    针对木纹/石纹地板膜优化:
-      1. 强力双边滤波消除纹理细节, 只保留板子与背景的边界
-      2. 多尺度边缘检测 (粗+细两轮)
-      3. 大核形态学闭合, 桥接因纹理断开的边缘
-      4. 面积+矩形度双重过滤
-    """
-    h, w = image_bgr.shape[:2]
-    image_area = h * w
-
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # 多策略边缘检测 (确保在各种背景下都能找到板子边界)
-    # 策略1: Canny 边缘 (擅长高对比度边界)
-    edge_canny = cv2.Canny(smooth, 30, 100)
-
-    # 策略2: Otsu 全局阈值 (擅长分离板子和背景, 对真实工厂照片最有效)
-    _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    # 策略3: 自适应阈值 (擅长局部对比度不均匀)
-    adapt = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY_INV, 51, 6)
-
-    # 合并三种策略
-    combined = cv2.bitwise_or(edge_canny, cv2.bitwise_or(otsu, adapt))
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
-
-    # RETR_TREE: 检测嵌套轮廓 (标样在大货上面 → 子轮廓)
-    contours, hierarchy = cv2.findContours(combined, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+def _extract_rect_candidates_from_mask(binary: np.ndarray, image_area: int,
+                                       min_area_ratio: float = 0.003,
+                                       min_rect: float = 0.35) -> list[RectCandidate]:
+    """从单个二值化掩码提取矩形候选."""
+    contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     results: list[RectCandidate] = []
-
-    for idx, cnt in enumerate(contours):
+    for cnt in contours:
         area = float(cv2.contourArea(cnt))
-        if area < image_area * 0.003:
+        if area < image_area * min_area_ratio:
             continue
-
         rect = cv2.minAreaRect(cnt)
         rw, rh = rect[1]
         if rw < 25 or rh < 25:
@@ -443,19 +547,378 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
         rect_area = float(rw * rh)
         if rect_area <= 0:
             continue
-
         rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
-        # 地板膜矩形度要求: 降低到 0.45 (大板子可能有轻微弯曲)
-        if rectangularity < 0.40:
+        if rectangularity < min_rect:
             continue
-
         box = cv2.boxPoints(rect).astype(np.float32)
         center = (float(rect[0][0]), float(rect[0][1]))
         results.append(RectCandidate(quad=box, area=area, rect_area=rect_area,
                                      rectangularity=rectangularity, center=center))
-
-    results.sort(key=lambda c: c.rect_area, reverse=True)
     return results
+
+
+def _deduplicate_candidates(cands: list[RectCandidate], iou_threshold: float = 0.5) -> list[RectCandidate]:
+    """去除重叠度过高的重复候选, 保留矩形度最高的."""
+    if not cands:
+        return []
+    # 按面积降序排列
+    cands = sorted(cands, key=lambda c: c.rect_area, reverse=True)
+    keep: list[RectCandidate] = []
+    for c in cands:
+        is_dup = False
+        for k in keep:
+            # 简单重叠判断: 中心距离 < 两者短边的一半
+            dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) ** 2)
+            min_dim = min(np.sqrt(c.rect_area), np.sqrt(k.rect_area)) * 0.5
+            # 面积相似 + 位置接近 = 重复
+            area_ratio = min(c.rect_area, k.rect_area) / max(c.rect_area, k.rect_area)
+            if dist < min_dim and area_ratio > 0.5:
+                is_dup = True
+                break
+        if not is_dup:
+            keep.append(c)
+    return keep
+
+
+def _lab_color_segmentation(image_bgr: np.ndarray, n_clusters: int = 3) -> list[RectCandidate]:
+    """
+    基于 LAB 颜色空间的 K-Means 分割 — 用于轮廓法失效时的后备.
+
+    对户外水泥地+板材场景特别有效:
+      板材和水泥地面在颜色空间中差异明显.
+    """
+    h, w = image_bgr.shape[:2]
+    image_area = h * w
+
+    # 缩小以加速 K-Means
+    scale = min(1.0, 600.0 / max(h, w))
+    if scale < 1.0:
+        small = cv2.resize(image_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    else:
+        small = image_bgr
+    sh, sw = small.shape[:2]
+
+    # 双边滤波去纹理后再分割
+    filtered = cv2.bilateralFilter(small, d=9, sigmaColor=50, sigmaSpace=15)
+    lab = cv2.cvtColor(filtered, cv2.COLOR_BGR2LAB).astype(np.float32)
+    pixels = lab.reshape(-1, 3)
+
+    # K-Means 聚类
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    _, labels, centers = cv2.kmeans(pixels, n_clusters, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
+    labels = labels.reshape(sh, sw)
+
+    results: list[RectCandidate] = []
+
+    for cluster_id in range(n_clusters):
+        cluster_mask = (labels == cluster_id).astype(np.uint8) * 255
+        # 形态学清理
+        cluster_mask = cv2.morphologyEx(cluster_mask, cv2.MORPH_CLOSE,
+                                        np.ones((7, 7), np.uint8), iterations=2)
+        cluster_mask = cv2.morphologyEx(cluster_mask, cv2.MORPH_OPEN,
+                                        np.ones((5, 5), np.uint8), iterations=2)
+
+        # 找连通区域
+        contours, _ = cv2.findContours(cluster_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            # 最小面积: 缩放后图像的 2%
+            if area < sh * sw * 0.02:
+                continue
+            rect = cv2.minAreaRect(cnt)
+            rw, rh = rect[1]
+            if rw < 15 or rh < 15:
+                continue
+            rect_area = float(rw * rh)
+            if rect_area <= 0:
+                continue
+            rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
+            if rectangularity < 0.35:
+                continue
+
+            # 映射回原始尺寸
+            box = cv2.boxPoints(rect).astype(np.float32) / scale
+            orig_rect_area = rect_area / (scale * scale)
+            orig_area = area / (scale * scale)
+            center = (float(rect[0][0]) / scale, float(rect[0][1]) / scale)
+
+            results.append(RectCandidate(
+                quad=box, area=orig_area, rect_area=orig_rect_area,
+                rectangularity=rectangularity, center=center,
+            ))
+
+    return results
+
+
+def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
+    """
+    检测图像中的矩形区域 (大货/标样).
+
+    v2.6 多策略独立检测架构:
+      不再把所有策略 OR 到一起 (会导致 100% 前景),
+      而是每个策略独立提取候选, 最后去重合并.
+
+      新增 LAB 颜色分割后备路径:
+      当轮廓法只找到1个巨大轮廓时, 自动切换到颜色分割.
+    """
+    h, w = image_bgr.shape[:2]
+    image_area = h * w
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    all_candidates: list[RectCandidate] = []
+
+    # ── 策略组A: 原始前景检测 (亮板暗背景) ──
+    edge_canny = cv2.Canny(smooth, 30, 100)
+    _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    adapt = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY_INV, 51, 6)
+    combined_a = cv2.bitwise_or(edge_canny, cv2.bitwise_or(otsu, adapt))
+    combined_a = cv2.morphologyEx(combined_a, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+    combined_a = cv2.morphologyEx(combined_a, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    all_candidates.extend(_extract_rect_candidates_from_mask(combined_a, image_area))
+
+    # ── 策略组B: 反向前景检测 (暗板亮背景) ── 独立运行, 不与A合并
+    _, otsu_rev = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    edge_canny_inv = cv2.Canny(255 - smooth, 30, 100)
+    combined_b = cv2.bitwise_or(otsu_rev, edge_canny_inv)
+    combined_b = cv2.morphologyEx(combined_b, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+    combined_b = cv2.morphologyEx(combined_b, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    all_candidates.extend(_extract_rect_candidates_from_mask(combined_b, image_area))
+
+    # ── 策略组C: 纯 Otsu (不加 Canny/Adaptive, 减少噪声) ──
+    otsu_clean = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=3)
+    otsu_clean = cv2.morphologyEx(otsu_clean, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8), iterations=2)
+    all_candidates.extend(_extract_rect_candidates_from_mask(otsu_clean, image_area))
+
+    # 去重合并
+    all_candidates = _deduplicate_candidates(all_candidates)
+
+    # ── 后备策略: LAB 颜色分割 ──
+    # 如果轮廓法只找到0-1个巨大候选 (>90% 面积), 说明轮廓法失效
+    useful = [c for c in all_candidates if c.rect_area / image_area < 0.90]
+    if len(useful) < 1:
+        color_candidates = _lab_color_segmentation(image_bgr, n_clusters=3)
+        color_useful = [c for c in color_candidates if c.rect_area / image_area < 0.90]
+        if color_useful:
+            all_candidates = color_useful
+        else:
+            # 尝试更多聚类
+            color_candidates_5 = _lab_color_segmentation(image_bgr, n_clusters=5)
+            color_useful_5 = [c for c in color_candidates_5 if c.rect_area / image_area < 0.90]
+            if color_useful_5:
+                all_candidates = color_useful_5
+
+    all_candidates.sort(key=lambda c: c.rect_area, reverse=True)
+    return all_candidates
+
+
+def detect_concrete_background(image_bgr: np.ndarray) -> dict[str, Any]:
+    """
+    检测水泥/沥青地面背景并生成背景掩码.
+
+    v2.6 增强版: 放宽检测条件, 适应更多真实场景.
+      - 水泥地面: 低饱和度, 广泛亮度范围
+      - 人字形拼接缝: 边缘区域的线性特征
+      - 用 LAB 色度 (chroma) 代替 HSV 饱和度, 对灰色调更敏感
+
+    返回:
+      detected: bool
+      background_mask: np.ndarray (True = 背景像素)
+      background_type: "concrete" | "asphalt" | "unknown"
+    """
+    h, w = image_bgr.shape[:2]
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+
+    # LAB 色度: C = sqrt(a^2 + b^2), 水泥/沥青的色度很低
+    a_centered = lab[..., 1] - 128.0
+    b_centered = lab[..., 2] - 128.0
+    chroma = np.sqrt(a_centered ** 2 + b_centered ** 2)
+
+    # 水泥特征: 低色度 (< 15) + 宽泛亮度
+    low_chroma = chroma < 15
+
+    # 用边缘区域验证 (边缘通常是背景/地面)
+    border_mask = np.zeros((h, w), dtype=bool)
+    bh_size, bw_size = max(30, h // 6), max(30, w // 6)
+    border_mask[:bh_size, :] = True
+    border_mask[-bh_size:, :] = True
+    border_mask[:, :bw_size] = True
+    border_mask[:, -bw_size:] = True
+
+    border_low_chroma_ratio = float(low_chroma[border_mask].mean()) if border_mask.any() else 0.0
+
+    # 也检查边缘的亮度均值和方差 (水泥地面亮度相对一致)
+    border_brightness = float(gray[border_mask].mean()) if border_mask.any() else 128
+    border_brightness_std = float(gray[border_mask].std()) if border_mask.any() else 50
+
+    # 判定: 边缘低色度占比 > 15% (放宽阈值) 且亮度在合理范围
+    detected = (border_low_chroma_ratio > 0.15 and
+                30 < border_brightness < 230 and
+                border_brightness_std < 60)
+
+    bg_type = "unknown"
+    if detected:
+        bg_type = "concrete" if border_brightness > 90 else "asphalt"
+
+    # 生成完整背景掩码
+    bg_mask = low_chroma.astype(np.uint8)
+    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=2)
+    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
+
+    return {
+        "detected": detected,
+        "background_mask": bg_mask.astype(bool),
+        "background_type": bg_type,
+        "border_low_chroma_ratio": round(border_low_chroma_ratio, 3),
+        "border_brightness": round(border_brightness, 1),
+    }
+
+
+def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, int],
+                      image_bgr: np.ndarray | None = None) -> list[dict[str, Any]]:
+    """
+    检测图像中的所有板材区域 (不只是最大的一个).
+
+    支持场景:
+      - 单块大板 + 小标样 (传统模式)
+      - 多块板材并排摆放 (一致性检查)
+      - 大小混合 (大货 + 多个小标样)
+
+    返回 list[dict]:
+      每个板材包含 quad, area, center, rectangularity, role (board/sample/plank)
+    """
+    h, w = image_shape[:2]
+    image_area = float(h * w)
+
+    boards: list[dict[str, Any]] = []
+
+    for c in cands:
+        ratio = c.rect_area / image_area
+        # 扩大检测范围: 从 0.14 降低到 0.02, 以检测小板和远距离板材
+        if ratio < 0.02 or ratio > 0.95:
+            continue
+        if c.rectangularity < 0.35:
+            continue
+
+        # 角色推断
+        if ratio > 0.30:
+            role = "board"      # 大货
+        elif ratio > 0.10:
+            role = "plank"      # 单独长条板
+        else:
+            role = "sample"     # 小标样
+
+        board_info: dict[str, Any] = {
+            "quad": c.quad,
+            "area": c.rect_area,
+            "area_ratio": round(ratio, 4),
+            "center": c.center,
+            "rectangularity": round(c.rectangularity, 3),
+            "role": role,
+        }
+
+        # 精确颜色提取 — 完整对色级预处理链
+        if image_bgr is not None:
+            quad = order_quad(c.quad)
+            widths = [np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[3])]
+            heights = [np.linalg.norm(quad[3] - quad[0]), np.linalg.norm(quad[2] - quad[1])]
+            bw, bh = int(max(widths)), int(max(heights))
+
+            if bw > 40 and bh > 40:
+                # Step 1: 透视校正 — 消除拍摄角度影响
+                dst = np.array([[0, 0], [bw, 0], [bw, bh], [0, bh]], dtype=np.float32)
+                M = cv2.getPerspectiveTransform(quad, dst)
+                warped = cv2.warpPerspective(image_bgr, M, (bw, bh))
+
+                # Step 2: 纹理抑制 — 消除木纹/石纹, 只保留底色
+                tone = texture_suppress(warped)
+
+                # Step 3: 排除无效区域 (文字/标签/高光/阴影)
+                invalid = build_invalid_mask(tone)
+                mat_mask = build_material_mask(tone.shape[:2], border_ratio=0.05)
+                valid_mask = mat_mask & (~invalid)
+                valid_count = int(np.count_nonzero(valid_mask))
+
+                if valid_count > 50:
+                    # Step 4: LAB 转换 (不做白平衡, 保留真实颜色)
+                    lab = bgr_to_lab_float(tone)
+
+                    # Step 5: 网格采样 + 稳健统计
+                    # 将板材分成 4x4 网格, 每格独立计算均值, 取中位数
+                    # 比全局均值更抗局部干扰 (某格有文字/阴影不影响整体)
+                    grid_rows, grid_cols = 4, 4
+                    cell_means = []
+                    total_used = 0
+                    for gr in range(grid_rows):
+                        y0 = int(gr * bh / grid_rows)
+                        y1 = int((gr + 1) * bh / grid_rows)
+                        for gc in range(grid_cols):
+                            x0 = int(gc * bw / grid_cols)
+                            x1 = int((gc + 1) * bw / grid_cols)
+                            cell_mask = valid_mask[y0:y1, x0:x1]
+                            cell_valid = int(np.count_nonzero(cell_mask))
+                            if cell_valid < 30:
+                                continue
+                            cell_lab = lab[y0:y1, x0:x1]
+                            cell_vals = cell_lab[cell_mask]
+                            cell_means.append(cell_vals.mean(axis=0))
+                            total_used += cell_valid
+
+                    if len(cell_means) >= 3:
+                        # 用网格中位数 (比全局均值更抗干扰)
+                        cell_arr = np.array(cell_means)
+                        mean_lab = np.median(cell_arr, axis=0)
+                        std_lab = np.std(cell_arr, axis=0)
+                        used = total_used
+                    else:
+                        # 网格太少, 回退到全局稳健统计
+                        mean_lab, std_lab, used = robust_mean_lab(lab, valid_mask)
+
+                    try:
+                        board_info["mean_lab"] = {
+                            "L": round(float(mean_lab[0]), 2),
+                            "a": round(float(mean_lab[1]), 2),
+                            "b": round(float(mean_lab[2]), 2),
+                        }
+                        board_info["std_lab"] = {
+                            "L": round(float(std_lab[0]), 2),
+                            "a": round(float(std_lab[1]), 2),
+                            "b": round(float(std_lab[2]), 2),
+                        }
+                        board_info["valid_pixel_ratio"] = round(valid_count / max(bw * bh, 1), 3)
+                        board_info["used_pixels"] = used
+                        board_info["grid_cells_used"] = len(cell_means) if cell_means else 0
+                        # 质量门控: 网格间 std_L 阈值按亮度自适应
+                        # 深色板(L<35)噪声天然高, 阈值放宽; 浅色板阈值严格
+                        board_L = float(mean_lab[0])
+                        std_threshold = max(6.0, 15.0 * (35.0 / max(board_L, 1.0)))
+                        if float(std_lab[0]) > std_threshold:
+                            board_info["quality_warning"] = "high_variance"
+                    except ValueError:
+                        pass  # 有效像素不够, 跳过颜色提取
+                else:
+                    # 有效像素太少, 用简化提取 (也不做白平衡)
+                    pixels = tone[mat_mask]
+                    if len(pixels) > 50:
+                        lab_simple = cv2.cvtColor(pixels.reshape(1, -1, 3),
+                                                  cv2.COLOR_BGR2LAB).astype(np.float32)
+                        lab_simple[..., 0] *= (100.0 / 255.0)
+                        lab_simple[..., 1] -= 128.0
+                        lab_simple[..., 2] -= 128.0
+                        ml = lab_simple.reshape(-1, 3).mean(axis=0)
+                        board_info["mean_lab"] = {
+                            "L": round(float(ml[0]), 2),
+                            "a": round(float(ml[1]), 2),
+                            "b": round(float(ml[2]), 2),
+                        }
+                        board_info["valid_pixel_ratio"] = round(valid_count / max(bw * bh, 1), 3)
+
+        boards.append(board_info)
+
+    return boards
 
 
 def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> RectCandidate | None:
@@ -569,9 +1032,15 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
 
 
 def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, int, int],
-                            image_bgr: np.ndarray | None = None) -> tuple[RectCandidate | None, RectCandidate | None, dict[str, Any]]:
+                            image_bgr: np.ndarray | None = None,
+                            multi_board: bool = False) -> tuple[RectCandidate | None, RectCandidate | None, dict[str, Any]]:
     h, w = image_shape[:2]
     image_area = float(h * w)
+
+    # 多板材模式: 返回所有板材信息在 diag 中
+    all_boards_info: list[dict[str, Any]] = []
+    if multi_board and image_bgr is not None:
+        all_boards_info = detect_all_boards(cands, image_shape, image_bgr)
 
     board = None
     for c in cands:
@@ -581,7 +1050,12 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
             break
 
     if board is None and cands:
-        board = cands[0]
+        # 只用面积在合理范围的候选, 避免选到整张图大小的 LAB 分割区域
+        reasonable = [c for c in cands if c.rect_area / image_area < 0.95]
+        if reasonable:
+            board = reasonable[0]
+        else:
+            board = cands[0]
 
     sample = None
     if board is not None:
@@ -612,7 +1086,7 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
     if sample is None and board is not None and image_bgr is not None:
         sample = _find_sample_inside_board(image_bgr, board.quad)
 
-    diag = {
+    diag: dict[str, Any] = {
         "candidates": len(cands),
         "board_area_ratio": float(board.rect_area / image_area) if board is not None else 0.0,
         "board_rectangularity": float(board.rectangularity) if board is not None else 0.0,
@@ -620,6 +1094,11 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
         "sample_rectangularity": float(sample.rectangularity) if sample is not None else 0.0,
         "sample_detection_method": "secondary" if (sample is not None and id(sample) not in {id(c) for c in cands}) else "primary",
     }
+    if multi_board and all_boards_info:
+        diag["multi_board"] = {
+            "count": len(all_boards_info),
+            "boards": [{k: v for k, v in b.items() if k != "quad"} for b in all_boards_info],
+        }
     return board, sample, diag
 
 
@@ -1130,7 +1609,31 @@ def analyze_single_image(
             sample_on_board = order_quad(sample_inner_quad)
         else:
             if sample_cand is None:
-                raise RuntimeError("未能自动识别小样轮廓，请避免遮挡并让小样完整入镜。")
+                # 无法找到标样 → 返回降级结果 (仅大货信息, 无色差对比)
+                try:
+                    board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
+                    board_wb, _ = apply_gray_world(board_warp, board_mask)
+                    board_tone = texture_suppress(board_wb)
+                    board_lab = bgr_to_lab_float(board_tone)
+                    board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
+                    inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
+                except (ValueError, cv2.error):
+                    inferred_profile = profile_name
+                return {
+                    "mode": "single",
+                    "result": {
+                        "pass": None,
+                        "delta_e": {"avg": 0.0, "p95": 0.0, "max": 0.0, "global": 0.0},
+                        "bias": {"dL": 0.0, "dC": 0.0, "dH_deg": 0.0},
+                        "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0},
+                    },
+                    "board_lab": [float(x) for x in board_mean],
+                    "profile": inferred_profile,
+                    "detection": det_diag,
+                    "quality_flags": ["sample_not_found"],
+                    "recommendations": ["未能自动识别小样，请确保标样放在大货上方并完整入镜，或使用 --sample-roi 手动指定"],
+                    "capture_guidance": "请将标样完整放置在大货表面后重新拍摄",
+                }
             sample_source = "global_detection"
             sample_warp, _, sample_quad = warp_quad(image_bgr, sample_cand.quad, target_long_side=900)
             sample_poly = order_quad(sample_quad).reshape(1, -1, 2)
@@ -1171,8 +1674,25 @@ def analyze_single_image(
     board_lab = bgr_to_lab_float(board_tone)
     sample_lab = bgr_to_lab_float(sample_tone)
 
-    board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
-    sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
+    try:
+        board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
+    except ValueError:
+        # 大货区域有效像素为零 → 降级
+        return {
+            "mode": "single", "profile": profile_name, "detection": det_diag,
+            "result": {"pass": None, "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0}},
+            "quality_flags": ["board_no_valid_pixels"],
+            "recommendations": ["大货区域无有效像素，可能被手写字/标签完全覆盖，请重新拍摄"],
+        }
+    try:
+        sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
+    except ValueError:
+        return {
+            "mode": "single", "profile": profile_name, "detection": det_diag,
+            "result": {"pass": None, "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0}},
+            "quality_flags": ["sample_no_valid_pixels"],
+            "recommendations": ["标样区域无有效像素，可能被遮挡或过小，请重新拍摄"],
+        }
 
     inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
     profile = PROFILES[inferred_profile]

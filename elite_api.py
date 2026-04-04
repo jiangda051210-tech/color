@@ -32,6 +32,10 @@ from elite_color_match import (
     analyze_dual_image,
     analyze_single_image,
     build_target_override,
+    ciede2000,
+    contour_candidates,
+    detect_all_boards,
+    detect_concrete_background,
     parse_grid,
     read_image,
     roi_to_quad,
@@ -1893,6 +1897,16 @@ class SingleAnalyzeRequest(BaseModel):
     with_innovation_engine: bool = False
     innovation_context: dict[str, Any] | None = None
     history: HistoryConfig | None = None
+    outdoor_mode: bool = False
+
+
+class MultiBoardAnalyzeRequest(BaseModel):
+    image: ImageInput
+    profile: str = "auto"
+    grid: str = "4x4"
+    output_dir: str | None = None
+    include_report: bool = False
+    outdoor_mode: bool = True
 
 
 class DualAnalyzeRequest(BaseModel):
@@ -3781,6 +3795,21 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
         "grid": {"rows": rows, "cols": cols},
     }
     report["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 户外模式: 添加环境检测信息
+    if req.outdoor_mode:
+        from senia_preflight import detect_outdoor_environment
+        from ultimate_color_film_system_v2_optimized import EnvironmentCompensatorV2
+        env_info = detect_outdoor_environment(image)
+        env_comp = EnvironmentCompensatorV2()
+        report["environment"] = {
+            "type": env_info.get("environment_type", "unknown"),
+            "lighting": env_comp.detect_lighting_source(image),
+            "confidence_penalty": env_comp.compute_outdoor_confidence_penalty(env_info),
+            "capture_suggestions": env_comp.suggest_outdoor_capture(env_info),
+            "details": env_info.get("details", {}),
+        }
+
     _add_history_assessment(report, req.history)
     _add_policy_recommendation(report, req.history)
     _attach_process_advice(report, enabled=req.with_process_advice, explicit_path=req.action_rules_config)
@@ -3824,6 +3853,182 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
         resp["report"] = report
     _emit_quality_risk_alert("analyze_single", resp)
     return resp
+
+
+@app.post("/v1/analyze/color-report")
+def analyze_color_report(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
+    """
+    一键对色报告 — 替代人工对色员的完整输出.
+
+    输入一张照片, 输出:
+      - OK/NG/临界判定
+      - 色差值+偏色方向
+      - 工艺调整建议
+      - 板面一致性
+      - 置信度评分
+    """
+    from senia_color_report import generate_color_match_report
+
+    image = _load_image(req.image)
+    profile = req.profile if req.profile != "auto" else "auto"
+    report = generate_color_match_report(image, profile=profile)
+    return report
+
+
+@app.post("/v1/analyze/photo-check")
+def photo_quality_check(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
+    """拍照质量实时引导 — 告诉操作员需不需要重拍."""
+    from senia_best_practices import photo_guidance
+    image = _load_image(req.image)
+    return photo_guidance(image)
+
+
+@app.post("/v1/analyze/saci")
+def analyze_saci(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
+    """
+    SACI 自适应色彩智能 — 行业首创自校准对色.
+
+    输入一张照片, 输出:
+      - 绝对LAB测量结果 (精确测量链路)
+      - SACI校准测量结果 (水泥地自校准, 消除光照色偏)
+      - 双结果对比, 最终判定取更可靠的
+    """
+    from senia_saci import saci_analyze
+
+    image = _load_image(req.image)
+    profile = req.profile if req.profile != "auto" else "auto"
+    report = saci_analyze(image, profile=profile)
+    return report
+
+
+@app.post("/v1/analyze/multi-board")
+def analyze_multi_board(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
+    """
+    多板材一致性分析 — 检测一张照片中的所有板材, 对比颜色一致性.
+
+    适用场景:
+      - 多块板材并排摆放的户外拍摄
+      - 批次间颜色一致性快速检查
+      - 标注偏差最大的板材 (可能是 NG 板)
+    """
+    from senia_preflight import detect_outdoor_environment, preflight_check
+    from ultimate_color_film_system_v2_optimized import EnvironmentCompensatorV2
+
+    image = _load_image(req.image)
+    output_dir = _generate_output_dir("multi_board", req.output_dir)
+
+    # 预检
+    preflight = preflight_check(image)
+    env_info = preflight.get("environment", {})
+    is_outdoor = env_info.get("environment_type") == "outdoor" or req.outdoor_mode
+
+    # 环境分析
+    env_comp = EnvironmentCompensatorV2()
+    lighting = env_comp.detect_lighting_source(image)
+    outdoor_penalty = env_comp.compute_outdoor_confidence_penalty(env_info) if is_outdoor else None
+    capture_suggestions = env_comp.suggest_outdoor_capture(env_info) if is_outdoor else []
+
+    # 背景检测
+    bg_info = detect_concrete_background(image)
+
+    # 检测所有板材
+    cands = contour_candidates(image)
+    boards = detect_all_boards(cands, image.shape, image)
+
+    if len(boards) < 1:
+        raise HTTPException(status_code=422, detail="未检测到任何板材, 请确保板材在画面中清晰可见")
+
+    # 计算板材间两两色差 (CIEDE2000)
+    pairs: list[dict[str, Any]] = []
+    for i in range(len(boards)):
+        for j in range(i + 1, len(boards)):
+            lab_i = boards[i].get("mean_lab")
+            lab_j = boards[j].get("mean_lab")
+            if lab_i and lab_j:
+                de, dl, dc, dh = ciede2000(
+                    {"L": lab_i["L"], "a": lab_i["a"], "b": lab_i["b"]},
+                    {"L": lab_j["L"], "a": lab_j["a"], "b": lab_j["b"]},
+                )
+                pairs.append({
+                    "board_a": i,
+                    "board_b": j,
+                    "delta_e00": round(de, 3),
+                    "dL": round(dl, 3),
+                    "dC": round(dc, 3),
+                    "dH": round(dh, 3),
+                })
+
+    # 统计
+    de_values = [p["delta_e00"] for p in pairs] if pairs else [0.0]
+    max_de = max(de_values)
+    min_de = min(de_values)
+    avg_de = float(np.mean(de_values))
+
+    # 找偏差最大的板材 (出现在最大色差对中的板材)
+    outlier_board_idx = None
+    if pairs:
+        worst_pair = max(pairs, key=lambda p: p["delta_e00"])
+        # 哪块板和其他板的平均色差最大?
+        board_avg_de: dict[int, list[float]] = {}
+        for p in pairs:
+            board_avg_de.setdefault(p["board_a"], []).append(p["delta_e00"])
+            board_avg_de.setdefault(p["board_b"], []).append(p["delta_e00"])
+        if board_avg_de:
+            outlier_board_idx = max(board_avg_de, key=lambda k: float(np.mean(board_avg_de[k])))
+
+    # 一致性评分 (基于平均色差)
+    consistency_pass = avg_de < 2.0
+    consistency_grade = "excellent" if avg_de < 1.0 else "good" if avg_de < 1.5 else "acceptable" if avg_de < 2.5 else "poor"
+
+    result = {
+        "mode": "multi_board",
+        "board_count": len(boards),
+        "boards": [{k: v for k, v in b.items() if k != "quad"} for b in boards],
+        "pairwise_comparisons": pairs,
+        "consistency": {
+            "pass": consistency_pass,
+            "grade": consistency_grade,
+            "avg_delta_e00": round(avg_de, 3),
+            "max_delta_e00": round(max_de, 3),
+            "min_delta_e00": round(min_de, 3),
+        },
+        "outlier_board_index": outlier_board_idx,
+        "environment": {
+            "type": env_info.get("environment_type", "unknown"),
+            "lighting": lighting,
+            "background": {
+                "type": bg_info.get("background_type", "unknown"),
+                "detected": bg_info.get("detected", False),
+            },
+            "confidence_penalty": outdoor_penalty,
+            "capture_suggestions": capture_suggestions,
+        },
+        "preflight": {
+            "ok": preflight["ok"],
+            "quality": preflight["quality"],
+            "warnings": preflight["warnings"],
+        },
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "output_dir": str(output_dir),
+    }
+
+    # 保存报告
+    report_path = output_dir / "multi_board_report.json"
+    report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    result["report_path"] = str(report_path)
+
+    if req.include_report:
+        return result
+    else:
+        return {
+            "mode": "multi_board",
+            "board_count": result["board_count"],
+            "consistency": result["consistency"],
+            "outlier_board_index": result["outlier_board_index"],
+            "environment": result["environment"],
+            "report_path": str(report_path),
+            "generated_at": result["generated_at"],
+        }
 
 
 @app.post("/v1/analyze/dual")
@@ -3973,6 +4178,41 @@ async def analyze_single_upload(
         innovation_context=_parse_optional_dict_json(innovation_context_json, "innovation_context_json"),
     )
     return analyze_single(req)
+
+
+@app.post("/v1/web/analyze/saci-upload")
+async def analyze_saci_upload(
+    image: UploadFile = File(...),
+    profile: str = Form("auto"),
+) -> dict[str, Any]:
+    """SACI一键智能对色 — 网页上传入口."""
+    from senia_saci import saci_analyze
+    img_input = await _upload_to_image_input(image, "image")
+    img = _load_image(img_input)
+    return saci_analyze(img, profile=profile.strip() or "auto")
+
+
+@app.post("/v1/web/analyze/color-report-upload")
+async def analyze_color_report_upload(
+    image: UploadFile = File(...),
+    profile: str = Form("auto"),
+) -> dict[str, Any]:
+    """一键对色报告 — 网页上传入口."""
+    from senia_color_report import generate_color_match_report
+    img_input = await _upload_to_image_input(image, "image")
+    img = _load_image(img_input)
+    return generate_color_match_report(img, profile=profile.strip() or "auto")
+
+
+@app.post("/v1/web/analyze/photo-check-upload")
+async def photo_check_upload(
+    image: UploadFile = File(...),
+) -> dict[str, Any]:
+    """拍照质量检查 — 网页上传入口. 拍照后先调此接口确认质量."""
+    from senia_best_practices import photo_guidance
+    img_input = await _upload_to_image_input(image, "image")
+    img = _load_image(img_input)
+    return photo_guidance(img)
 
 
 @app.post("/v1/analyze/batch")
