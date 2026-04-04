@@ -4180,6 +4180,41 @@ async def analyze_single_upload(
     return analyze_single(req)
 
 
+@app.post("/v1/web/analyze/saci-upload")
+async def analyze_saci_upload(
+    image: UploadFile = File(...),
+    profile: str = Form("auto"),
+) -> dict[str, Any]:
+    """SACI一键智能对色 — 网页上传入口."""
+    from senia_saci import saci_analyze
+    img_input = await _upload_to_image_input(image, "image")
+    img = _load_image(img_input)
+    return saci_analyze(img, profile=profile.strip() or "auto")
+
+
+@app.post("/v1/web/analyze/color-report-upload")
+async def analyze_color_report_upload(
+    image: UploadFile = File(...),
+    profile: str = Form("auto"),
+) -> dict[str, Any]:
+    """一键对色报告 — 网页上传入口."""
+    from senia_color_report import generate_color_match_report
+    img_input = await _upload_to_image_input(image, "image")
+    img = _load_image(img_input)
+    return generate_color_match_report(img, profile=profile.strip() or "auto")
+
+
+@app.post("/v1/web/analyze/photo-check-upload")
+async def photo_check_upload(
+    image: UploadFile = File(...),
+) -> dict[str, Any]:
+    """拍照质量检查 — 网页上传入口. 拍照后先调此接口确认质量."""
+    from senia_best_practices import photo_guidance
+    img_input = await _upload_to_image_input(image, "image")
+    img = _load_image(img_input)
+    return photo_guidance(img)
+
+
 @app.post("/v1/analyze/batch")
 def analyze_batch(req: BatchAnalyzeRequest) -> dict[str, Any]:
     try:
