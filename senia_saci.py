@@ -452,6 +452,13 @@ def saci_analyze(image_bgr: np.ndarray, profile: str = "auto") -> dict[str, Any]
         image_bgr = cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
         h, w = new_h, new_w
 
+    # ── Step 0.5: 表面分析与预处理 (闪光灯/保护膜/光泽度) ──
+    try:
+        from senia_surface import analyze_surface_and_preprocess
+        image_bgr, surface_info = analyze_surface_and_preprocess(image_bgr)
+    except Exception:
+        surface_info = {}
+
     # ── Step 1: 水泥自校准 ──
     calibrated_img, cal_info = calibrate_from_concrete(image_bgr)
 
@@ -552,6 +559,10 @@ def saci_analyze(image_bgr: np.ndarray, profile: str = "auto") -> dict[str, Any]
         sample_lab = det.get("标样", {}).get("LAB")
 
         industry: dict[str, Any] = {}
+
+        # 表面分析 (光泽度/闪光灯/保护膜)
+        if surface_info:
+            industry["表面分析"] = surface_info
 
         # 湿干预测 (如果有大货LAB)
         if board_lab:
