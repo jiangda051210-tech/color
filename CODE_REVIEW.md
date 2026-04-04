@@ -1,0 +1,206 @@
+# SENIA Elite 代码审查报告
+
+> 审查日期: 2026-04-04
+
+---
+
+## 一、严重问题 (Critical)
+
+### 1. 异常被静默吞掉
+
+多处 `except Exception: pass`，错误完全不记录，线上出问题无法排查：
+
+| 文件 | 行号 | 描述 |
+|------|------|------|
+| `elite_api.py` | 1588, 1608 | 策略推荐失败被静默忽略 |
+| `elite_api.py` | 7167-7178 | 事件发布和图片存储错误被吞 |
+| `elite_api.py` | 4299, 4320, 4346 | 历史评估失败被静默忽略 |
+| `elite_api.py` | 751 | 审计日志写入失败仅 print 到 stderr |
+| `senia_self_evolution.py` | 343, 351 | 空 except 处理器 |
+| `elite_innovation_state.py` | 174, 284, 465 | 多个宽泛 except |
+
+**影响**: 隐藏 bug 传播、生产问题无法定位、运维盲区。
+
+**建议**: 所有 `except Exception: pass` 至少添加 `logger.exception()` 记录错误。
+
+---
+
+### 2. 内存泄漏 — 无限增长的数据结构
+
+| 文件 | 位置 | 描述 |
+|------|------|------|
+| `elite_api.py` | ~165 | `ACCEPTANCE_SYNC_CACHE` 字典永不清理，长期运行会 OOM |
+| `elite_api.py` | ~645-653 | `REQUEST_PATH_STATS` 仅在超过 1000 条时才反应式清理 |
+| `ultimate_color_film_system_v2_optimized.py` | 59-83 | `_history` 列表增长到 5000 条才截断 |
+
+**建议**: 为所有缓存添加定期清理机制（TTL 过期 + 定时清扫），使用 `collections.OrderedDict` 或 `cachetools.TTLCache`。
+
+---
+
+### 3. 并发安全问题
+
+- **`elite_api.py:1443-1444`** — 持有 `INNOVATION_LOCK` 期间执行耗时的 `full_analysis()`，阻塞所有其他请求。应将锁范围缩小或使用读写锁。
+- **`elite_quality_history.py:22`** — SQLite 无 WAL 模式、无连接池，高并发下可能导致锁等待或数据损坏。
+- **`elite_api.py:169-175`** — 多个全局可变字典/deque 在多线程环境下被访问，虽有锁保护但管理复杂。
+
+---
+
+## 二、安全问题 (Security)
+
+### 4. SQL 注入风险
+
+`elite_quality_history.py` 中表名和列名使用 f-string 拼接：
+
+```python
+conn.execute(f"PRAGMA table_info({table})")
+conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+```
+
+虽然当前值来自内部，但这是危险的模式。应对标识符进行白名单校验或转义。
+
+### 5. 缺少认证/授权
+
+- 无 OAuth2、JWT 或 API Key 认证机制
+- 所有 API 端点公开可访问
+- 建议至少添加 API Key 中间件
+
+### 6. 缺少请求限流
+
+- 图片上传端点无速率限制，可被 DoS 攻击
+- 图片解码前无请求节流
+- `SENIA_ANALYZE_SEMAPHORE` 仅允许 3 个并发，无超时设置，可能导致请求堆积
+
+### 7. 输入验证不足
+
+- 文件上传仅检查大小(20MB)，缺少 Content-Type 验证
+- 配置热重载不验证新配置的合法性
+- `apply_profile_config()` 不验证阈值是否合理（如正数）
+
+---
+
+## 三、架构问题 (Architecture)
+
+### 8. 文件过大，职责不清
+
+| 文件 | 行数 | 问题 |
+|------|------|------|
+| `elite_api.py` | 8039 | 单文件承担 API 路由、中间件、度量、缓存、事件总线等所有职责 |
+| `ultimate_color_film_system_v2_optimized.py` | 5086 | 生产生命周期管理，文件过大 |
+| `elite_web_console.py` | 3844 | HTML/JS 混在 Python 代码中 |
+
+**建议**: 按职责拆分为独立模块（路由、中间件、服务层、数据层）。
+
+### 9. 全局可变状态泛滥
+
+- `elite_api.py` 中有大量全局字典和 deque，靠锁保护但管理复杂且容易出错
+- `elite_color_match.py:137-148` 直接修改全局 `PROFILES` 字典，失败时无回滚机制
+
+### 10. 缺少基础设施
+
+- 无 CI/CD 配置（无 GitHub Actions / GitLab CI）
+- 无 `pyproject.toml` 或 `setup.py`
+- 无代码格式化工具配置（Black/flake8/pylint）
+- 无 pre-commit hooks
+
+---
+
+## 四、依赖管理问题 (Dependencies)
+
+### 11. 版本约束过松
+
+`requirements.txt` 全部使用 `>=` 无上限约束：
+
+```
+numpy>=1.24.0       # 可能引入不兼容的 numpy 2.0
+opencv-python>=4.8.0
+fastapi>=0.100.0
+```
+
+- 开发依赖（pytest 等）未分离
+- `scipy`、`Pillow` 代码中使用但未在 requirements.txt 中声明
+
+**建议**: 使用 `~=` 或明确上下限，分离 dev dependencies。
+
+---
+
+## 五、测试问题 (Testing)
+
+### 12. 测试框架非标准
+
+- 9 个测试文件使用裸 `assert` + `sys.exit()`，而非 pytest/unittest
+- 无代码覆盖率工具配置
+- 测试无法被 CI/CD 轻松集成
+
+### 13. 测试覆盖不全
+
+- ~2500 行测试 vs ~52000 行源代码，覆盖率极低
+- 缺少单元测试，主要是场景级/集成测试
+- API 端点完全无测试
+- 错误路径和边界条件测试不足
+
+---
+
+## 六、数据处理问题 (Data Handling)
+
+### 14. NaN/Infinity 传播
+
+| 文件 | 行号 | 描述 |
+|------|------|------|
+| `elite_quality_history.py` | 123-147 | 使用 `np.nan` 作默认值，后续数学运算可能出错 |
+| `elite_counterfactual.py` | 60-76 | 全 NaN 数组的 `nanmean()` 返回 NaN 并传播 |
+| `elite_api.py` | 1402-1412 | NaN 检查在提取之后，值为 None 时会报错 |
+
+### 15. 数值稳定性
+
+`elite_color_match.py:571` 距离计算未防溢出：
+
+```python
+dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) ** 2)
+```
+
+应使用 `np.hypot()` 替代。
+
+---
+
+## 七、运维问题 (Operations)
+
+### 16. 缺少可观测性
+
+- 无分布式追踪（tracing）
+- 无请求关联 ID（correlation ID）
+- 审计日志写入失败时静默返回
+- 日志级别使用不一致
+
+### 17. 无优雅关闭
+
+- 无 graceful shutdown 处理
+- 进行中的请求在终止时直接中断
+
+### 18. 健康检查不完整
+
+- Docker 配置引用 `/health`，需确认端点实现是否覆盖所有依赖（DB、文件系统等）
+
+---
+
+## 八、代码风格问题 (Style)
+
+### 19. 常量命名不规范
+
+部分常量使用小写命名，不符合 PEP 8 的 `UPPER_CASE` 约定。
+
+### 20. 文档字符串不一致
+
+- 混合使用 Google 风格和普通注释
+- 测试函数缺少 docstring
+- 中英文混用
+
+---
+
+## 优先级总结
+
+| 优先级 | 问题 | 建议行动 |
+|--------|------|---------|
+| **P0 紧急** | #1 异常处理、#2 内存泄漏、#4 SQL注入、#5 认证 | 立即修复 |
+| **P1 高** | #3 并发、#6 限流、#7 验证、#8 拆分大文件 | 短期内修复 |
+| **P2 中** | #9 全局状态、#10 CI/CD、#11 依赖、#12 测试框架、#14 NaN | 中期改善 |
+| **P3 低** | #13 覆盖率、#15 数值、#16-20 运维和风格 | 逐步改善 |
