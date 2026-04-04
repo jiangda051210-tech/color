@@ -266,7 +266,67 @@ dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) **
 
 **总计 2265 行可合并/退役代码。**
 
-### 28. `_to_float` 辅助函数重复 3 次
+### 28. `UltimateColorFilmSystem` 69% 方法从未被调用
+
+`ultimate_color_film_system_v2_optimized.py` 的 `UltimateColorFilmSystem` 类定义了 **147 个公开方法**，但 `elite_api.py` 仅调用了 **45 个**，**102 个方法从未在任何端点中使用（69% 废弃率）**。
+
+主要未使用的功能模块：
+
+| 模块 | 未使用方法数 | 示例 |
+|------|------------|------|
+| 区块链/链管理 | 7 | `add_event`, `validate_chain`, `anchor_chain`, `get_chain` |
+| 质量案例管理 | 9 | `open_case`, `transition`, `add_action`, `close_case`, `get_sla_report` |
+| 配方版本控制 | 3 | `create_version`, `approve_version`, `rollback_to` |
+| CAPA 管理 | 5 | `auto_generate`, `close`, `list_open`, `record`, `report` |
+| 纠纷管理 | 2 | `record`, `dispute_report` |
+| 机器指纹 | 3 | `record`, `fingerprint`, `chronic_bias_report` |
+| SPC 时间稳定性 | 4 | `add_point`, `report` (2处) |
+| 操作员管理 | 3 | `record_session`, `profile`, `leaderboard` |
+| 批次/卷管理 | 11 | `register_lot`, `register_batch`, `set_target`, `mark_changeover` |
+| 环境管理 | 6 | `record_conditions`, `compensate_lab`, `detect_lighting_source` |
+| 其他 | 49+ | 验证、缓存、评估、角色视图等 |
+
+**影响**: 5086 行文件中约 70% 的代码是死代码，增加了维护负担和认知负荷。
+
+### 29. `elite_color_match.py` 13 个函数从未被调用
+
+| 函数名 | 行号 | 描述 |
+|--------|------|------|
+| `parse_quad` | 86 | 四边形解析 |
+| `parse_int_list` | 101 | 整数列表解析 |
+| `parse_path_list` | 111 | 路径列表解析 |
+| `apply_profile_config` | 125 | 配置文件应用（直接修改全局 PROFILES） |
+| `grabcut_foreground_mask` | 516 | GrabCut 前景分割 |
+| `_extract_rect_candidates_from_mask` | 533 | 矩形候选提取 |
+| `_lab_color_segmentation` | 583 | LAB 颜色分割 |
+| `_find_sample_inside_board` | 924 | 板内标样查找 |
+| `de_color` | 1173 | 色差着色 |
+| `compute_sharpness` | 1341 | 清晰度计算 |
+| `quad_right_angle_score` | 1418 | 四边形直角评分 |
+| `find_inner_sample_on_board` | 1434 | 板���内部标样查找 |
+| `align_pair_ecc` | 1853 | ECC 图像对齐 |
+
+### 30. senia_*.py 中 25 个类从未被外部实例化
+
+| 文件 | 未使用类 |
+|------|---------|
+| `senia_analysis.py` | `JudgmentResult`, `UniformityResult`, `FullAnalysisResult` |
+| `senia_auto_match.py` | `CaptureValidation`, `AutoMatchResult` |
+| `senia_best_practices.py` | `ColorHistoryTracker`, `SmartMatchEngine` |
+| `senia_calibration.py` | `CalibrationResult` |
+| `senia_industry.py` | `ProductionDriftTracker` |
+| `senia_instant.py` | `WebhookHandler` |
+| `senia_knowledge_crawler.py` | `CrawlResult` |
+| `senia_learning.py` | `FeedbackRecord` |
+| `senia_lifelong_learning.py` | `AdaptiveThreshold`, `BatchLearner` |
+| `senia_next_gen.py` | `SurfaceFingerprint` |
+| `senia_predictor.py` | `PredictionResult`, `RecipeOptimizeResult` |
+| `senia_recipe.py` | `RecipeAdviceResult` |
+| `senia_self_evolution.py` | `EvolutionMetrics`, `SelfEvaluator`, `AutoUpgrader` |
+
+注：这些类可能在模块内部被使用（作为返回类型），但从未被外部代码导入或实例化。
+
+### 31. `_to_float` 辅助函数重复 3 次
 
 | 文件 | 行号 |
 |------|------|
@@ -299,6 +359,7 @@ dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) **
 | **P0 紧急** | ~~#1 异常处理~~、~~#2 内存泄漏~~、~~#4 SQL注入~~、#5 认证 | ~~已修复~~ / 添加认证 |
 | **P1 高** | ~~#3 并发~~、~~#6 限流~~、~~#7 验证~~、#8 拆分大文件 | ~~已修复~~ / 拆分文件 |
 | **P2 中** | #9 全局状态、#10 CI/CD、~~#11 依赖~~、#12 测试框架、~~#14 NaN~~ | 改善架构 |
-| **P2 中** | #21 孤立模块(1551行)、#22 死变量、#23 未使用导入 | 清理死代码 |
-| **P2 中** | #25 ciede2000 重复5次、#26 ROI重复、#27 _to_float重复 | 统一实现 |
-| **P3 低** | #13 覆盖率、~~#15 数值~~、#16-20 运维和风格、#24 未接入类 | 逐步改善 |
+| **P2 中** | #21 孤立模块(1551行)、~~#22 死变量~~、~~#23 未使用导入~~ | 清理死代码 |
+| **P2 中** | #25 ciede2000 重复5次、#26 ROI重复、#27 旧版本未退役 | 统一实现 |
+| **P2 中** | #28 UltimateColorFilmSystem 69%方法未用、#29 elite_color_match 13函数未用 | 大规模死代码清理 |
+| **P3 低** | #13 覆盖率、~~#15 数值~~、#16-20 运维和风格、#24/#30 未接入类 | 逐步改善 |
