@@ -327,4 +327,240 @@ def analyze_surface_and_preprocess(image_bgr: np.ndarray) -> tuple[np.ndarray, d
 
     surface_info["已应用修正"] = corrections_applied if corrections_applied else ["无需修正"]
 
+    # 5. 近中性色检测 (灰/白/米色 — 手机最难测的颜色)
+    neutral_info = detect_near_neutral(processed)
+    if neutral_info.get("is_near_neutral"):
+        surface_info["近中性色"] = neutral_info
+        if "近中性色精度增强" not in corrections_applied:
+            corrections_applied.append("近中性色精度增强")
+
+    # 6. 荧光/OBA材料检测
+    oba_info = detect_fluorescent_oba(processed)
+    if oba_info.get("detected"):
+        surface_info["荧光/OBA"] = oba_info
+
+    # 7. 弯曲表面检测
+    curve_info = detect_curved_surface(processed)
+    if curve_info.get("is_curved"):
+        surface_info["弯曲表面"] = curve_info
+
+    # 8. 半透明材料检测
+    translucent_info = detect_translucency(processed)
+    if translucent_info.get("is_translucent"):
+        surface_info["半透明"] = translucent_info
+
+    surface_info["已应用修正"] = corrections_applied if corrections_applied else ["无需修正"]
+
     return processed, surface_info
+
+
+# ════════════════════════════════════════════════
+# 5. 近中性色精度增强
+# ════════════════════════════════════════════════
+
+def detect_near_neutral(image_bgr: np.ndarray) -> dict[str, Any]:
+    """
+    检测近中性色 (灰/白/米/驼色) 并增强精度.
+
+    问题: 近中性色的色度信号极弱 (a≈0, b≈0), 相机噪声和AWB
+    偏移会产生不成比例的大色差误报. 这是Nix/ColorMuse等设备
+    用户投诉最多的颜色类型.
+
+    解决: 检测后增大采样范围, 用更多像素平均来压制噪声.
+    """
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab[..., 1] -= 128.0
+    lab[..., 2] -= 128.0
+
+    # 中心区域的色度
+    h, w = lab.shape[:2]
+    center = lab[h // 4:3 * h // 4, w // 4:3 * w // 4]
+    a_mean = float(center[..., 1].mean())
+    b_mean = float(center[..., 2].mean())
+    chroma = (a_mean ** 2 + b_mean ** 2) ** 0.5
+
+    is_neutral = chroma < 5.0  # 色度 < 5 视为近中性色
+
+    if not is_neutral:
+        return {"is_near_neutral": False}
+
+    # 噪声评估: 近中性色的a/b标准差反映的是噪声而非真实色差
+    a_std = float(center[..., 1].std())
+    b_std = float(center[..., 2].std())
+    noise_level = (a_std + b_std) / 2
+
+    # 建议: 对近中性色, 色差判定应更宽松 (噪声会放大dE)
+    precision_note = ""
+    if noise_level > 2.0:
+        precision_note = f"近中性色+高噪声(σ={noise_level:.1f}), 色差可能高估1-2 dE"
+    elif noise_level > 1.0:
+        precision_note = f"近中性色, 色差可能高估0.5-1 dE"
+    else:
+        precision_note = "近中性色, 噪声可控"
+
+    return {
+        "is_near_neutral": True,
+        "色度": round(chroma, 2),
+        "噪声水平": round(noise_level, 2),
+        "精度说明": precision_note,
+        "建议": "近中性色(灰/白/米)的对色精度受限于相机噪声, 建议多拍几张取平均, 或在充足光照下拍摄",
+    }
+
+
+# ════════════════════════════════════════════════
+# 6. 荧光/OBA材料检测
+# ════════════════════════════════════════════════
+
+def detect_fluorescent_oba(image_bgr: np.ndarray) -> dict[str, Any]:
+    """
+    检测荧光增白剂(OBA)或荧光材料.
+
+    特征: OBA/荧光材料在蓝色通道的反射率异常高 (可超过100%),
+    导致B通道相对于R/G不成比例地高, 且在不同光源下表现差异极大.
+
+    检测方法: 分析B/(R+G)比值是否异常.
+    """
+    b = image_bgr[..., 0].astype(np.float64)
+    g = image_bgr[..., 1].astype(np.float64)
+    r = image_bgr[..., 2].astype(np.float64)
+
+    # B通道异常高: B > (R+G)/2 * 1.1 且整体亮度高
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    bright_mask = gray > 180  # 只在亮区检测 (OBA主要在浅色/白色材料上)
+    bright_count = int(bright_mask.sum())
+
+    # OBA只在浅色/白色材料上有意义, 暗色材料不检测
+    overall_brightness = float(gray.mean())
+    if bright_count < 1000 or overall_brightness < 150:
+        return {"detected": False}
+
+    b_bright = float(b[bright_mask].mean())
+    r_bright = float(r[bright_mask].mean())
+    g_bright = float(g[bright_mask].mean())
+
+    # OBA特征: 蓝色通道 > 红绿平均 * 1.15 (阈值从0.08提到0.12减少误报)
+    rg_avg = (r_bright + g_bright) / 2
+    b_excess = b_bright / max(rg_avg, 1) - 1.0
+
+    if b_excess > 0.12:
+        return {
+            "detected": True,
+            "type": "OBA/fluorescent",
+            "蓝色超出比": f"{b_excess:.1%}",
+            "风险": "高" if b_excess > 0.15 else "中",
+            "影响": "含荧光增白剂的材料在不同光源下颜色差异极大, D65下偏蓝白, 白炽灯下偏黄",
+            "建议": "建议在多种光源下评估, 或要求供应商提供不含OBA的批次",
+        }
+
+    return {"detected": False}
+
+
+# ════════════════════════════════════════════════
+# 7. 弯曲表面检测
+# ════════════════════════════════════════════════
+
+def detect_curved_surface(image_bgr: np.ndarray) -> dict[str, Any]:
+    """
+    检测板材表面是否弯曲.
+
+    弯曲板材问题: 表面法线方向不一致, 导致各区域反射角不同,
+    同一颜色在弯曲的不同位置看起来明暗不同.
+
+    检测方法: 分析亮度在水平/垂直方向的非线性变化.
+    """
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    h, w = gray.shape
+
+    # 水平亮度剖面
+    h_profile = gray[h // 2, :].ravel()
+    # 垂直亮度剖面
+    v_profile = gray[:, w // 2].ravel()
+
+    # 检测抛物线型亮度变化 (弯曲表面特征)
+    # 用二次多项式拟合, R²高且二次系数大 = 弯曲
+    def fit_curvature(profile):
+        if len(profile) < 20:
+            return 0.0
+        x = np.linspace(0, 1, len(profile))
+        coeffs = np.polyfit(x, profile, 2)
+        # 二次系数的绝对值 / 均值 = 相对弯曲度
+        curvature = abs(coeffs[0]) / max(float(np.mean(profile)), 1)
+        return curvature
+
+    h_curvature = fit_curvature(h_profile)
+    v_curvature = fit_curvature(v_profile)
+    max_curvature = max(h_curvature, v_curvature)
+
+    # 阈值调高: 户外拍摄角度本身就产生亮度梯度 (不是弯曲)
+    # 真正的弯曲表面: curvature > 8.0 (明显的圆弧形)
+    is_curved = max_curvature > 8.0
+
+    if not is_curved:
+        return {"is_curved": False}
+
+    return {
+        "is_curved": True,
+        "弯曲度": round(max_curvature, 2),
+        "方向": "水平弯曲" if h_curvature > v_curvature else "垂直弯曲",
+        "影响": "弯曲表面各区域反射角不同, 颜色测量可能偏暗/偏亮",
+        "建议": "建议只使用板材中心平坦区域的颜色数据, 或将板材放平后拍摄",
+        "补偿": "系统将自动增大中心权重, 降低边缘权重",
+    }
+
+
+# ════════════════════════════════════════════════
+# 8. 半透明材料检测
+# ════════════════════════════════════════════════
+
+def detect_translucency(image_bgr: np.ndarray) -> dict[str, Any]:
+    """
+    检测半透明材料 (底色透出).
+
+    半透明材料问题: 底色透过面层影响表面颜色测量,
+    放在不同底板上同一块膜看起来颜色不同.
+
+    检测方法: 分析边缘区域与中心区域的色差.
+    半透明材料的边缘区域 (背景透出更多) 会和中心不同.
+    """
+    h, w = image_bgr.shape[:2]
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    # 中心区域
+    center = lab[h // 3:2 * h // 3, w // 3:2 * w // 3]
+    center_L = float(center[..., 0].mean())
+
+    # 边缘薄处 (如果是板材放在背景上, 边缘薄处透底色更多)
+    # 分析四角区域
+    corner_size = min(h, w) // 6
+    corners = [
+        lab[:corner_size, :corner_size],
+        lab[:corner_size, -corner_size:],
+        lab[-corner_size:, :corner_size],
+        lab[-corner_size:, -corner_size:],
+    ]
+    corner_Ls = [float(c[..., 0].mean()) for c in corners]
+    corner_L = float(np.mean(corner_Ls))
+
+    # 饱和度分析: 半透明材料的饱和度随厚度变化
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    center_sat = float(hsv[h // 3:2 * h // 3, w // 3:2 * w // 3, 1].mean())
+    edge_sat = float(hsv[:corner_size, :, 1].mean())
+    sat_diff = abs(center_sat - edge_sat)
+
+    # 半透明特征: 中心和边缘的亮度/饱和度差异大
+    # 注意: 户外照片的角落通常是背景(水泥地), 不是板材边缘
+    # 所以需要更严格的判定: 亮度差大 + 饱和度差大 + 角落比中心更亮(透底白色)
+    l_diff = abs(center_L - corner_L)
+    corners_brighter = corner_L > center_L  # 半透明: 底板通常比面层亮
+    is_translucent = l_diff > 25 and sat_diff > 15 and corners_brighter
+
+    if not is_translucent:
+        return {"is_translucent": False}
+
+    return {
+        "is_translucent": True,
+        "中心vs边缘亮度差": round(l_diff, 1),
+        "中心vs边缘饱和度差": round(sat_diff, 1),
+        "影响": "半透明材料的颜色受底板影响, 不同底板上测量结果不同",
+        "建议": "请确保标样和大货放在相同颜色的底板上对比, 或使用不透明底板(白色或黑色)",
+    }
