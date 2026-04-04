@@ -540,4 +540,40 @@ def saci_analyze(image_bgr: np.ndarray, profile: str = "auto") -> dict[str, Any]
     else:
         report["SACI校准测量"] = {"说明": "未检测到水泥地面, 无法自校准", "已校准": False}
 
+    # ── Step 5: 行业级分析 (仅有板材时) ──
+    try:
+        from senia_industry import (
+            predict_dry_color, check_metamerism_risk,
+            analyze_board_uniformity, detect_edge_effect,
+        )
+
+        det = report.get("检测结果", {})
+        board_lab = det.get("大货", {}).get("LAB")
+        sample_lab = det.get("标样", {}).get("LAB")
+
+        industry: dict[str, Any] = {}
+
+        # 湿干预测 (如果有大货LAB)
+        if board_lab:
+            industry["湿干预测"] = predict_dry_color(board_lab)
+
+        # 同色异谱风险 (如果有板对)
+        if board_lab and sample_lab:
+            industry["同色异谱风险"] = check_metamerism_risk(board_lab, sample_lab)
+
+        # 空间均匀性 (对最大板材)
+        if boards:
+            biggest = max(boards, key=lambda b: b.get("area_ratio", 0))
+            quad = biggest.get("quad")
+            if quad is not None:
+                industry["空间均匀性"] = analyze_board_uniformity(
+                    calibrated_img, quad, grid_rows=4, grid_cols=6)
+                industry["边缘效应"] = detect_edge_effect(calibrated_img, quad)
+
+        if industry:
+            report["行业分析"] = industry
+
+    except Exception:
+        pass  # 行业分析失败不影响核心对色
+
     return report
