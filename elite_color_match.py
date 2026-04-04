@@ -313,36 +313,46 @@ def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarra
 
 def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
     """
-    自适应纹理抑制: 根据纹理强度自动调整滤波力度.
+    三级纹理抑制: 双边滤波 + 强力高斯 + 降采样平均.
 
-    轻纹理 (纯色/高光) → 轻度滤波, 保留真实细节
-    重纹理 (深木纹/石纹) → 强力滤波, 彻底消除纹理只留底色
+    核心原理: 对色比的是底色不是纹理. 木纹/石纹必须彻底消除.
+    之前的双边滤波只贡献2%精度 — 因为双边滤波"保留边缘",
+    而木纹恰好是边缘, 所以保留了不该保留的东西.
+
+    新方法:
+      1. 双边滤波 — 去除高频噪声
+      2. 大核高斯模糊 — 跨越木纹线条平滑 (不保留边缘!)
+      3. 降采样到50px — 天然消除残余纹理
     """
+    h, w = image_bgr.shape[:2]
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     mean_brightness = float(gray.mean())
-    # 测量纹理强度: 拉普拉斯方差
     lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-    # 极深色板 (L<35): 信噪比低, 需要更强的噪声抑制
+    # Stage 1: 双边滤波去高频噪声 (保守, 不指望它消灭纹理)
     if mean_brightness < 45:
         filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=80, sigmaSpace=20)
-        filtered = cv2.bilateralFilter(filtered, d=9, sigmaColor=60, sigmaSpace=15)
-        filtered = cv2.medianBlur(filtered, 7)
-        return filtered
-
-    if lap_var < 50:
-        # 轻纹理: 轻度滤波
+    elif lap_var < 50:
         filtered = cv2.bilateralFilter(image_bgr, d=9, sigmaColor=40, sigmaSpace=9)
-        filtered = cv2.medianBlur(filtered, 3)
-    elif lap_var < 200:
-        # 中等纹理: 标准滤波
-        filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=60, sigmaSpace=15)
-        filtered = cv2.medianBlur(filtered, 5)
     else:
-        # 重纹理: 强力多轮滤波
-        filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=75, sigmaSpace=20)
-        filtered = cv2.bilateralFilter(filtered, d=9, sigmaColor=50, sigmaSpace=12)
-        filtered = cv2.medianBlur(filtered, 7)
+        filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=60, sigmaSpace=15)
+
+    # Stage 2: 大核高斯模糊 — 真正消除木纹 (不保留边缘)
+    # 核大小 = 板材短边的 5%, 确保跨越木纹线条
+    short_edge = min(h, w)
+    gauss_k = max(5, int(short_edge * 0.05) | 1)  # 确保奇数
+    filtered = cv2.GaussianBlur(filtered, (gauss_k, gauss_k), 0)
+
+    # Stage 3: 降采样到 ~50px 长边 — 天然消除残余纹理
+    # 每个输出像素平均 (长边/50)^2 个原始像素
+    TARGET_LONG = 50
+    long_edge = max(h, w)
+    if long_edge > TARGET_LONG * 2:
+        scale = TARGET_LONG / long_edge
+        small = cv2.resize(filtered, (max(4, int(w * scale)), max(4, int(h * scale))),
+                           interpolation=cv2.INTER_AREA)
+        # 放大回原尺寸 (用于后续LAB提取时与mask对齐)
+        filtered = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
     return filtered
 
