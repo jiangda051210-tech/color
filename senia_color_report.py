@@ -201,6 +201,14 @@ def generate_color_match_report(
     h, w = image_bgr.shape[:2]
     report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # 大图降采样 (>2000px长边 → 降到2000px, 保持精度同时提速)
+    MAX_EDGE = 2000
+    if max(h, w) > MAX_EDGE:
+        scale = MAX_EDGE / max(h, w)
+        image_bgr = cv2.resize(image_bgr, (int(w * scale), int(h * scale)),
+                               interpolation=cv2.INTER_AREA)
+        h, w = image_bgr.shape[:2]
+
     # ── 0. 预检 ──
     preflight = preflight_check(image_bgr)
     env_info = preflight.get("environment", {})
