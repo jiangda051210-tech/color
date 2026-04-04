@@ -3872,6 +3872,15 @@ def analyze_color_report(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
     image = _load_image(req.image)
     profile = req.profile if req.profile != "auto" else "auto"
     report = generate_color_match_report(image, profile=profile)
+    return report
+
+
+@app.post("/v1/analyze/photo-check")
+def photo_quality_check(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
+    """拍照质量实时引导 — 告诉操作员需不需要重拍."""
+    from senia_best_practices import photo_guidance
+    image = _load_image(req.image)
+    return photo_guidance(image)
 
 
 @app.post("/v1/analyze/saci")

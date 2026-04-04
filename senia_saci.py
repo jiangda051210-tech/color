@@ -584,6 +584,26 @@ def saci_analyze(image_bgr: np.ndarray, profile: str = "auto") -> dict[str, Any]
         if industry:
             report["行业分析"] = industry
 
+        # ── Step 6: 最佳实践增强 ──
+        # 自动墨量配方 (仅在NG或临界时)
+        j = report.get("对色判定", {})
+        verdict = j.get("结论", "")
+        if "不合格" in verdict or "临界" in verdict:
+            de_data = j.get("色差分量", {})
+            if de_data:
+                from senia_best_practices import calculate_ink_recipe
+                # 解析色差分量
+                try:
+                    dl_str = de_data.get("ΔL (明暗)", "0").replace("+", "")
+                    da_str = de_data.get("Δa (红绿)", "0").replace("+", "")
+                    db_str = de_data.get("Δb (黄蓝)", "0").replace("+", "")
+                    recipe = calculate_ink_recipe({
+                        "dL": float(dl_str), "da": float(da_str), "db": float(db_str)
+                    })
+                    report["自动配方"] = recipe
+                except (ValueError, TypeError):
+                    pass
+
     except Exception:
         pass  # 行业分析失败不影响核心对色
 
