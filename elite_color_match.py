@@ -568,7 +568,7 @@ def _deduplicate_candidates(cands: list[RectCandidate], iou_threshold: float = 0
         is_dup = False
         for k in keep:
             # 简单重叠判断: 中心距离 < 两者短边的一半
-            dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) ** 2)
+            dist = np.hypot(c.center[0] - k.center[0], c.center[1] - k.center[1])
             min_dim = min(np.sqrt(c.rect_area), np.sqrt(k.rect_area)) * 0.5
             # 面积相似 + 位置接近 = 重复
             area_ratio = min(c.rect_area, k.rect_area) / max(c.rect_area, k.rect_area)

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger("elite_innovation_state")
 
 
 def init_innovation_db(db_path: Path) -> None:
@@ -171,7 +174,7 @@ def reload_customer_acceptance_from_db(
             extra = json.loads(extra_json)
             if not isinstance(extra, dict):
                 extra = {}
-        except Exception:  # noqa: BLE001
+        except (json.JSONDecodeError, TypeError, ValueError):
             extra = {}
         learner.record(
             customer_id=str(row["customer_id"]),
@@ -281,7 +284,8 @@ def load_color_passport(db_path: Path, passport_id: str) -> dict[str, Any] | Non
         return None
     try:
         payload = json.loads(row["payload_json"])
-    except Exception:  # noqa: BLE001
+    except (json.JSONDecodeError, TypeError, ValueError):
+        _log.debug("passport_payload_parse_failed", exc_info=True)
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -462,7 +466,7 @@ def load_standard_versions(
     for row in rows:
         try:
             lab = json.loads(row["lab_json"] or "{}")
-        except Exception:  # noqa: BLE001
+        except (json.JSONDecodeError, TypeError, ValueError):
             lab = {}
         if not isinstance(lab, dict):
             lab = {}

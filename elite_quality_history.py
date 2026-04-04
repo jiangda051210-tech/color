@@ -8,19 +8,32 @@ from typing import Any
 import numpy as np
 
 
+_VALID_SQL_IDENTIFIER = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
-    existing = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if not _VALID_SQL_IDENTIFIER.match(table):
+        raise ValueError(f"Invalid table name: {table!r}")
+    # Use quoted identifier to prevent SQL injection
+    quoted_table = f'"{table}"'
+    existing = conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
     existing_names = {str(row[1]) for row in existing}
     for name, sql_type in columns.items():
         if name in existing_names:
             continue
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+        if not _VALID_SQL_IDENTIFIER.match(name):
+            raise ValueError(f"Invalid column name: {name!r}")
+        if not _VALID_SQL_IDENTIFIER.match(sql_type.split("(")[0].strip()):
+            raise ValueError(f"Invalid SQL type: {sql_type!r}")
+        quoted_name = f'"{name}"'
+        conn.execute(f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_name} {sql_type}")
 
 
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS quality_runs (
@@ -108,7 +121,10 @@ def init_db(db_path: Path) -> None:
 
 def _to_float(v: Any, default: float = 0.0) -> float:
     try:
-        return float(v)
+        result = float(v)
+        if np.isnan(result) or np.isinf(result):
+            return default
+        return result
     except (TypeError, ValueError):
         return default
 

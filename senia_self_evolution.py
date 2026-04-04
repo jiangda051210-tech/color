@@ -18,6 +18,7 @@ SENIA 自我进化引擎
 from __future__ import annotations
 
 import json
+import logging
 import math
 import statistics
 import time
@@ -26,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import Any
+
+_log = logging.getLogger("senia_self_evolution")
 
 
 # ══════════════════════════════════════════════════════════
@@ -341,6 +344,7 @@ class EvolutionEngine:
                 refresh = lifelong.refresh_models()
                 result["steps"].append({"step": "模型刷新", "updates": len(refresh.get("updates", []))})
             except Exception:
+                _log.warning("lifelong_refresh_failed", exc_info=True)
                 result["steps"].append({"step": "模型刷新", "error": "skipped"})
 
         # Step 6: 触发知识爬虫
@@ -349,6 +353,7 @@ class EvolutionEngine:
                 crawl = knowledge.auto_optimize()
                 result["steps"].append({"step": "知识更新", "actions": len(crawl.get("actions", []))})
             except Exception:
+                _log.warning("knowledge_crawl_failed", exc_info=True)
                 result["steps"].append({"step": "知识更新", "error": "skipped"})
 
         # 记录进化历史

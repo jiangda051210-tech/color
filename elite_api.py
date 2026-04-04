@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -163,6 +164,7 @@ ULTIMATE_SYSTEM = UltimateColorFilmSystem()
 ULTIMATE_LOCK = RLock()
 APP_START_TS = time.time()
 ACCEPTANCE_SYNC_CACHE: dict[str, dict[str, Any]] = {}
+ACCEPTANCE_SYNC_CACHE_MAX_ENTRIES = 10000
 AUDIT_LOG_PATH = SETTINGS.audit_log_path
 METRICS_LOCK = RLock()
 AUDIT_LOG_LOCK = RLock()
@@ -750,8 +752,8 @@ def _write_audit_event(event: dict[str, Any]) -> None:
                 fp.write(line + "\n")
     except Exception:
         # Audit logging must not block the business request path,
-        # but we still log the failure to stderr for operational visibility.
-        print("[WARN] audit log write failed", file=sys.stderr)
+        # but we still log the failure for operational visibility.
+        _log.warning("audit_log_write_failed", exc_info=True)
         return
 
 
@@ -1509,6 +1511,21 @@ def _sync_acceptance_customer_from_db(db_path: str | None, customer_id: str) -> 
             customer_id=customer_id,
         )
     ACCEPTANCE_SYNC_CACHE[cache_key] = {"loaded_at": now, "events_loaded": loaded}
+    # Evict expired entries to prevent unbounded growth
+    if len(ACCEPTANCE_SYNC_CACHE) > ACCEPTANCE_SYNC_CACHE_MAX_ENTRIES:
+        expired_keys = [
+            k for k, v in ACCEPTANCE_SYNC_CACHE.items()
+            if now - float(v.get("loaded_at", 0.0)) > ttl
+        ]
+        for k in expired_keys:
+            ACCEPTANCE_SYNC_CACHE.pop(k, None)
+        # If still over limit, remove oldest entries
+        if len(ACCEPTANCE_SYNC_CACHE) > ACCEPTANCE_SYNC_CACHE_MAX_ENTRIES:
+            sorted_keys = sorted(
+                ACCEPTANCE_SYNC_CACHE, key=lambda k: float(ACCEPTANCE_SYNC_CACHE[k].get("loaded_at", 0.0))
+            )
+            for k in sorted_keys[: len(ACCEPTANCE_SYNC_CACHE) - ACCEPTANCE_SYNC_CACHE_MAX_ENTRIES]:
+                ACCEPTANCE_SYNC_CACHE.pop(k, None)
     return path, loaded, False
 
 
@@ -1586,7 +1603,7 @@ def _add_policy_recommendation(report: dict[str, Any], history: "HistoryConfig |
             window=max(20, int(history.window) * 4),
         )
     except Exception:  # noqa: BLE001
-        pass
+        _log.warning("policy_recommendation_failed", exc_info=True)
 
 def _record_with_history(
     report: dict[str, Any],
@@ -1606,7 +1623,7 @@ def _record_with_history(
         )
         _invalidate_ops_summary_cache()
     except Exception:  # noqa: BLE001
-        pass
+        _log.warning("record_with_history_failed", exc_info=True)
 
 
 class ImageInput(BaseModel):
@@ -2024,7 +2041,19 @@ def _load_image(source: ImageInput) -> np.ndarray:
     raise HTTPException(status_code=400, detail="image source is empty")
 
 
+_ALLOWED_CONTENT_TYPES = frozenset({
+    "image/jpeg", "image/png", "image/bmp", "image/tiff", "image/webp",
+})
+
+
 async def _upload_to_image_input(upload: UploadFile, field_name: str) -> ImageInput:
+    # Validate content type
+    ct = (upload.content_type or "").lower().split(";")[0].strip()
+    if ct and ct not in _ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name}: unsupported content type '{ct}'. Allowed: {', '.join(sorted(_ALLOWED_CONTENT_TYPES))}",
+        )
     payload = await upload.read()
     if not payload:
         raise HTTPException(status_code=400, detail=f"{field_name} upload is empty")
@@ -4297,6 +4326,7 @@ def analyze_batch(req: BatchAnalyzeRequest) -> dict[str, Any]:
             decision_counts[code] = decision_counts.get(code, 0) + 1
             decision_scored += 1
         except Exception:  # noqa: BLE001
+            _log.debug("batch_decision_parse_failed", report=report_fp, exc_info=True)
             continue
 
     if req.history is not None:
@@ -4318,6 +4348,7 @@ def analyze_batch(req: BatchAnalyzeRequest) -> dict[str, Any]:
                     report_path=report_fp,
                 )
             except Exception:  # noqa: BLE001
+                _log.warning("batch_record_run_failed", report=report_fp, exc_info=True)
                 continue
 
     resp: dict[str, Any] = {
@@ -4344,7 +4375,7 @@ def analyze_batch(req: BatchAnalyzeRequest) -> dict[str, Any]:
                 window=max(20, int(req.history.window) * 4),
             )
         except Exception:  # noqa: BLE001
-            pass
+            _log.warning("batch_policy_recommendation_failed", exc_info=True)
     if req.include_rows:
         resp["rows"] = summary.get("rows", [])
     if int(resp.get("error", 0)) > 0:
@@ -6741,7 +6772,7 @@ def get_history_policy_recommendation(
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001
-        pass
+        _log.warning("policy_suggestion_failed", exc_info=True)
     return rec
 
 
@@ -6979,7 +7010,7 @@ def generate_pdf_report(
         try:
             report_data = load_run_report(Path(db_path), run_id) or {}
         except Exception:
-            pass
+            _log.warning("load_run_report_failed", run_id=run_id, exc_info=True)
     if not report_data:
         report_data = {"run_id": run_id, "result": {"summary": {}}, "decision": {}, "profile": {}}
     out_dir = _ensure_output_dir("reports")
@@ -7127,7 +7158,11 @@ async def senia_analyze_endpoint(
         pass
 
     # 并发控制: 最多3个同时分析 (OpenCV/numpy 非线程安全)
-    async with SENIA_ANALYZE_SEMAPHORE:
+    try:
+        await asyncio.wait_for(SENIA_ANALYZE_SEMAPHORE.acquire(), timeout=30.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Server busy, too many concurrent analyses. Please retry later.")
+    try:
         out_dir = _ensure_output_dir(f"senia_{lot_id or 'auto'}_{int(time.time())}")
         img_path = out_dir / (image.filename or "upload.jpg")
         img_path.write_bytes(raw)
@@ -7144,6 +7179,8 @@ async def senia_analyze_endpoint(
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        SENIA_ANALYZE_SEMAPHORE.release()
 
     summary = report.get("result", {}).get("summary", {})
     tier = report.get("tier", "UNKNOWN")
@@ -7170,18 +7207,19 @@ async def senia_analyze_endpoint(
             avg_delta_e=avg_de, profile=used_profile,
         ))
     except Exception:
-        pass
+        _log.warning("event_bus_publish_failed", lot_id=lot_id, exc_info=True)
     try:
         IMAGE_STORE.save(data=raw, lot_id=lot_id, category="senia_analysis",
                          product_code=product_code, filename=image.filename or "upload.jpg")
     except Exception:
-        pass
+        _log.warning("image_store_save_failed", lot_id=lot_id, exc_info=True)
 
     # ── 历史对比 ──
     try:
         baseline = compare_with_baseline(avg_de, DEFAULT_HISTORY_DB, lot_id, product_code)
         report["history"] = baseline
     except Exception:
+        _log.warning("history_baseline_compare_failed", lot_id=lot_id, exc_info=True)
         report["history"] = {"has_baseline": False}
 
     # ── 自动喂入进化引擎 (每次分析都让系统变强) ──
@@ -7196,7 +7234,7 @@ async def senia_analyze_endpoint(
         })
         LIFELONG.learn_from_feedback(used_profile, avg_de, tier)
     except Exception:
-        pass
+        _log.warning("evolution_record_failed", lot_id=lot_id, exc_info=True)
 
     return report
 

@@ -15,7 +15,7 @@ from elite_quality_history import list_outcomes, list_recent_runs
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return default
 
 
