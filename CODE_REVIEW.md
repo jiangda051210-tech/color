@@ -257,7 +257,16 @@ dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) **
 | `elite_color_match.py:21,76` | `class ROI` + `def parse_roi()` |
 | `color_match_engine.py:14,21` | 完全相同的 `class ROI` + `def parse_roi()` |
 
-### 27. `_to_float` 辅助函数重复 3 次
+### 27. 旧版本模块未退役
+
+| 新版本 | 旧版本 | 旧版行数 | 说明 |
+|--------|--------|---------|------|
+| `color_film_mvp_v3_optimized.py` (被 4 处导入) | `color_film_mvp_v2.py` | 1173 | v2 仅被 2 处导入，应考虑退役 |
+| `ultimate_color_film_system_v2_optimized.py` (被 8 处导入) | `ultimate_color_film_system.py` | 1092 | 旧版仅被 1 处导入 |
+
+**总计 2265 行可合并/退役代码。**
+
+### 28. `_to_float` 辅助函数重复 3 次
 
 | 文件 | 行号 |
 |------|------|
