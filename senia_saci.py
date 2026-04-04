@@ -501,12 +501,18 @@ def saci_analyze(image_bgr: np.ndarray, profile: str = "auto") -> dict[str, Any]
         }
 
     # ── Step 3: 双路径报告 ──
-    # 路径A: 绝对LAB报告 (原图, 不做自校准)
-    absolute_report = generate_color_match_report(image_bgr, profile=profile)
+    # 预检只做一次, 两个报告共享
+    from senia_preflight import preflight_check
+    preflight = preflight_check(image_bgr)
 
-    # 路径B: SACI校准后报告 (水泥自校准后)
+    # 路径A: 绝对LAB报告 (表面预处理后的图像)
+    absolute_report = generate_color_match_report(
+        image_bgr, profile=profile, precomputed_preflight=preflight)
+
+    # 路径B: SACI校准后报告
     if cal_info.get("calibrated"):
-        calibrated_report = generate_color_match_report(calibrated_img, profile=profile)
+        calibrated_report = generate_color_match_report(
+            calibrated_img, profile=profile, precomputed_preflight=preflight)
     else:
         calibrated_report = absolute_report
 
@@ -539,11 +545,28 @@ def saci_analyze(image_bgr: np.ndarray, profile: str = "auto") -> dict[str, Any]
                 "校正被限幅": cal_info.get("clamped", False),
             },
         }
-        # 主判定: 校准结果有效时用校准, 否则回退到绝对
-        if cal_judgment.get("结论") and cal_judgment["结论"] != "无法判定":
+        # 主判定选择: 校准 vs 绝对 — 取更可靠的
+        # 规则: 校准结果有效 且 不比绝对结果差 才用校准
+        abs_j = absolute_report.get("对色判定", {})
+        abs_de_str = abs_j.get("色差值", "")
+        cal_de_str = cal_judgment.get("色差值", "")
+        try:
+            abs_de = float(abs_de_str.replace("ΔE = ", "")) if abs_de_str else 999
+        except (ValueError, AttributeError):
+            abs_de = 999
+        try:
+            cal_de = float(cal_de_str.replace("ΔE = ", "")) if cal_de_str else 999
+        except (ValueError, AttributeError):
+            cal_de = 999
+
+        if (cal_judgment.get("结论") and cal_judgment["结论"] != "无法判定"
+                and cal_de <= abs_de * 1.5):
+            # 校准结果合理 (不比绝对差50%以上才采用)
             report["对色判定"] = cal_judgment
             report["工艺调整建议"] = calibrated_report.get("工艺调整建议", [])
-        # else: 保持绝对LAB的判定 (已在 report 中)
+            report["判定来源"] = "SACI校准"
+        else:
+            report["判定来源"] = "绝对LAB"
     else:
         report["SACI校准测量"] = {"说明": "未检测到水泥地面, 无法自校准", "已校准": False}
 

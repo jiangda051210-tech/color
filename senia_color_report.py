@@ -176,17 +176,15 @@ def _judge_result(dE: float, profile: str = "wood") -> dict[str, Any]:
 def generate_color_match_report(
     image_bgr: np.ndarray,
     profile: str = "wood",
+    precomputed_boards: list | None = None,
+    precomputed_preflight: dict | None = None,
 ) -> dict[str, Any]:
     """
     一张照片 → 完整对色报告单.
 
-    这是系统的核心输出, 替代人工对色员的全部工作:
-      1. 自动找到大货和标样
-      2. 测量色差 + 偏色方向
-      3. 给出 OK/NG 判定
-      4. 给出工艺调整建议
-      5. 分析板面一致性
-      6. 记录环境和拍摄质量
+    支持接收预计算数据 (避免重复计算):
+      precomputed_boards: 已检测的板材列表 (跳过contour+detect)
+      precomputed_preflight: 已完成的预检结果 (跳过preflight)
     """
     from senia_preflight import preflight_check
     from elite_color_match import (
@@ -201,7 +199,7 @@ def generate_color_match_report(
     h, w = image_bgr.shape[:2]
     report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 大图降采样 (>2000px长边 → 降到2000px, 保持精度同时提速)
+    # 大图降采样
     MAX_EDGE = 2000
     if max(h, w) > MAX_EDGE:
         scale = MAX_EDGE / max(h, w)
@@ -209,19 +207,22 @@ def generate_color_match_report(
                                interpolation=cv2.INTER_AREA)
         h, w = image_bgr.shape[:2]
 
-    # ── 0. 预检 ──
-    preflight = preflight_check(image_bgr)
+    # ── 0. 预检 (可复用) ──
+    if precomputed_preflight is not None:
+        preflight = precomputed_preflight
+    else:
+        preflight = preflight_check(image_bgr)
     env_info = preflight.get("environment", {})
     is_outdoor = env_info.get("environment_type") in ("outdoor", "mixed")
 
-    # ── 1. 检测所有板材 (精确测量已在 detect_all_boards 内完成) ──
-    cands = contour_candidates(image_bgr)
-    all_boards = detect_all_boards(cands, image_bgr.shape, image_bgr)
+    # ── 1. 板材检测 (可复用) ──
+    if precomputed_boards is not None:
+        all_boards = precomputed_boards
+    else:
+        cands = contour_candidates(image_bgr)
+        all_boards = detect_all_boards(cands, image_bgr.shape, image_bgr)
 
-    # 严格过滤: 排除测量不可靠的区域
-    # - 有效像素率 < 15% → 大部分是文字/标签/阴影, 不可信
-    # - 使用像素 < 500 → 区域太小, 统计不稳定
-    # - 无 mean_lab → 提取失败
+    # 严格过滤
     all_boards = [b for b in all_boards
                   if b.get("mean_lab")
                   and b.get("used_pixels", 0) >= 500
