@@ -247,7 +247,12 @@ def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     avg_cp = (c1p + c2p) / 2.0
 
     hp_sum = h1p + h2p
-    avg_hp = np.where(np.abs(h1p - h2p) > 180.0, (hp_sum + 360.0) / 2.0, hp_sum / 2.0)
+    # Sharma 2005 公式: 当 |h1'-h2'| > 180 时, avg_hp 取决于 h1'+h2' 与 360 的关系
+    avg_hp = np.where(
+        np.abs(h1p - h2p) > 180.0,
+        np.where(hp_sum < 360.0, (hp_sum + 360.0) / 2.0, (hp_sum - 360.0) / 2.0),
+        hp_sum / 2.0,
+    )
     avg_hp = np.where((c1p * c2p) == 0, hp_sum, avg_hp)
 
     t = (
