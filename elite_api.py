@@ -3872,6 +3872,23 @@ def analyze_color_report(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
     image = _load_image(req.image)
     profile = req.profile if req.profile != "auto" else "auto"
     report = generate_color_match_report(image, profile=profile)
+
+
+@app.post("/v1/analyze/saci")
+def analyze_saci(req: MultiBoardAnalyzeRequest) -> dict[str, Any]:
+    """
+    SACI 自适应色彩智能 — 行业首创自校准对色.
+
+    输入一张照片, 输出:
+      - 绝对LAB测量结果 (精确测量链路)
+      - SACI校准测量结果 (水泥地自校准, 消除光照色偏)
+      - 双结果对比, 最终判定取更可靠的
+    """
+    from senia_saci import saci_analyze
+
+    image = _load_image(req.image)
+    profile = req.profile if req.profile != "auto" else "auto"
+    report = saci_analyze(image, profile=profile)
     return report
 
 
