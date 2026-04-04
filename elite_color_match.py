@@ -805,11 +805,11 @@ def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, i
                 valid_count = int(np.count_nonzero(valid_mask))
 
                 if valid_count > 50:
-                    # Step 4: 白平衡校正
-                    wb, _ = apply_gray_world(tone, valid_mask)
-                    # Step 5: LAB 转换
-                    lab = bgr_to_lab_float(wb)
-                    # Step 6: 稳健统计 (IQR 去除异常值)
+                    # Step 4: LAB 转换 — 注意: 不做白平衡!
+                    # 白平衡会破坏单色板材的真实颜色 (把暖棕色校正成灰色)
+                    # 白平衡只在 board vs sample 成对比较时统一应用
+                    lab = bgr_to_lab_float(tone)
+                    # Step 5: 稳健统计 (IQR 去除异常值)
                     try:
                         mean_lab, std_lab, used = robust_mean_lab(lab, valid_mask)
                         board_info["mean_lab"] = {
@@ -824,10 +824,13 @@ def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, i
                         }
                         board_info["valid_pixel_ratio"] = round(valid_count / max(bw * bh, 1), 3)
                         board_info["used_pixels"] = used
+                        # Step 6: 质量门控 — std_L > 12 说明区域内混入了异质内容
+                        if float(std_lab[0]) > 12.0:
+                            board_info["quality_warning"] = "high_variance"
                     except ValueError:
                         pass  # 有效像素不够, 跳过颜色提取
                 else:
-                    # 有效像素太少, 用简化提取
+                    # 有效像素太少, 用简化提取 (也不做白平衡)
                     pixels = tone[mat_mask]
                     if len(pixels) > 50:
                         lab_simple = cv2.cvtColor(pixels.reshape(1, -1, 3),

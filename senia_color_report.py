@@ -273,7 +273,13 @@ def generate_color_match_report(
         else:
             layout = "single_board"
 
-    consistency_boards = [main_board] + similar_planks if main_board else []
+    # 排除高方差板材 (std_L>12 说明混入了文字/标签等异质内容)
+    clean_similar = [b for b in similar_planks if b.get("quality_warning") != "high_variance"]
+    if main_board and main_board.get("quality_warning") == "high_variance" and clean_similar:
+        # 主板质量差, 用质量最好的替代
+        main_board = clean_similar[0]
+        clean_similar = clean_similar[1:]
+    consistency_boards = ([main_board] + clean_similar) if main_board else []
 
     # ── 2b. 自动检测材质 ──
     if profile == "auto" and main_board and main_board.get("mean_lab"):
