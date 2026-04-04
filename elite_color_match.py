@@ -313,15 +313,29 @@ def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarra
 
 def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
     """
-    纹理抑制: 消除木纹/石纹细节, 提取底色.
-    对地板装饰膜特别重要 — 对色比的是底色不是纹理.
+    自适应纹理抑制: 根据纹理强度自动调整滤波力度.
 
-    双重滤波: 先双边保边缘, 再中值去残余纹理.
+    轻纹理 (纯色/高光) → 轻度滤波, 保留真实细节
+    重纹理 (深木纹/石纹) → 强力滤波, 彻底消除纹理只留底色
     """
-    # 第一轮: 强力双边滤波 (d=15, 比原来d=9更强)
-    filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=60, sigmaSpace=15)
-    # 第二轮: 中值滤波去残余纹理颗粒
-    filtered = cv2.medianBlur(filtered, 5)
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    # 测量纹理强度: 拉普拉斯方差
+    lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    if lap_var < 50:
+        # 轻纹理: 轻度滤波
+        filtered = cv2.bilateralFilter(image_bgr, d=9, sigmaColor=40, sigmaSpace=9)
+        filtered = cv2.medianBlur(filtered, 3)
+    elif lap_var < 200:
+        # 中等纹理: 标准滤波
+        filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=60, sigmaSpace=15)
+        filtered = cv2.medianBlur(filtered, 5)
+    else:
+        # 重纹理: 强力多轮滤波
+        filtered = cv2.bilateralFilter(image_bgr, d=15, sigmaColor=75, sigmaSpace=20)
+        filtered = cv2.bilateralFilter(filtered, d=9, sigmaColor=50, sigmaSpace=12)
+        filtered = cv2.medianBlur(filtered, 7)
+
     return filtered
 
 
@@ -438,7 +452,10 @@ def build_invalid_mask(image_bgr: np.ndarray, outdoor_mode: bool = False) -> np.
     white_label = white_label.astype(bool)
 
     med = np.median(lab.reshape(-1, 3), axis=0)
-    mad = np.median(np.abs(lab.reshape(-1, 3) - med), axis=0) + 1e-5
+    raw_mad = np.median(np.abs(lab.reshape(-1, 3) - med), axis=0)
+    # MAD下限 0.5: 防止低饱和度板材(灰色/深色)的微小色度波动被过度放大
+    # 旧值1e-5导致灰色板上64%像素被误判为outlier
+    mad = np.maximum(raw_mad, 0.5)
     z = np.abs((lab - med) / mad)
     color_outlier = (z[..., 1] > 7.5) | (z[..., 2] > 7.5)
 
@@ -805,13 +822,41 @@ def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, i
                 valid_count = int(np.count_nonzero(valid_mask))
 
                 if valid_count > 50:
-                    # Step 4: LAB 转换 — 注意: 不做白平衡!
-                    # 白平衡会破坏单色板材的真实颜色 (把暖棕色校正成灰色)
-                    # 白平衡只在 board vs sample 成对比较时统一应用
+                    # Step 4: LAB 转换 (不做白平衡, 保留真实颜色)
                     lab = bgr_to_lab_float(tone)
-                    # Step 5: 稳健统计 (IQR 去除异常值)
-                    try:
+
+                    # Step 5: 网格采样 + 稳健统计
+                    # 将板材分成 4x4 网格, 每格独立计算均值, 取中位数
+                    # 比全局均值更抗局部干扰 (某格有文字/阴影不影响整体)
+                    grid_rows, grid_cols = 4, 4
+                    cell_means = []
+                    total_used = 0
+                    for gr in range(grid_rows):
+                        y0 = int(gr * bh / grid_rows)
+                        y1 = int((gr + 1) * bh / grid_rows)
+                        for gc in range(grid_cols):
+                            x0 = int(gc * bw / grid_cols)
+                            x1 = int((gc + 1) * bw / grid_cols)
+                            cell_mask = valid_mask[y0:y1, x0:x1]
+                            cell_valid = int(np.count_nonzero(cell_mask))
+                            if cell_valid < 30:
+                                continue
+                            cell_lab = lab[y0:y1, x0:x1]
+                            cell_vals = cell_lab[cell_mask]
+                            cell_means.append(cell_vals.mean(axis=0))
+                            total_used += cell_valid
+
+                    if len(cell_means) >= 3:
+                        # 用网格中位数 (比全局均值更抗干扰)
+                        cell_arr = np.array(cell_means)
+                        mean_lab = np.median(cell_arr, axis=0)
+                        std_lab = np.std(cell_arr, axis=0)
+                        used = total_used
+                    else:
+                        # 网格太少, 回退到全局稳健统计
                         mean_lab, std_lab, used = robust_mean_lab(lab, valid_mask)
+
+                    try:
                         board_info["mean_lab"] = {
                             "L": round(float(mean_lab[0]), 2),
                             "a": round(float(mean_lab[1]), 2),
@@ -824,7 +869,7 @@ def detect_all_boards(cands: list[RectCandidate], image_shape: tuple[int, int, i
                         }
                         board_info["valid_pixel_ratio"] = round(valid_count / max(bw * bh, 1), 3)
                         board_info["used_pixels"] = used
-                        # Step 6: 质量门控 — std_L > 12 说明区域内混入了异质内容
+                        board_info["grid_cells_used"] = len(cell_means) if cell_means else 0
                         if float(std_lab[0]) > 12.0:
                             board_info["quality_warning"] = "high_variance"
                     except ValueError:

@@ -326,23 +326,28 @@ def generate_color_match_report(
             "judgment": _judge_result(de_detail["dE00"], profile),
             "adjust_suggestions": _adjust_suggestion(de_detail),
         }
-    elif layout == "multi_plank" and len(similar_planks) >= 1:
-        # 多板材模式: 取板间最大色差作为判定依据
-        worst_de = 0
-        worst_pair = None
-        for b in similar_planks:
-            de_val = b.get("_de_to_main", 0)
-            if de_val > worst_de:
-                worst_de = de_val
-                worst_pair = b
-        if worst_pair:
-            de_detail = _ciede2000_detail(main_board["mean_lab"], worst_pair["mean_lab"])
+    elif layout == "multi_plank" and len(consistency_boards) >= 2:
+        # 多板材模式: 取所有板对中色差最小的一对作为对色判定
+        # (颜色最接近的两块板 = 最可能是大货和标样的配对)
+        best_de = float("inf")
+        best_i, best_j = 0, 1
+        for i in range(len(consistency_boards)):
+            for j in range(i + 1, len(consistency_boards)):
+                if consistency_boards[i].get("mean_lab") and consistency_boards[j].get("mean_lab"):
+                    de = _ciede2000_detail(consistency_boards[i]["mean_lab"],
+                                           consistency_boards[j]["mean_lab"])["dE00"]
+                    if de < best_de:
+                        best_de = de
+                        best_i, best_j = i, j
+        if best_de < float("inf"):
+            de_detail = _ciede2000_detail(consistency_boards[best_i]["mean_lab"],
+                                          consistency_boards[best_j]["mean_lab"])
             color_match = {
                 "delta_e": de_detail,
                 "directions": _color_direction(de_detail),
                 "judgment": _judge_result(de_detail["dE00"], profile),
                 "adjust_suggestions": _adjust_suggestion(de_detail),
-                "note": f"多板材模式: {len(similar_planks)+1}块相似板中最大色差",
+                "note": f"多板材模式: {len(similar_planks)+1}块相似板中与主板最接近的对比",
             }
 
     # ── 4. 板面一致性 + 偏差最大板材标注 ──

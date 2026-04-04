@@ -90,8 +90,8 @@ def calibrate_from_concrete(image_bgr: np.ndarray) -> tuple[np.ndarray, dict[str
         "correction_b": round(-concrete_b, 2),
     }
 
-    # 校正限幅: 最大 ±3.0 (超过说明水泥被板材反射光污染, 不可信)
-    MAX_CORRECTION = 3.0
+    # 校正限幅: 最大 ±5.0 (户外实测色偏可达4-5, 原3.0太紧)
+    MAX_CORRECTION = 5.0
     safe_a = max(-MAX_CORRECTION, min(MAX_CORRECTION, -concrete_a))
     safe_b = max(-MAX_CORRECTION, min(MAX_CORRECTION, -concrete_b))
     info["correction_a"] = round(safe_a, 2)
