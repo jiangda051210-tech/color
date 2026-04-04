@@ -932,7 +932,12 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
             break
 
     if board is None and cands:
-        board = cands[0]
+        # 只用面积在合理范围的候选, 避免选到整张图大小的 LAB 分割区域
+        reasonable = [c for c in cands if c.rect_area / image_area < 0.95]
+        if reasonable:
+            board = reasonable[0]
+        else:
+            board = cands[0]
 
     sample = None
     if board is not None:
@@ -1486,7 +1491,31 @@ def analyze_single_image(
             sample_on_board = order_quad(sample_inner_quad)
         else:
             if sample_cand is None:
-                raise RuntimeError("未能自动识别小样轮廓，请避免遮挡并让小样完整入镜。")
+                # 无法找到标样 → 返回降级结果 (仅大货信息, 无色差对比)
+                try:
+                    board_mask = build_material_mask(board_warp.shape[:2], border_ratio=0.04)
+                    board_wb, _ = apply_gray_world(board_warp, board_mask)
+                    board_tone = texture_suppress(board_wb)
+                    board_lab = bgr_to_lab_float(board_tone)
+                    board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
+                    inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
+                except (ValueError, cv2.error):
+                    inferred_profile = profile_name
+                return {
+                    "mode": "single",
+                    "result": {
+                        "pass": None,
+                        "delta_e": {"avg": 0.0, "p95": 0.0, "max": 0.0, "global": 0.0},
+                        "bias": {"dL": 0.0, "dC": 0.0, "dH_deg": 0.0},
+                        "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0},
+                    },
+                    "board_lab": [float(x) for x in board_mean],
+                    "profile": inferred_profile,
+                    "detection": det_diag,
+                    "quality_flags": ["sample_not_found"],
+                    "recommendations": ["未能自动识别小样，请确保标样放在大货上方并完整入镜，或使用 --sample-roi 手动指定"],
+                    "capture_guidance": "请将标样完整放置在大货表面后重新拍摄",
+                }
             sample_source = "global_detection"
             sample_warp, _, sample_quad = warp_quad(image_bgr, sample_cand.quad, target_long_side=900)
             sample_poly = order_quad(sample_quad).reshape(1, -1, 2)
@@ -1527,8 +1556,25 @@ def analyze_single_image(
     board_lab = bgr_to_lab_float(board_tone)
     sample_lab = bgr_to_lab_float(sample_tone)
 
-    board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
-    sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
+    try:
+        board_mean, board_std, board_used = robust_mean_lab(board_lab, board_mask)
+    except ValueError:
+        # 大货区域有效像素为零 → 降级
+        return {
+            "mode": "single", "profile": profile_name, "detection": det_diag,
+            "result": {"pass": None, "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0}},
+            "quality_flags": ["board_no_valid_pixels"],
+            "recommendations": ["大货区域无有效像素，可能被手写字/标签完全覆盖，请重新拍摄"],
+        }
+    try:
+        sample_mean, sample_std, sample_used = robust_mean_lab(sample_lab, sample_mask)
+    except ValueError:
+        return {
+            "mode": "single", "profile": profile_name, "detection": det_diag,
+            "result": {"pass": None, "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0}},
+            "quality_flags": ["sample_no_valid_pixels"],
+            "recommendations": ["标样区域无有效像素，可能被遮挡或过小，请重新拍摄"],
+        }
 
     inferred_profile, profile_metrics = infer_profile(board_tone, board_mask, profile_name)
     profile = PROFILES[inferred_profile]
