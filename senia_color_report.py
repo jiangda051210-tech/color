@@ -190,8 +190,8 @@ def generate_color_match_report(
     """
     from senia_preflight import preflight_check
     from elite_color_match import (
-        contour_candidates, detect_all_boards, choose_board_and_sample,
-        detect_concrete_background, build_invalid_mask,
+        contour_candidates, detect_all_boards,
+        detect_concrete_background,
         apply_outdoor_white_balance, apply_shading_correction,
         texture_suppress, bgr_to_lab_float, robust_mean_lab,
         build_material_mask, order_quad,
@@ -206,12 +206,18 @@ def generate_color_match_report(
     env_info = preflight.get("environment", {})
     is_outdoor = env_info.get("environment_type") in ("outdoor", "mixed")
 
-    # ── 1. 检测所有板材 ──
+    # ── 1. 检测所有板材 (精确测量已在 detect_all_boards 内完成) ──
     cands = contour_candidates(image_bgr)
     all_boards = detect_all_boards(cands, image_bgr.shape, image_bgr)
-    board_obj, sample_obj, detect_diag = choose_board_and_sample(
-        cands, image_bgr.shape, image_bgr, multi_board=True,
-    )
+
+    # 严格过滤: 排除测量不可靠的区域
+    # - 有效像素率 < 15% → 大部分是文字/标签/阴影, 不可信
+    # - 使用像素 < 500 → 区域太小, 统计不稳定
+    # - 无 mean_lab → 提取失败
+    all_boards = [b for b in all_boards
+                  if b.get("mean_lab")
+                  and b.get("used_pixels", 0) >= 500
+                  and b.get("valid_pixel_ratio", 0) >= 0.15]
 
     # ── 2. 智能识别大货和标样 ──
     # 优化: 阈值10(原15太松), 多数派投票, 光照校正后重测
@@ -345,16 +351,27 @@ def generate_color_match_report(
                     board_avg_de.setdefault(i, []).append(de["dE00"])
                     board_avg_de.setdefault(j, []).append(de["dE00"])
         if pairs:
-            # 找偏差最大的板材
             worst_idx = max(board_avg_de,
                             key=lambda k: float(np.mean(board_avg_de[k]))) if board_avg_de else None
             worst_avg = round(float(np.mean(board_avg_de[worst_idx])), 2) if worst_idx is not None else 0
+
+            # 测量可靠性: 用每块板的有效像素率加权
+            reliability_scores = []
+            for b in consistency_boards:
+                vr = b.get("valid_pixel_ratio", 0.5)
+                std_l = b.get("std_lab", {}).get("L", 5.0)
+                # 高有效率+低方差 = 高可靠性
+                rel = min(1.0, vr) * max(0.3, 1.0 - std_l / 20.0)
+                reliability_scores.append(round(rel, 2))
+            avg_reliability = round(float(np.mean(reliability_scores)), 2)
+
             consistency = {
                 "板材数量": len(consistency_boards),
                 "板间最小色差": round(min(pairs), 2),
                 "板间最大色差": round(max(pairs), 2),
                 "板间平均色差": round(float(np.mean(pairs)), 2),
                 "一致性评价": "良好" if max(pairs) < 2.0 else "一般" if max(pairs) < 4.0 else "较差",
+                "测量可靠性": f"{avg_reliability:.0%}",
             }
             if worst_idx is not None and worst_avg > 2.0:
                 consistency["偏差最大板"] = f"第{worst_idx+1}块 (平均色差={worst_avg})"
@@ -518,7 +535,7 @@ def print_report(report: dict[str, Any]) -> str:
     if cons:
         lines.append("")
         lines.append("  ── 板面一致性 ──")
-        lines.append(f"  板材数: {cons['板材数量']}  |  板间色差: {cons['板间最小色差']}~{cons['板间最大色差']}  |  评价: {cons['一致性评价']}")
+        lines.append(f"  板材数: {cons['板材数量']}  |  板间色差: {cons['板间最小色差']}~{cons['板间最大色差']}  |  评价: {cons['一致性评价']}  |  可靠性: {cons.get('测量可靠性','?')}")
         if "偏差最大板" in cons:
             lines.append(f"  ⚠ 偏差最大: {cons['偏差最大板']}")
         if cons.get("已排除非产品区域"):
