@@ -17,6 +17,7 @@ DEFAULT_POLICY: dict[str, Any] = {
             "history_avg_outlier_high",
             "history_p95_outlier_high",
             "history_max_outlier_high",
+            "spectral_out_of_gamut",
         ],
         "recapture_flags": [
             "low_overall_confidence",
@@ -126,6 +127,16 @@ def _extract_context(report: dict[str, Any]) -> dict[str, Any]:
     process_actions = process_advice.get("suggested_actions", []) if isinstance(process_advice, dict) else []
     process_actions = [str(x) for x in process_actions]
 
+    # Detect spectral out-of-gamut from innovation_engine results
+    innovation_engine = report.get("innovation_engine", {})
+    if isinstance(innovation_engine, dict):
+        spectral = innovation_engine.get("spectral_reconstruction", innovation_engine.get("spectral", {}))
+        if isinstance(spectral, dict) and spectral.get("in_gamut") is False:
+            if "spectral_out_of_gamut" not in quality_flags and "spectral_out_of_gamut" not in history_flags:
+                quality_flags.append("spectral_out_of_gamut")
+
+    all_flags = quality_flags + [f for f in history_flags if f not in quality_flags]
+
     return {
         "mode": str(report.get("mode", "unknown")),
         "pass": bool(result.get("pass", False)),
@@ -141,7 +152,7 @@ def _extract_context(report: dict[str, Any]) -> dict[str, Any]:
         "max_ratio": max_ratio,
         "quality_flags": quality_flags,
         "history_flags": history_flags,
-        "all_flags": quality_flags + [f for f in history_flags if f not in quality_flags],
+        "all_flags": all_flags,
         "process_risk": process_risk,
         "process_actions": process_actions,
     }
@@ -185,10 +196,13 @@ def _decide(ctx: dict[str, Any], policy: dict[str, Any]) -> tuple[str, list[str]
         reasons.append(f"triggered flags: {', '.join(sorted(hit_recap))}")
         return "RECAPTURE_REQUIRED", reasons
 
-    if ctx["process_risk"] in critical_levels and not ctx["pass"]:
-        reasons.append("process_risk_critical_and_quality_fail")
-        reasons.append(f"process_risk={ctx['process_risk']}, pass={ctx['pass']}")
-        return "HOLD_AND_ESCALATE", reasons
+    if ctx["process_risk"] in critical_levels:
+        if ctx["process_risk"] == "critical":
+            reasons.append(f"process_risk={ctx['process_risk']} is critical — auto-hold regardless of color metrics")
+            return "HOLD_AND_ESCALATE", reasons
+        if ctx["process_risk"] == "high" and not ctx["pass"]:
+            reasons.append(f"process_risk=high combined with color fail — escalating to HOLD")
+            return "HOLD_AND_ESCALATE", reasons
 
     auto_conf = _to_float(p.get("auto_release_min_confidence"), 0.82)
     max_avg_ratio = _to_float(p.get("max_avg_ratio_for_auto_release"), 1.0)
@@ -206,6 +220,14 @@ def _decide(ctx: dict[str, Any], policy: dict[str, Any]) -> tuple[str, list[str]
             f"avg_ratio={ctx['avg_ratio']:.3f}<={max_avg_ratio:.3f}, "
             f"p95_ratio={ctx['p95_ratio']:.3f}<={max_p95_ratio:.3f}"
         )
+        # Cost-based safety gate: if expected escape cost exceeds threshold, don't auto-release
+        risk_probability = _risk_probability(ctx)
+        estimated_cost = _estimate_cost("AUTO_RELEASE", risk_probability, policy, ctx)
+        if risk_probability > 0.5 and estimated_cost > 200:
+            reasons.append(f"risk_probability={risk_probability:.2f} × escape_cost exceeds safety threshold")
+            # Downgrade to MANUAL_REVIEW instead of AUTO_RELEASE
+            decision_code = "MANUAL_REVIEW"
+            return decision_code, reasons
         return "AUTO_RELEASE", reasons
 
     manual_conf = _to_float(p.get("manual_review_min_confidence"), 0.68)

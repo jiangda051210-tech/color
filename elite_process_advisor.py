@@ -283,11 +283,51 @@ def build_process_advice(report: dict[str, Any], config: dict[str, Any], config_
     _decrease_kw = ["降低", "减少", "减小", "decrease", "lower", "reduce"]
     inc_actions = [a for a in action_texts if any(k in a for k in _increase_kw)]
     dec_actions = [a for a in action_texts if any(k in a for k in _decrease_kw)]
+    # Track conflict escalation info for the result
+    conflict_escalation = None
+    conflict_detail = None
+
     if inc_actions and dec_actions:
         interaction_warnings.append(
-            f"Potential conflict: some actions suggest increasing while others suggest decreasing parameters. "
-            f"Increase: {inc_actions[0]!r}; Decrease: {dec_actions[0]!r}. Review before applying both."
+            f"检测到矛盾建议: 增加[{', '.join(inc_actions[:2])}] vs 减少[{', '.join(dec_actions[:2])}] — 建议人工复核"
         )
+        # Escalate: flag that manual review is needed due to conflicting advice
+        conflict_escalation = "MANUAL_REVIEW_RECOMMENDED"
+        conflict_detail = {
+            "increase_actions": inc_actions,
+            "decrease_actions": dec_actions,
+            "resolution": "Highest urgency action takes priority; manual verification recommended",
+        }
+
+        # Build lookup from action text to its prioritized entry
+        _action_lookup: dict[str, dict[str, Any]] = {
+            pa["action"]: pa for pa in prioritized_actions
+        }
+
+        # Determine urgency ranks for each side
+        inc_ranks = [_action_lookup[a]["urgency_rank"] for a in inc_actions if a in _action_lookup]
+        dec_ranks = [_action_lookup[a]["urgency_rank"] for a in dec_actions if a in _action_lookup]
+
+        best_inc = min(inc_ranks) if inc_ranks else 99
+        best_dec = min(dec_ranks) if dec_ranks else 99
+
+        if best_inc == best_dec:
+            # Same priority — mark both sides as needing manual arbitration
+            for pa in prioritized_actions:
+                if pa["action"] in inc_actions or pa["action"] in dec_actions:
+                    pa["needs_manual_arbitration"] = True
+            conflict_detail["resolution"] = "Same urgency on both sides; both marked needs_manual_arbitration"
+        else:
+            # Keep only the side with higher urgency (lower rank number), remove the other
+            if best_inc < best_dec:
+                discard_set = set(dec_actions)
+            else:
+                discard_set = set(inc_actions)
+            prioritized_actions = [pa for pa in prioritized_actions if pa["action"] not in discard_set]
+            actions = [a for a in actions if a not in discard_set]
+            conflict_detail["resolution"] = (
+                "Highest urgency action takes priority; lower-urgency conflicting actions removed"
+            )
 
     # --- Historical success rate placeholder ---
     # If the config provides historical hit/success counts per rule, include them.
@@ -322,6 +362,8 @@ def build_process_advice(report: dict[str, Any], config: dict[str, Any], config_
         "bias_interpretation": bias_interpretation,
         "prioritized_actions": prioritized_actions,
         "interaction_warnings": interaction_warnings,
+        "conflict_escalation": conflict_escalation,
+        "conflict_detail": conflict_detail,
         "historical_success_rates": history_rates,
     }
 
