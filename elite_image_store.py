@@ -69,8 +69,10 @@ class ImageStore:
         self._init_db()
 
     def _init_db(self) -> None:
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS images (
                     ref_id TEXT PRIMARY KEY,
@@ -150,7 +152,8 @@ class ImageStore:
 
     def load(self, ref_id: str) -> bytes | None:
         """Load image bytes by reference ID."""
-        row = self._get_meta(ref_id)
+        with self._lock:
+            row = self._get_meta(ref_id)
         if row is None:
             return None
         abs_path = self._root / row["path"]
@@ -167,20 +170,22 @@ class ImageStore:
 
     def get_meta(self, ref_id: str) -> dict[str, Any] | None:
         """Get metadata for an image reference."""
-        return self._get_meta(ref_id)
+        with self._lock:
+            return self._get_meta(ref_id)
 
     def list_by_lot(self, lot_id: str, limit: int = 100) -> list[dict[str, Any]]:
         """List all images for a given lot."""
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT * FROM images WHERE lot_id = ? ORDER BY created_at DESC LIMIT ?",
-                (lot_id, limit),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
+        with self._lock:
+            conn = sqlite3.connect(str(self._db_path), timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM images WHERE lot_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (lot_id, limit),
+                ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
 
     def archive_old(self, max_age_days: int = 90) -> int:
         """

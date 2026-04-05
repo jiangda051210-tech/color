@@ -71,7 +71,11 @@ class MigrationRunner:
             for migration in self._migrations:
                 if migration.name in applied:
                     continue
-                conn.executescript(migration.sql)
+                # Execute migration + record in single transaction (atomic)
+                for stmt in migration.sql.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        conn.execute(stmt)
                 conn.execute(
                     "INSERT INTO _schema_migrations (name, applied_at, description) VALUES (?, ?, ?)",
                     (
