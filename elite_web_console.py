@@ -1598,6 +1598,7 @@ SMART_HOME_PAGE_TEMPLATE = """
         </div>
         <div class="intel-grid">
           <div class="intel-card"><p class="k">稳定指数</p><p class="v" id="kpi_stability">--</p></div>
+          <div class="intel-card"><p class="k">决策置信</p><p class="v" id="kpi_decision_conf">--</p></div>
           <div class="intel-card"><p class="k">证据条数</p><p class="v" id="kpi_evidence">--</p></div>
           <div class="intel-card"><p class="k">风险依据</p><p class="v" id="kpi_risk_basis">--</p></div>
         </div>
@@ -2102,8 +2103,30 @@ SMART_HOME_PAGE_TEMPLATE = """
         : NaN;
       q("#kpi_stability").textContent = Number.isFinite(stability) ? `${fmtNum(stability, 1)}` : "--";
 
-      const actions = buildActions(data);
-      q("#actions_list").innerHTML = actions.map((x) => `<li>${x}</li>`).join("");
+      const dcConf = dc?.decision_confidence;
+      const dcConfVal = num(dcConf?.value);
+      const dcConfLabel = dcConf?.label || "";
+      const dcConfEl = q("#kpi_decision_conf");
+      if (Number.isFinite(dcConfVal)) {
+        dcConfEl.textContent = `${fmtPct(dcConfVal)} (${dcConfLabel})`;
+        setClassByLevel(dcConfEl, dcConfLabel === "high" ? "ok" : dcConfLabel === "medium" ? "warn" : "bad");
+      } else {
+        dcConfEl.textContent = "--";
+      }
+
+      const pa = data?.process_advice || {};
+      const prioActions = Array.isArray(pa?.prioritized_actions) ? pa.prioritized_actions : [];
+      if (prioActions.length) {
+        const prioHtml = prioActions.slice(0, 5).map((a) => {
+          const urg = String(a?.urgency || "").toUpperCase();
+          const cls = urg === "CRITICAL" || urg === "HIGH" ? "bad" : urg === "MEDIUM" ? "warn" : "ok";
+          return `<li><span class="${cls}" style="font-size:10px;font-weight:700;">[${urg}]</span> ${a?.action || ""}</li>`;
+        }).join("");
+        q("#actions_list").innerHTML = prioHtml;
+      } else {
+        const actions = buildActions(data);
+        q("#actions_list").innerHTML = actions.map((x) => `<li>${x}</li>`).join("");
+      }
       const evidences = buildEvidence(data);
       q("#evidence_list").innerHTML = evidences.map((x) => `<li>${x}</li>`).join("");
       q("#kpi_evidence").textContent = String(evidences.length);
