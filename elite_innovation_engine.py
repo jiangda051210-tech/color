@@ -2805,10 +2805,33 @@ class SupplierScorecard:
         std_de = statistics.stdev(des) if n > 1 else 0.0
         pass_rate = sum(1 for row in records if row["passed"]) / n * 100.0
 
-        avg_score = max(0.0, min(100.0, (3.0 - avg_de) / 3.0 * 100.0))
+        # --- Trend weighting: recent batches weighted higher (exponential decay) ---
+        # Half-life = 20 batches: weight = exp(-lambda * age)
+        half_life = 20.0
+        decay_lambda = math.log(2) / half_life
+        weighted_de_sum = 0.0
+        weight_sum = 0.0
+        for i, de_val in enumerate(des):
+            age = n - 1 - i  # age=0 for most recent
+            w = math.exp(-decay_lambda * age)
+            weighted_de_sum += de_val * w
+            weight_sum += w
+        trend_weighted_avg_de = weighted_de_sum / max(weight_sum, 1e-8)
+
+        # --- Bayesian rating: shrink toward population mean when sample count is low ---
+        # Using empirical Bayes: posterior_mean = (n * sample_mean + k * prior_mean) / (n + k)
+        # prior_mean = 2.0 (industry average), k = 10 (equivalent prior sample size)
+        prior_mean = 2.0
+        prior_strength = 10
+        bayesian_avg_de = (n * avg_de + prior_strength * prior_mean) / (n + prior_strength)
+
+        avg_score = max(0.0, min(100.0, (3.0 - bayesian_avg_de) / 3.0 * 100.0))
         consistency_score = max(0.0, min(100.0, (1.0 - std_de) / 1.0 * 100.0))
         pass_score = pass_rate
-        score = round(avg_score * 0.4 + consistency_score * 0.3 + pass_score * 0.3, 1)
+
+        # Use trend-weighted average in score calculation (recent performance matters more)
+        trend_score = max(0.0, min(100.0, (3.0 - trend_weighted_avg_de) / 3.0 * 100.0))
+        score = round(trend_score * 0.3 + avg_score * 0.15 + consistency_score * 0.25 + pass_score * 0.3, 1)
 
         if score >= 85:
             grade = "A"
@@ -2827,6 +2850,19 @@ class SupplierScorecard:
                 trend = "degrading"
             elif recent < prev * 0.9:
                 trend = "improving"
+
+        # --- Supplier risk score: probability of next batch exceeding threshold ---
+        # Model: assume ΔE ~ Normal(trend_weighted_avg, std_de)
+        # P(ΔE > threshold) = 1 - Phi((threshold - mu) / sigma)
+        risk_threshold = 3.0
+        if std_de > 0.01:
+            z_risk = (risk_threshold - trend_weighted_avg_de) / std_de
+            # Approximate normal CDF using error function
+            risk_probability = 0.5 * math.erfc(z_risk / math.sqrt(2))
+        else:
+            risk_probability = 0.0 if trend_weighted_avg_de < risk_threshold else 1.0
+
+        risk_level = "low" if risk_probability < 0.05 else "medium" if risk_probability < 0.20 else "high"
 
         products: dict[str, list[float]] = defaultdict(list)
         for row in records:
@@ -2850,11 +2886,18 @@ class SupplierScorecard:
             "id": supplier_id,
             "count": n,
             "avg_de": round(avg_de, 3),
+            "trend_weighted_avg_de": round(trend_weighted_avg_de, 3),
+            "bayesian_avg_de": round(bayesian_avg_de, 3),
             "std_de": round(std_de, 3),
             "pass_rate": round(pass_rate, 1),
             "score": score,
             "grade": grade,
             "trend": trend,
+            "risk_score": {
+                "probability_exceed_threshold": round(risk_probability, 4),
+                "threshold": risk_threshold,
+                "risk_level": risk_level,
+            },
             "products": product_summary,
             "recommendation": recommendation,
         }
