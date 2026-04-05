@@ -1329,6 +1329,31 @@ SMART_HOME_PAGE_TEMPLATE = """
       font-size: 12px;
       display: none;
     }
+    @keyframes fadeInUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+    @keyframes shimmer { 0% { background-position:-200% 0; } 100% { background-position:200% 0; } }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    @keyframes progressFill { 0% { width:0; } 20% { width:25%; } 50% { width:55%; } 80% { width:80%; } 100% { width:95%; } }
+    .hero { animation: fadeInUp 0.5s ease both; }
+    .stat-strip { animation: fadeInUp 0.5s 0.08s ease both; }
+    .grid { animation: fadeInUp 0.5s 0.16s ease both; }
+    .card { transition: box-shadow 0.2s ease, transform 0.2s ease; }
+    .card:hover { box-shadow: 0 16px 40px rgba(4, 12, 22, 0.55); transform: translateY(-1px); }
+    .stat-card { transition: transform 0.15s ease; }
+    .stat-card:hover { transform: scale(1.03); }
+    .side-nav .item { transition: all 0.2s ease; cursor: pointer; }
+    .side-nav .item:hover:not(.active) { background: rgba(51, 163, 255, 0.08); border-color: rgba(83, 198, 255, 0.3); }
+    .link { transition: all 0.2s ease; }
+    .link:hover { background: rgba(51, 163, 255, 0.12); border-color: rgba(83, 198, 255, 0.4); color: #a5d8ff; }
+    button.primary, button.secondary, button.ghost { transition: all 0.2s ease; }
+    button.primary:hover:not(:disabled), button.secondary:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.1); }
+    .kpi { transition: transform 0.15s ease; }
+    .kpi:hover { transform: scale(1.03); }
+    .skeleton { height: 18px; border-radius: 6px; background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 5px; }
+    .side-box { transition: transform 0.15s ease; }
+    .side-box:hover { transform: scale(1.02); }
+    .health-bar > span { transition: width 0.8s ease; }
     @media (max-width: 1040px) {
       .grid { grid-template-columns: 1fr; }
       .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2106,7 +2131,7 @@ SMART_HOME_PAGE_TEMPLATE = """
       setError("");
       const btn = q("#analyze_btn");
       btn.disabled = true;
-      btn.textContent = "分析中…";
+      btn.textContent = "⏳ 分析中…";
       let result = null;
       try {
         await checkUploadsQuality();
