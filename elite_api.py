@@ -1269,6 +1269,15 @@ def _attach_decision_center(
     return tier_info
 
 
+def _safe_confidence(report: dict[str, Any]) -> float | None:
+    conf = report.get("result", {}).get("confidence")
+    if isinstance(conf, dict):
+        return conf.get("overall")
+    if isinstance(conf, (int, float)):
+        return float(conf)
+    return None
+
+
 def _decision_center_brief(report: dict[str, Any]) -> dict[str, Any]:
     dc = report.get("decision_center", {})
     if not isinstance(dc, dict):
@@ -1284,6 +1293,10 @@ def _decision_center_brief(report: dict[str, Any]) -> dict[str, Any]:
         "boss_score": scores.get("boss_score") if isinstance(scores, dict) else None,
         "company_score": scores.get("company_score") if isinstance(scores, dict) else None,
         "customer_tier": (report.get("customer_tier_applied") or {}).get("tier") if isinstance(report.get("customer_tier_applied"), dict) else None,
+        "decision_reasons": dc.get("decision_reasons", []),
+        "decision_confidence": dc.get("decision_confidence"),
+        "recommended_actions": dc.get("recommended_actions_top3", []),
+        "executive_messages": dc.get("executive_messages", []),
     }
 
 
@@ -3838,7 +3851,7 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
     resp: dict[str, Any] = {
         "mode": report.get("mode"),
         "pass": report.get("result", {}).get("pass"),
-        "confidence": report.get("result", {}).get("confidence", {}).get("overall"),
+        "confidence": _safe_confidence(report),
         "process_advice": _process_advice_brief(report),
         "decision_center": _decision_center_brief(report),
         "policy_recommendation": _policy_recommendation_brief(report),
@@ -4089,7 +4102,7 @@ def analyze_dual(req: DualAnalyzeRequest) -> dict[str, Any]:
     resp: dict[str, Any] = {
         "mode": report.get("mode"),
         "pass": report.get("result", {}).get("pass"),
-        "confidence": report.get("result", {}).get("confidence", {}).get("overall"),
+        "confidence": _safe_confidence(report),
         "process_advice": _process_advice_brief(report),
         "decision_center": _decision_center_brief(report),
         "policy_recommendation": _policy_recommendation_brief(report),
@@ -7190,7 +7203,7 @@ async def senia_analyze_endpoint(
             "system_tier": tier,
             "dE": avg_de,
             "profile": used_profile,
-            "confidence": report.get("result", {}).get("confidence", {}).get("overall", 0),
+            "confidence": _safe_confidence(report) or 0,
             "lot_id": lot_id,
             "product_code": product_code,
         })

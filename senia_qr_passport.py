@@ -77,8 +77,8 @@ def generate_passport(
     return passport_data
 
 
-    # Maximum age for passport freshness check (1 year in seconds)
-    PASSPORT_MAX_AGE_SECONDS = 365 * 24 * 3600
+# Maximum age for passport freshness check (1 year in seconds)
+PASSPORT_MAX_AGE_SECONDS = 365 * 24 * 3600
 
 
 def verify_passport(passport_data: dict[str, Any]) -> dict[str, Any]:

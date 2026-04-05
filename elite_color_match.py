@@ -210,11 +210,10 @@ def warp_quad(image: np.ndarray, quad: np.ndarray, target_long_side: int = 1400)
 
 def bgr_to_lab_float(image_bgr: np.ndarray) -> np.ndarray:
     lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    out = np.empty_like(lab)
-    out[..., 0] = lab[..., 0] * (100.0 / 255.0)
-    out[..., 1] = lab[..., 1] - 128.0
-    out[..., 2] = lab[..., 2] - 128.0
-    return out
+    lab[..., 0] *= (100.0 / 255.0)
+    lab[..., 1] -= 128.0
+    lab[..., 2] -= 128.0
+    return lab
 
 
 def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
@@ -1486,6 +1485,7 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
     M = cv2.getPerspectiveTransform(quad, dst)
     warped = cv2.warpPerspective(image_bgr, M, (bw, bh))
     board_area = float(bw * bh)
+    M_inv = cv2.getPerspectiveTransform(dst, quad)
 
     # === 策略 A: 局部颜色差异 ===
     # 把 board 分成粗网格, 找颜色和全局均值偏差最大的矩形区域
@@ -1520,7 +1520,6 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
                             [x, y], [x + win_w, y],
                             [x + win_w, y + win_h], [x, y + win_h]
                         ], dtype=np.float32)
-                        M_inv = cv2.getPerspectiveTransform(dst, quad)
                         box_orig = cv2.perspectiveTransform(
                             box_warp.reshape(1, -1, 2), M_inv).reshape(-1, 2)
                         center = box_orig.mean(axis=0)
@@ -1562,7 +1561,6 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
             if score > best_score:
                 best_score = score
                 box = cv2.boxPoints(rect).astype(np.float32)
-                M_inv = cv2.getPerspectiveTransform(dst, quad)
                 box_orig = cv2.perspectiveTransform(box.reshape(1, -1, 2), M_inv).reshape(-1, 2)
                 center = box_orig.mean(axis=0)
                 best = RectCandidate(
@@ -1837,7 +1835,8 @@ def coarse_lighting_range(board_lab: np.ndarray, board_mask: np.ndarray, rows: i
             values.append(float(np.mean(board_lab[y0:y1, x0:x1, 0][m])))
     if len(values) < 2:
         return 0.0
-    return float(np.percentile(values, 95) - np.percentile(values, 5))
+    _lr_pcts = np.percentile(values, [5, 95])
+    return float(_lr_pcts[1] - _lr_pcts[0])
 
 
 def resolve_targets(profile_targets: dict[str, float], target_override: dict[str, float] | None) -> dict[str, float]:
@@ -2286,7 +2285,8 @@ def analyze_single_image(
 
     de_np = np.array(de_values, dtype=np.float32)
     avg_de = float(np.mean(de_np))
-    p95_de = float(np.percentile(de_np, 95))
+    _pcts = np.percentile(de_np, [50, 75, 90, 95, 99]) if len(de_np) > 0 else [0.0] * 5
+    p95_de = float(_pcts[3])
     max_de = float(np.max(de_np))
 
     de_global = float(ciede2000(board_mean.reshape(1, 3), sample_mean.reshape(1, 3))[0])
@@ -2364,11 +2364,11 @@ def analyze_single_image(
             "summary": {
                 "global_delta_e00": de_global,
                 "avg_delta_e00": avg_de,
-                "p50_delta_e00": float(np.percentile(de_np, 50)),
-                "p75_delta_e00": float(np.percentile(de_np, 75)),
-                "p90_delta_e00": float(np.percentile(de_np, 90)),
+                "p50_delta_e00": float(_pcts[0]),
+                "p75_delta_e00": float(_pcts[1]),
+                "p90_delta_e00": float(_pcts[2]),
                 "p95_delta_e00": p95_de,
-                "p99_delta_e00": float(np.percentile(de_np, 99)),
+                "p99_delta_e00": float(_pcts[4]),
                 "max_delta_e00": max_de,
                 "dL": d_l,
                 "dC": d_c,
@@ -2518,7 +2518,8 @@ def analyze_dual_image(
 
     de_np = np.array(de_values, dtype=np.float32)
     avg_de = float(np.mean(de_np))
-    p95_de = float(np.percentile(de_np, 95))
+    _pcts2 = np.percentile(de_np, [50, 75, 90, 95, 99]) if len(de_np) > 0 else [0.0] * 5
+    p95_de = float(_pcts2[3])
     max_de = float(np.max(de_np))
 
     d_l = float(np.median(np.array(d_ls, dtype=np.float32)))
@@ -2592,11 +2593,11 @@ def analyze_dual_image(
             "summary": {
                 "global_delta_e00": de_global,
                 "avg_delta_e00": avg_de,
-                "p50_delta_e00": float(np.percentile(de_np, 50)),
-                "p75_delta_e00": float(np.percentile(de_np, 75)),
-                "p90_delta_e00": float(np.percentile(de_np, 90)),
+                "p50_delta_e00": float(_pcts2[0]),
+                "p75_delta_e00": float(_pcts2[1]),
+                "p90_delta_e00": float(_pcts2[2]),
                 "p95_delta_e00": p95_de,
-                "p99_delta_e00": float(np.percentile(de_np, 99)),
+                "p99_delta_e00": float(_pcts2[4]),
                 "max_delta_e00": max_de,
                 "dL": d_l,
                 "dC": d_c,
