@@ -511,6 +511,18 @@ class TextureAwareDeltaE:
         if spatial_frequency is not None:
             result['csf_weight'] = round(csf_weight, 4)
             result['spatial_frequency'] = spatial_frequency
+
+        # Warn when texture masking significantly reduces perceived ΔE (>20%),
+        # as texture could be hiding a real defect
+        masking_reduction_pct = (1.0 - adjusted / max(standard_de, 1e-6)) * 100
+        if masking_reduction_pct > 20:
+            result["texture_masking_warning"] = True
+            result["texture_masking_reduction_pct"] = round(masking_reduction_pct, 1)
+            result["texture_masking_note"] = (
+                f"Texture masks {masking_reduction_pct:.0f}% of color difference"
+                " — verify visually"
+            )
+
         return result
 
     def _compute_texture_ssim(self, patch_a, patch_b):

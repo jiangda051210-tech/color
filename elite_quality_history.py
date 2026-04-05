@@ -333,8 +333,24 @@ def assess_current_vs_history(
         return {"enabled": False, "reason": "line_or_product_missing"}
 
     stats = recent_stats(db_path=db_path, line_id=line_id, product_code=product_code, window=window)
-    if stats.get("count", 0) < 5:
-        return {"enabled": True, "history_count": int(stats.get("count", 0)), "flags": [], "stats": stats}
+    count = stats.get("count", 0)
+    if count < 5:
+        # Use absolute safety checks for new products with limited history
+        m = extract_metrics(report)
+        flags: list[str] = []
+        if m.get("avg_de", 0) > 3.5:
+            flags.append("new_product_high_avg_de")
+        if m.get("p95_de", 0) > 5.0:
+            flags.append("new_product_high_p95_de")
+        if m.get("confidence", 1.0) < 0.55:
+            flags.append("new_product_low_confidence")
+        return {
+            "enabled": True,
+            "history_count": int(count),
+            "flags": flags,
+            "stats": stats,
+            "note": "limited_history_absolute_checks_only",
+        }
 
     m = extract_metrics(report)
     flags: list[str] = []
