@@ -1150,6 +1150,7 @@ def _process_advice_brief(report: dict[str, Any]) -> dict[str, Any]:
         "risk_level": pa.get("risk_level"),
         "risk_score": pa.get("risk_score"),
         "matched_rule_count": pa.get("matched_rule_count"),
+        "prioritized_actions": pa.get("prioritized_actions", []),
     }
 
 
