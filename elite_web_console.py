@@ -14,6 +14,13 @@ HOME_PAGE_TEMPLATE = """
   <title>SENIA Elite Smart Console</title>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
+    @keyframes fadeInUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+    @keyframes shimmer { 0% { background-position:-200% 0; } 100% { background-position:200% 0; } }
+    @keyframes slideDown { from { opacity:0; max-height:0; } to { opacity:1; max-height:600px; } }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    @keyframes progressFill { 0% { width:0%; } 20% { width:25%; } 50% { width:55%; } 80% { width:80%; } 100% { width:95%; } }
+    @keyframes countUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
     :root {
       --bg-0: #091322;
       --bg-1: #0f1f34;
@@ -74,7 +81,19 @@ HOME_PAGE_TEMPLATE = """
       background: linear-gradient(155deg, rgba(16, 33, 52, 0.82), rgba(10, 21, 36, 0.90));
       box-shadow: 0 14px 40px rgba(3, 10, 18, 0.55);
       backdrop-filter: blur(8px);
+      animation: fadeInUp 0.5s ease both;
     }
+    .main-grid { animation: fadeInUp 0.5s 0.1s ease both; }
+    .panel { transition: box-shadow 0.2s ease, transform 0.2s ease; }
+    .panel:hover { box-shadow: 0 14px 38px rgba(5, 13, 23, 0.55); transform: translateY(-1px); }
+    .status-card { transition: transform 0.15s ease; }
+    .status-card:hover { transform: scale(1.03); }
+    .link-chip { transition: all 0.2s ease; }
+    .link-chip:hover { background: rgba(63, 168, 255, 0.14); border-color: rgba(63, 168, 255, 0.35); color: #a7d6ff; }
+    button { transition: all 0.2s ease; }
+    button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.08); }
+    .skeleton { height: 18px; border-radius: 6px; background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent-a); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
     .hero-title {
       margin: 0;
       font-weight: 700;
@@ -837,8 +856,8 @@ HOME_PAGE_TEMPLATE = """
       const btn = q("#dual-btn");
       const out = q("#result-dual");
       btn.disabled = true;
-      btn.textContent = "分析中...";
-      out.innerHTML = '<div class="note">正在运行 Dual 分析，请稍候...</div>';
+      btn.innerHTML = '<span class="spinner"></span> 分析中...';
+      out.innerHTML = '<div style="margin-bottom:8px;height:4px;border-radius:4px;background:rgba(255,255,255,0.06);overflow:hidden;"><div style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent-a),var(--accent-b));border-radius:4px;animation:shimmer 1.5s infinite,progressFill 3s ease forwards;"></div></div><div class="note">上传中... → 图像处理 → 色差计算 → 生成报告</div>';
       try {
         const resp = await fetch("/v1/web/analyze/dual-upload", {
           method: "POST",
@@ -853,7 +872,7 @@ HOME_PAGE_TEMPLATE = """
         setError(out, err?.message || "Dual 分析失败");
       } finally {
         btn.disabled = false;
-        btn.textContent = "运行 Dual 分析";
+        btn.innerHTML = "运行 Dual 分析";
       }
     }
 
@@ -863,8 +882,8 @@ HOME_PAGE_TEMPLATE = """
       const btn = q("#single-btn");
       const out = q("#result-single");
       btn.disabled = true;
-      btn.textContent = "分析中...";
-      out.innerHTML = '<div class="note">正在运行 Single 分析，请稍候...</div>';
+      btn.innerHTML = '<span class="spinner"></span> 分析中...';
+      out.innerHTML = '<div style="margin-bottom:8px;height:4px;border-radius:4px;background:rgba(255,255,255,0.06);overflow:hidden;"><div style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent-a),var(--accent-b));border-radius:4px;animation:shimmer 1.5s infinite,progressFill 3s ease forwards;"></div></div><div class="note">上传中... → 图像处理 → 色差计算 → 生成报告</div>';
       try {
         const resp = await fetch("/v1/web/analyze/single-upload", {
           method: "POST",
@@ -879,7 +898,7 @@ HOME_PAGE_TEMPLATE = """
         setError(out, err?.message || "Single 分析失败");
       } finally {
         btn.disabled = false;
-        btn.textContent = "运行 Single 分析";
+        btn.innerHTML = "运行 Single 分析";
       }
     }
 
