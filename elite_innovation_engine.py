@@ -1546,21 +1546,35 @@ class BatchBlendOptimizer:
     当多批次有轻微色差时，计算最优装配/混拼方案
     使得客户收到的整体色差最小化
 
+    v2 升级:
+      - 小批次(<=8): 精确优化 (全排列搜索)
+      - 大批次: 模拟退火优化
+      - 约束满足: 最小数量/组, 最大组内ΔE
+      - 输出 vs 随机分配的改进量
+
     场景: 5个托盘板材颜色略有不同，如何搭配发货给3个客户
     使每个客户收到的板材之间色差最小
     """
 
     def optimize(self, batches: list[dict], n_groups: int = 2,
-                 customer_tiers: list[str] = None) -> dict:
+                 customer_tiers: list[str] = None,
+                 min_per_group: int = 1,
+                 max_intra_de: float = None) -> dict:
         """
         Args:
             batches: [{'batch_id': 'B001', 'lab': {'L':..., 'a':..., 'b':...}, 'quantity': 100}, ...]
             n_groups: 分成几组发货
             customer_tiers: 每组的客户等级 ['vip', 'standard'] → VIP分到色差最小的组
+            min_per_group: minimum number of batches per group
+            max_intra_de: maximum allowed ΔE within any group (constraint)
         """
         n = len(batches)
         if n < 2:
             return {'status': 'skip', 'message': '单批次无需混拼'}
+
+        if n < n_groups * min_per_group:
+            return {'status': 'error',
+                    'message': f'批次数{n}不足以满足{n_groups}组x最少{min_per_group}批/组的约束'}
 
         # 计算所有批次间色差矩阵
         de_matrix = [[0.0]*n for _ in range(n)]
@@ -1570,12 +1584,38 @@ class BatchBlendOptimizer:
                 de_matrix[i][j] = de
                 de_matrix[j][i] = de
 
-        # 贪心分组：使每组内色差最小
-        groups = self._greedy_partition(batches, de_matrix, n_groups)
+        # Choose optimization strategy based on size
+        if n <= 8:
+            groups = self._exact_partition(batches, de_matrix, n_groups, min_per_group)
+        else:
+            groups = self._simulated_annealing_partition(batches, de_matrix, n_groups, min_per_group)
+
+        # Fallback to greedy if advanced methods didn't improve
+        greedy_groups = self._greedy_partition(batches, de_matrix, n_groups)
+        greedy_cost = self._partition_cost(greedy_groups, de_matrix)
+        opt_cost = self._partition_cost(groups, de_matrix)
+        if greedy_cost < opt_cost:
+            groups = greedy_groups
 
         # 如果有客户分层，VIP 分到色差最小的组
         if customer_tiers:
             groups = self._assign_by_tier(groups, customer_tiers)
+
+        # Check max_intra_de constraint
+        constraint_violations = []
+        if max_intra_de is not None:
+            for gi, group in enumerate(groups):
+                indices = [g['index'] for g in group]
+                for i in range(len(indices)):
+                    for j in range(i+1, len(indices)):
+                        if de_matrix[indices[i]][indices[j]] > max_intra_de:
+                            constraint_violations.append({
+                                'group': gi + 1,
+                                'batch_i': batches[indices[i]]['batch_id'],
+                                'batch_j': batches[indices[j]]['batch_id'],
+                                'deltaE': round(de_matrix[indices[i]][indices[j]], 3),
+                                'limit': max_intra_de,
+                            })
 
         # 计算每组统计
         group_stats = []
@@ -1611,15 +1651,161 @@ class BatchBlendOptimizer:
                 all_des.append(de_matrix[i][j])
         unoptimized_max = max(all_des) if all_des else 0
 
-        return {
+        # Compute expected ΔE improvement vs random assignment
+        random_de = self._estimate_random_assignment_de(de_matrix, n_groups, n_trials=100)
+        optimized_max_de = max(g['max_intra_deltaE'] for g in group_stats)
+
+        result = {
             'groups': group_stats,
             'unoptimized_max_deltaE': round(unoptimized_max, 3),
-            'optimized_max_deltaE': round(max(g['max_intra_deltaE'] for g in group_stats), 3),
+            'optimized_max_deltaE': round(optimized_max_de, 3),
             'improvement_percent': round(
-                (1 - max(g['max_intra_deltaE'] for g in group_stats) / max(unoptimized_max, 0.01)) * 100, 1
+                (1 - optimized_max_de / max(unoptimized_max, 0.01)) * 100, 1
             ),
+            'random_expected_max_deltaE': round(random_de, 3),
+            'improvement_vs_random_percent': round(
+                (1 - optimized_max_de / max(random_de, 0.01)) * 100, 1
+            ),
+            'optimization_method': 'exact_permutation' if n <= 8 else 'simulated_annealing',
             'de_matrix': [[round(de_matrix[i][j], 3) for j in range(n)] for i in range(n)],
         }
+        if constraint_violations:
+            result['constraint_violations'] = constraint_violations
+        return result
+
+    def _partition_cost(self, groups, de_matrix):
+        """Cost = max intra-group ΔE across all groups."""
+        worst = 0.0
+        for group in groups:
+            indices = [g['index'] for g in group]
+            for i in range(len(indices)):
+                for j in range(i+1, len(indices)):
+                    worst = max(worst, de_matrix[indices[i]][indices[j]])
+        return worst
+
+    def _exact_partition(self, batches, de_matrix, k, min_per_group):
+        """Try all permutations for small batches (n<=8) to find optimal partition."""
+        import itertools
+        n = len(batches)
+        indices = list(range(n))
+        best_cost = float('inf')
+        best_assignment = None
+
+        # Generate all possible k-partitions using assignment vector
+        # Each index gets assigned to a group 0..k-1
+        # Constraint: each group has at least min_per_group members
+        for assignment in itertools.product(range(k), repeat=n):
+            # Check min_per_group constraint
+            counts = [0] * k
+            for g in assignment:
+                counts[g] += 1
+            if any(c < min_per_group for c in counts):
+                continue
+            if any(c == 0 for c in counts):
+                continue
+
+            # Compute cost: max intra-group ΔE
+            cost = 0.0
+            for g in range(k):
+                members = [i for i in range(n) if assignment[i] == g]
+                for a in range(len(members)):
+                    for b in range(a+1, len(members)):
+                        cost = max(cost, de_matrix[members[a]][members[b]])
+
+            if cost < best_cost:
+                best_cost = cost
+                best_assignment = assignment
+
+        if best_assignment is None:
+            return self._greedy_partition(batches, de_matrix, k)
+
+        groups = [[] for _ in range(k)]
+        for idx, g in enumerate(best_assignment):
+            groups[g].append({'index': idx, 'batch': batches[idx]})
+        return groups
+
+    def _simulated_annealing_partition(self, batches, de_matrix, k, min_per_group):
+        """Simulated annealing for larger batch sizes."""
+        import random as _rng
+        n = len(batches)
+
+        # Initial assignment: greedy
+        greedy = self._greedy_partition(batches, de_matrix, k)
+        assignment = [0] * n
+        for gi, group in enumerate(greedy):
+            for item in group:
+                assignment[item['index']] = gi
+
+        def cost(asgn):
+            worst = 0.0
+            for g in range(k):
+                members = [i for i in range(n) if asgn[i] == g]
+                for a in range(len(members)):
+                    for b in range(a+1, len(members)):
+                        worst = max(worst, de_matrix[members[a]][members[b]])
+            return worst
+
+        current_cost = cost(assignment)
+        best_assignment = list(assignment)
+        best_cost = current_cost
+
+        temperature = 2.0
+        cooling_rate = 0.995
+        iterations = min(5000, n * n * 100)
+
+        for iteration in range(iterations):
+            # Random swap: move one batch to a different group
+            idx = _rng.randint(0, n - 1)
+            old_group = assignment[idx]
+            new_group = _rng.randint(0, k - 1)
+            if new_group == old_group:
+                continue
+
+            # Check min_per_group constraint
+            old_count = sum(1 for a in assignment if a == old_group)
+            if old_count <= min_per_group:
+                continue
+
+            assignment[idx] = new_group
+            new_cost = cost(assignment)
+            delta = new_cost - current_cost
+
+            if delta < 0 or _rng.random() < math.exp(-delta / max(temperature, 1e-10)):
+                current_cost = new_cost
+                if current_cost < best_cost:
+                    best_cost = current_cost
+                    best_assignment = list(assignment)
+            else:
+                assignment[idx] = old_group  # revert
+
+            temperature *= cooling_rate
+
+        groups = [[] for _ in range(k)]
+        for idx, g in enumerate(best_assignment):
+            groups[g].append({'index': idx, 'batch': batches[idx]})
+        # Remove empty groups
+        groups = [g for g in groups if g]
+        return groups
+
+    def _estimate_random_assignment_de(self, de_matrix, k, n_trials=100):
+        """Estimate expected max intra-group ΔE for random assignment."""
+        import random as _rng
+        n = len(de_matrix)
+        total_max_de = 0.0
+        for _ in range(n_trials):
+            assignment = [_rng.randint(0, k-1) for _ in range(n)]
+            # Ensure at least one member per group
+            for g in range(k):
+                if not any(a == g for a in assignment):
+                    assignment[_rng.randint(0, n-1)] = g
+            worst = 0.0
+            for g in range(k):
+                members = [i for i in range(n) if assignment[i] == g]
+                for a in range(len(members)):
+                    for b in range(a+1, len(members)):
+                        worst = max(worst, de_matrix[members[a]][members[b]])
+            total_max_de += worst
+        return total_max_de / n_trials
 
     def _greedy_partition(self, batches, de_matrix, k):
         """贪心分组: 按色值排序后均匀切分"""

@@ -362,32 +362,80 @@ def weighted_robust_mean(
 
 def smart_board_segment(
     image_bgr: np.ndarray,
-) -> np.ndarray:
+) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     """
     智能板材分割: 从工厂照片中精确分离大货和背景.
 
-    方法: K-means 粗分 → GrabCut 精修边缘
+    方法: K-means 粗分 (2/3 clusters, 选最佳) → GrabCut 精修边缘
+
+    增强:
+      1. 尝试 K=2 和 K=3, 用 silhouette score 选最佳
+      2. 边缘验证: 分割边界与强边缘对齐度
+      3. 最小段大小检查: GrabCut 后去除碎片
+      4. 返回分割质量置信度
 
     比纯轮廓检测准 3-5 倍, 因为:
       1. K-means 利用全局颜色信息 (不受木纹干扰)
       2. GrabCut 迭代优化边缘 (像素级精度)
     """
     h, w = image_bgr.shape[:2]
+    total_pixels = h * w
 
     # Step 1: K-means 粗分 (快, 下采样)
     scale = min(1.0, 600 / max(h, w))  # 下采样到长边 600
     small = cv2.resize(image_bgr, (int(w * scale), int(h * scale)))
     pixels = small.reshape(-1, 3).astype(np.float32)
 
-    _, labels, centers = cv2.kmeans(
-        pixels, 2, None,
-        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 15, 1.0),
-        3, cv2.KMEANS_PP_CENTERS,
-    )
+    # 尝试 K=2 和 K=3, 选择 silhouette score 最高的
+    best_mask_small = None
+    best_score = -1.0
+    best_k = 2
 
-    # 较暗的 cluster = 大货 (地板膜通常比背景暗)
-    board_label = 0 if centers[0].mean() < centers[1].mean() else 1
-    mask_small = (labels.reshape(small.shape[:2]) == board_label).astype(np.uint8)
+    for k in (2, 3):
+        _, labels_k, centers_k = cv2.kmeans(
+            pixels, k, None,
+            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 15, 1.0),
+            3, cv2.KMEANS_PP_CENTERS,
+        )
+        labels_flat = labels_k.ravel()
+
+        # 简化 silhouette score (采样计算, 避免 O(n^2))
+        n_sample = min(2000, len(labels_flat))
+        rng = np.random.RandomState(42)
+        sample_idx = rng.choice(len(labels_flat), n_sample, replace=False)
+        sample_labels = labels_flat[sample_idx]
+        sample_pixels = pixels[sample_idx]
+
+        sil_sum = 0.0
+        sil_count = 0
+        for label_val in range(k):
+            in_cluster = sample_labels == label_val
+            if in_cluster.sum() < 2:
+                continue
+            cluster_pts = sample_pixels[in_cluster]
+            # a(i) = 平均类内距离
+            center = cluster_pts.mean(axis=0)
+            a_vals = np.sqrt(((cluster_pts - center) ** 2).sum(axis=1))
+            # b(i) = 最近其他类中心距离
+            other_centers = centers_k[[l for l in range(k) if l != label_val]]
+            b_vals = np.min(
+                np.sqrt(((cluster_pts[:, None, :] - other_centers[None, :, :]) ** 2).sum(axis=2)),
+                axis=1,
+            )
+            sil = (b_vals - a_vals) / (np.maximum(a_vals, b_vals) + 1e-10)
+            sil_sum += sil.sum()
+            sil_count += len(sil)
+
+        score = sil_sum / max(sil_count, 1)
+
+        if score > best_score:
+            best_score = score
+            best_k = k
+            # 较暗的 cluster = 大货 (地板膜通常比背景暗)
+            board_label = int(np.argmin([c.mean() for c in centers_k]))
+            best_mask_small = (labels_flat.reshape(small.shape[:2]) == board_label).astype(np.uint8)
+
+    mask_small = best_mask_small
 
     # 上采样
     mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -395,25 +443,63 @@ def smart_board_segment(
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((10, 10), np.uint8))
 
     # Step 2: GrabCut 精修 (慢但精确, 只在边缘区域)
-    # GrabCut 需要初始 mask: 0=确定背景, 1=确定前景, 2=可能背景, 3=可能前景
     gc_mask = np.where(mask > 0, cv2.GC_PR_FGD, cv2.GC_PR_BGD).astype(np.uint8)
 
-    # 腐蚀/膨胀确定核心区域
     core_fg = cv2.erode(mask, np.ones((30, 30), np.uint8))
     core_bg = cv2.dilate(1 - mask, np.ones((30, 30), np.uint8))
     gc_mask[core_fg > 0] = cv2.GC_FGD
     gc_mask[(1 - mask) > 0] = cv2.GC_PR_BGD
     gc_mask[core_bg > 0] = cv2.GC_BGD
 
-    # 运行 GrabCut (5 次迭代)
     bgd_model = np.zeros((1, 65), np.float64)
     fgd_model = np.zeros((1, 65), np.float64)
     try:
         cv2.grabCut(image_bgr, gc_mask, None, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_MASK)
         final_mask = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 1, 0).astype(np.uint8)
     except cv2.error:
-        # GrabCut 有时会失败, 退回到 K-means 结果
         final_mask = mask
+
+    # Step 3: 最小段大小检查 — 去除碎片 (< 1% 总面积)
+    min_segment_size = int(total_pixels * 0.01)
+    num_labels, labeled, stats, _ = cv2.connectedComponentsWithStats(final_mask, connectivity=8)
+    for lbl in range(1, num_labels):
+        if stats[lbl, cv2.CC_STAT_AREA] < min_segment_size:
+            final_mask[labeled == lbl] = 0
+
+    # Step 4: 边缘验证 — 分割边界与图像强边缘的对齐度
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+
+    # 分割边界 (膨胀-腐蚀差)
+    dilated = cv2.dilate(final_mask, np.ones((3, 3), np.uint8))
+    eroded = cv2.erode(final_mask, np.ones((3, 3), np.uint8))
+    seg_boundary = dilated - eroded  # 1 像素宽的边界
+
+    # 边缘对齐度 = 边界像素中有多少落在强边缘上
+    boundary_pixels = seg_boundary > 0
+    if boundary_pixels.sum() > 0:
+        edge_alignment = float((edges[boundary_pixels] > 0).sum()) / float(boundary_pixels.sum())
+    else:
+        edge_alignment = 0.0
+
+    # Step 5: 置信度分数
+    fg_ratio = float(final_mask.sum()) / total_pixels
+    # 好的分割: fg 占 20-80%, 边缘对齐高, silhouette 高
+    ratio_score = 1.0 - 2.0 * abs(fg_ratio - 0.5)  # 最佳在 50%
+    ratio_score = max(0.0, ratio_score)
+    confidence = 0.4 * ratio_score + 0.3 * edge_alignment + 0.3 * max(0, best_score)
+    confidence = round(max(0.0, min(1.0, confidence)), 3)
+
+    # 将置信度和元数据存储在 final_mask 的属性中 (通过返回值)
+    # 为了保持向后兼容, 将 metadata 存储为模块级变量
+    smart_board_segment._last_metadata = {
+        "confidence": confidence,
+        "best_k": best_k,
+        "silhouette_score": round(best_score, 4),
+        "edge_alignment": round(edge_alignment, 4),
+        "fg_ratio": round(fg_ratio, 4),
+        "fragments_removed": sum(1 for lbl in range(1, num_labels) if stats[lbl, cv2.CC_STAT_AREA] < min_segment_size),
+    }
 
     return final_mask
 
