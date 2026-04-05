@@ -2455,6 +2455,7 @@ SMART_HOME_PAGE_TEMPLATE = """
       q("#kpi_decision").textContent = "--";
       q("#kpi_risk").textContent = "--";
       q("#kpi_stability").textContent = "--";
+      q("#kpi_decision_conf").textContent = "--";
       q("#kpi_evidence").textContent = "--";
       q("#kpi_risk_basis").textContent = "--";
       q("#actions_list").innerHTML = "<li>等待分析结果…</li>";
