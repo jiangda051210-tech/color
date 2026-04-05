@@ -8,7 +8,10 @@ from typing import Any
 
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        f = float(value)
+        if f != f or f == float("inf") or f == float("-inf"):
+            return default
+        return f
     except (TypeError, ValueError):
         return default
 

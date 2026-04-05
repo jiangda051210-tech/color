@@ -383,10 +383,15 @@ def metamerism_risk(
     # 按风险排序: 记录每种光源的色差
     illuminant_risks: list[dict[str, Any]] = []
 
-    # CAM16 参考色 (D65 条件)
-    # 近似 Lab→XYZ, clamped to prevent negative values
+    # CAM16 参考色 (D65 条件) — 正确的Lab→XYZ逆变换
+    _fy = (L + 16.0) / 116.0
+    _fx = a / 500.0 + _fy
+    _fz = _fy - b / 200.0
+    _xr = _fx**3 if _fx**3 > 0.008856 else (116.0 * _fx - 16.0) / 903.3
+    _yr = _fy**3 if L > 903.3 * 0.008856 else L / 903.3
+    _zr = _fz**3 if _fz**3 > 0.008856 else (116.0 * _fz - 16.0) / 903.3
     cam16_ref = cam16_forward(
-        max(L * 0.95047, 0.0), max(L, 0.0), max(L * 1.08883, 0.0),
+        max(_xr * 0.95047, 0.0), max(_yr * 1.0, 0.0), max(_zr * 1.08883, 0.0),
     )
 
     for illum_name, lab_data, desc, warning in illuminant_data:

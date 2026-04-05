@@ -160,7 +160,10 @@ def init_db(db_path: Path) -> None:
 
 def _to_float(v: Any, default: float = 0.0) -> float:
     try:
-        return float(v)
+        f = float(v)
+        if f != f or f == float("inf") or f == float("-inf"):  # NaN/Inf guard
+            return default
+        return f
     except (TypeError, ValueError):
         return default
 
@@ -172,21 +175,21 @@ def extract_metrics(report: dict[str, Any]) -> dict[str, float]:
     mode = str(report.get("mode", "unknown"))
 
     if mode == "ensemble_single":
-        avg_de = _to_float(summary.get("median_avg_delta_e00"), np.nan)
-        p95_de = _to_float(summary.get("median_p95_delta_e00"), np.nan)
-        max_de = _to_float(summary.get("median_max_delta_e00"), np.nan)
-        d_l = _to_float(summary.get("median_dL"), np.nan)
-        d_c = _to_float(summary.get("median_dC"), np.nan)
-        d_h = _to_float(summary.get("median_dH_deg"), np.nan)
-        conf = _to_float(confidence.get("median"), np.nan)
+        avg_de = _to_float(summary.get("median_avg_delta_e00"), 0.0)
+        p95_de = _to_float(summary.get("median_p95_delta_e00"), 0.0)
+        max_de = _to_float(summary.get("median_max_delta_e00"), 0.0)
+        d_l = _to_float(summary.get("median_dL"), 0.0)
+        d_c = _to_float(summary.get("median_dC"), 0.0)
+        d_h = _to_float(summary.get("median_dH_deg"), 0.0)
+        conf = _to_float(confidence.get("median"), 0.0)
     else:
-        avg_de = _to_float(summary.get("avg_delta_e00"), np.nan)
-        p95_de = _to_float(summary.get("p95_delta_e00"), np.nan)
-        max_de = _to_float(summary.get("max_delta_e00"), np.nan)
-        d_l = _to_float(summary.get("dL"), np.nan)
-        d_c = _to_float(summary.get("dC"), np.nan)
-        d_h = _to_float(summary.get("dH_deg"), np.nan)
-        conf = _to_float(confidence.get("overall"), np.nan)
+        avg_de = _to_float(summary.get("avg_delta_e00"), 0.0)
+        p95_de = _to_float(summary.get("p95_delta_e00"), 0.0)
+        max_de = _to_float(summary.get("max_delta_e00"), 0.0)
+        d_l = _to_float(summary.get("dL"), 0.0)
+        d_c = _to_float(summary.get("dC"), 0.0)
+        d_h = _to_float(summary.get("dH_deg"), 0.0)
+        conf = _to_float(confidence.get("overall"), 0.0)
 
     return {
         "avg_de": avg_de,
@@ -215,12 +218,12 @@ def record_run(
     decision_center = report.get("decision_center", {})
     decision_code = str(decision_center.get("decision_code", "")) if isinstance(decision_center, dict) else ""
     decision_priority = str(decision_center.get("priority", "")) if isinstance(decision_center, dict) else ""
-    decision_risk = _to_float(decision_center.get("risk_probability"), np.nan) if isinstance(decision_center, dict) else np.nan
-    estimated_cost = _to_float(decision_center.get("estimated_cost"), np.nan) if isinstance(decision_center, dict) else np.nan
+    decision_risk = _to_float(decision_center.get("risk_probability"), 0.0) if isinstance(decision_center, dict) else 0.0
+    estimated_cost = _to_float(decision_center.get("estimated_cost"), 0.0) if isinstance(decision_center, dict) else 0.0
     scores = decision_center.get("stakeholder_scores", {}) if isinstance(decision_center, dict) else {}
-    customer_score = _to_float(scores.get("customer_score"), np.nan) if isinstance(scores, dict) else np.nan
-    boss_score = _to_float(scores.get("boss_score"), np.nan) if isinstance(scores, dict) else np.nan
-    company_score = _to_float(scores.get("company_score"), np.nan) if isinstance(scores, dict) else np.nan
+    customer_score = _to_float(scores.get("customer_score"), 0.0) if isinstance(scores, dict) else 0.0
+    boss_score = _to_float(scores.get("boss_score"), 0.0) if isinstance(scores, dict) else 0.0
+    company_score = _to_float(scores.get("company_score"), 0.0) if isinstance(scores, dict) else 0.0
 
     init_db(db_path)
     conn = sqlite3.connect(str(db_path), timeout=10.0)
@@ -495,9 +498,9 @@ def history_overview(
         return {"count": 0, "pass_rate": None, "latest_created_at": None}
 
     pass_rate = float(np.mean([1.0 if r.get("pass") else 0.0 for r in runs]))
-    conf = np.array([_to_float(r.get("confidence"), np.nan) for r in runs], dtype=np.float64)
-    avg_de = np.array([_to_float(r.get("avg_de"), np.nan) for r in runs], dtype=np.float64)
-    p95_de = np.array([_to_float(r.get("p95_de"), np.nan) for r in runs], dtype=np.float64)
+    conf = np.array([_to_float(r.get("confidence"), 0.0) for r in runs], dtype=np.float64)
+    avg_de = np.array([_to_float(r.get("avg_de"), 0.0) for r in runs], dtype=np.float64)
+    p95_de = np.array([_to_float(r.get("p95_de"), 0.0) for r in runs], dtype=np.float64)
 
     return {
         "count": int(len(runs)),
@@ -547,10 +550,10 @@ def executive_kpis(
         recapture_rate = 0.0
         hold_rate = 0.0
 
-    customer = np.array([_to_float(r.get("customer_score"), np.nan) for r in scored], dtype=np.float64)
-    boss = np.array([_to_float(r.get("boss_score"), np.nan) for r in scored], dtype=np.float64)
-    company = np.array([_to_float(r.get("company_score"), np.nan) for r in scored], dtype=np.float64)
-    est_cost = np.array([_to_float(r.get("estimated_cost"), np.nan) for r in runs], dtype=np.float64)
+    customer = np.array([_to_float(r.get("customer_score"), 0.0) for r in scored], dtype=np.float64)
+    boss = np.array([_to_float(r.get("boss_score"), 0.0) for r in scored], dtype=np.float64)
+    company = np.array([_to_float(r.get("company_score"), 0.0) for r in scored], dtype=np.float64)
+    est_cost = np.array([_to_float(r.get("estimated_cost"), 0.0) for r in runs], dtype=np.float64)
 
     return {
         "count": int(len(runs)),
@@ -792,8 +795,8 @@ def outcome_kpis(
     else:
         auto_escape = 0.0
 
-    ratings = np.array([_to_float(r.get("customer_rating"), np.nan) for r in rows], dtype=np.float64)
-    costs = np.array([_to_float(r.get("realized_cost"), np.nan) for r in rows], dtype=np.float64)
+    ratings = np.array([_to_float(r.get("customer_rating"), 0.0) for r in rows], dtype=np.float64)
+    costs = np.array([_to_float(r.get("realized_cost"), 0.0) for r in rows], dtype=np.float64)
 
     counts: dict[str, int] = {}
     for o in outcomes:
@@ -842,7 +845,7 @@ def recommend_policy_adjustments(
     auto_escape = _to_float(kpi.get("auto_release_escape_rate"), 0.0)
     accepted_rate = _to_float(kpi.get("accepted_rate"), 0.0)
     complaint_rate = _to_float(kpi.get("complaint_rate"), 0.0)
-    rating_mean = _to_float(kpi.get("customer_rating_mean"), np.nan)
+    rating_mean = _to_float(kpi.get("customer_rating_mean"), 0.0)
 
     recs: list[str] = []
     patch: dict[str, Any] = {"decision_policy": {}}
@@ -942,11 +945,11 @@ def complaint_early_warning(
     if not runs30:
         runs30 = runs[: min(30, len(runs))]
 
-    avg7 = np.array([_to_float(r.get("avg_de"), np.nan) for r in runs7], dtype=np.float64)
-    avg30 = np.array([_to_float(r.get("avg_de"), np.nan) for r in runs30], dtype=np.float64)
-    conf7 = np.array([_to_float(r.get("confidence"), np.nan) for r in runs7], dtype=np.float64)
-    conf30 = np.array([_to_float(r.get("confidence"), np.nan) for r in runs30], dtype=np.float64)
-    risk7 = np.array([_to_float(r.get("decision_risk"), np.nan) for r in runs7], dtype=np.float64)
+    avg7 = np.array([_to_float(r.get("avg_de"), 0.0) for r in runs7], dtype=np.float64)
+    avg30 = np.array([_to_float(r.get("avg_de"), 0.0) for r in runs30], dtype=np.float64)
+    conf7 = np.array([_to_float(r.get("confidence"), 0.0) for r in runs7], dtype=np.float64)
+    conf30 = np.array([_to_float(r.get("confidence"), 0.0) for r in runs30], dtype=np.float64)
+    risk7 = np.array([_to_float(r.get("decision_risk"), 0.0) for r in runs7], dtype=np.float64)
     hold7 = np.array([1.0 if str(r.get("decision_code") or "") == "HOLD_AND_ESCALATE" else 0.0 for r in runs7], dtype=np.float64)
 
     avg7_m = float(np.nanmean(avg7)) if avg7.size else float(np.nanmean(avg30))
@@ -962,7 +965,7 @@ def complaint_early_warning(
 
     slope = 0.0
     # runs are newest-first from DB; reverse to ascending time for correct slope sign
-    avg_seq = np.array([_to_float(r.get("avg_de"), np.nan) for r in runs[: min(40, len(runs))]], dtype=np.float64)
+    avg_seq = np.array([_to_float(r.get("avg_de"), 0.0) for r in runs[: min(40, len(runs))]], dtype=np.float64)
     avg_seq = avg_seq[::-1]  # ascending time order
     avg_seq = avg_seq[~np.isnan(avg_seq)]
     if avg_seq.size >= 5 and np.std(avg_seq) > 1e-8:
