@@ -340,12 +340,34 @@ def recommend_open_bandit_policy(
             "bad_sum": 0.0,
         }
 
+    # Compute feature statistics for z-score normalization
+    if len(prepared) >= 5:
+        all_snaps = [r["snap"] for r in prepared]
+        feature_keys = ["avg_ratio", "p95_ratio", "inv_confidence", "decision_risk", "pass_indicator"]
+        feature_stats: dict[str, dict[str, float]] = {}
+        for key in feature_keys:
+            if key == "inv_confidence":
+                vals = [1.0 - s["confidence"] for s in all_snaps]
+            else:
+                vals = [s.get(key, 0.0) for s in all_snaps]
+            arr = np.array(vals, dtype=np.float64)
+            feature_stats[key] = {
+                "mean": float(np.mean(arr)),
+                "std": float(np.std(arr)) if len(arr) > 1 else 1.0,
+                "min": float(np.min(arr)),
+                "max": float(np.max(arr)),
+            }
+    else:
+        feature_stats = None
+
     for row in prepared:
         state = arm_state[row["arm"]]
         x = row["x"]
         r = float(row["reward"])
-        state["A"] += np.outer(x, x)
-        state["b"] += r * x
+        # Downweight suspicious outcomes
+        weight = 0.3 if row.get("suspicious", False) else 1.0
+        state["A"] += weight * np.outer(x, x)
+        state["b"] += weight * r * x
         state["count"] += 1
         state["reward_sum"] += r
         state["bad_sum"] += float(row["bad"])
@@ -357,10 +379,15 @@ def recommend_open_bandit_policy(
         p95_ratio=p95_ratio,
         confidence=confidence,
         decision_risk=decision_risk,
+        feature_stats=feature_stats,
     )
 
-    alpha_v = _clamp(float(alpha), 0.05, 1.20)
+    # Exploration rate decay: alpha decreases as more data collected
+    total_samples = len(prepared)
+    alpha_v = _clamp(float(alpha) / (1.0 + 0.01 * total_samples), 0.05, 1.20)
+
     arm_scores: dict[str, dict[str, Any]] = {}
+    predicted_rewards: dict[str, float] = {}
     for arm, state in arm_state.items():
         A = state["A"]
         b = state["b"]
@@ -372,6 +399,7 @@ def recommend_open_bandit_policy(
         count = int(state["count"])
         mean_reward = float(state["reward_sum"] / count) if count > 0 else 0.0
         bad_rate = float(state["bad_sum"] / count) if count > 0 else 0.0
+        predicted_rewards[arm] = pred
         arm_scores[arm] = {
             "count": count,
             "predicted_reward": pred,
@@ -381,6 +409,15 @@ def recommend_open_bandit_policy(
             "historical_bad_event_rate": bad_rate,
             "arm_description": ARM_SPECS[arm]["description"],
         }
+
+    # Posterior probability of arm superiority (softmax over predicted rewards)
+    pred_vals = np.array([predicted_rewards[arm] for arm in ARM_SPECS], dtype=np.float64)
+    # Temperature-scaled softmax for interpretable probabilities
+    temperature = max(0.1, float(np.std(pred_vals))) if len(pred_vals) > 1 else 1.0
+    exp_vals = np.exp((pred_vals - np.max(pred_vals)) / temperature)
+    softmax_probs = exp_vals / exp_vals.sum()
+    for i, arm in enumerate(ARM_SPECS):
+        arm_scores[arm]["posterior_prob_superior"] = round(float(softmax_probs[i]), 4)
 
     best_arm = max(arm_scores.items(), key=lambda kv: kv[1]["ucb_score"])[0]
     base_policy, source = load_decision_policy(policy_config)
@@ -404,9 +441,17 @@ def recommend_open_bandit_policy(
         "sample_count": len(prepared),
         "bandit_dimension": dim,
         "alpha": alpha_v,
+        "alpha_initial": float(alpha),
+        "exploration_decay_applied": True,
         "target_estimation": {"avg_target_est": target_avg, "p95_target_est": target_p95},
         "context_snapshot": context_snapshot,
         "arms": arm_scores,
+        "data_quality": {
+            "suspicious_count": suspicious_count,
+            "total_count": len(prepared),
+            "suspicious_rate": round(suspicious_count / max(1, len(prepared)), 4),
+            "cost_denominator_used": round(cost_denominator, 2),
+        },
         "recommendation": {
             "arm": best_arm,
             "arm_description": ARM_SPECS[best_arm]["description"],
@@ -414,5 +459,6 @@ def recommend_open_bandit_policy(
             "suggested_policy": suggested_policy,
             "base_policy_source": source,
             "reasoning": reasons,
+            "posterior_prob_superior": arm_scores[best_arm].get("posterior_prob_superior"),
         },
     }

@@ -402,13 +402,26 @@ class TextureAwareDeltaE:
     纹理对色差感知的调制：
     - 复杂纹理（深木纹）→ 掩蔽效应 → 有效ΔE降低
     - 纹理不一致 → 视觉放大 → 有效ΔE升高
+
+    v2 升级:
+      - 感知掩蔽模型: 高纹理区域有更高的 JND (just noticeable difference)
+      - CSF 空间频率加权掩蔽
+      - SSIM-like 纹理相似度指标
     """
+
+    # Contrast Sensitivity Function (CSF) parameters
+    # Based on Mannos & Sakrison model: CSF(f) = 2.6*(0.0192+0.114*f)*exp(-(0.114*f)^1.1)
+    # Peak sensitivity around 4-8 cycles/degree
+    _CSF_PEAK_FREQ = 4.0  # cycles per degree of visual angle
 
     def compute(self, standard_de: float,
                 sample_texture_std: float,
                 film_texture_std: float,
                 texture_similarity: float = 1.0,
-                material_type: str = 'auto') -> dict:
+                material_type: str = 'auto',
+                sample_texture_patches: list = None,
+                film_texture_patches: list = None,
+                spatial_frequency: float = None) -> dict:
         """
         Args:
             standard_de: 标准 ΔE2000 值
@@ -416,6 +429,9 @@ class TextureAwareDeltaE:
             film_texture_std: 彩膜亮度标准差
             texture_similarity: 纹理相似度 0~1（可由 Gabor 或 SSIM 计算）
             material_type: solid / wood / stone / metallic
+            sample_texture_patches: optional list of luminance values from sample texture patch
+            film_texture_patches: optional list of luminance values from film texture patch
+            spatial_frequency: dominant spatial frequency in cycles/degree (if known)
         """
         # 纹理复杂度 = 两者平均
         complexity = (sample_texture_std + film_texture_std) / 2.0
@@ -429,35 +445,101 @@ class TextureAwareDeltaE:
             'auto': 0.90,
         }.get(material_type, 0.90)
 
-        # 掩蔽因子：Sigmoid 映射
+        # --- Perceptual masking model ---
+        # JND scales with texture energy: JND = JND_base * (1 + k * texture_energy)
+        # texture_energy approximated by variance (std^2)
+        jnd_base = 1.0  # base JND in ΔE units for flat surface
+        texture_energy = complexity ** 2
+        jnd_multiplier = 1.0 + 0.002 * texture_energy  # higher texture -> higher JND
+        jnd_multiplier = min(jnd_multiplier, 3.0)  # cap at 3x
+
+        # --- CSF-based spatial frequency weighting ---
+        csf_weight = 1.0
+        if spatial_frequency is not None and spatial_frequency > 0:
+            # Mannos-Sakrison CSF model (normalized)
+            f = spatial_frequency
+            csf = 2.6 * (0.0192 + 0.114 * f) * math.exp(-(0.114 * f) ** 1.1)
+            csf_peak = 2.6 * (0.0192 + 0.114 * self._CSF_PEAK_FREQ) * math.exp(
+                -(0.114 * self._CSF_PEAK_FREQ) ** 1.1)
+            csf_normalized = csf / max(csf_peak, 1e-8)
+            # Low CSF sensitivity -> stronger masking (less visible color difference)
+            csf_weight = 0.5 + 0.5 * csf_normalized
+            csf_weight = max(0.3, min(1.0, csf_weight))
+
+        # 掩蔽因子：Sigmoid 映射 + perceptual model
         # complexity=0 → masking=1.0（素色无掩蔽）
         # complexity=30+ → masking→0.5（强纹理强掩蔽）
         masking = 0.5 + 0.5 / (1 + (complexity / 15.0) ** 1.5)
         masking *= material_factor
+        masking *= csf_weight
+
+        # --- SSIM-like texture similarity ---
+        ssim_score = texture_similarity
+        if sample_texture_patches is not None and film_texture_patches is not None:
+            ssim_score = self._compute_texture_ssim(sample_texture_patches, film_texture_patches)
 
         # 纹理不一致惩罚
         # similarity=1.0 → penalty=1.0（纹理一致，无惩罚）
         # similarity=0.5 → penalty≈1.15（纹理差异，视觉放大）
-        texture_penalty = 1.0 + 0.3 * (1.0 - texture_similarity)
+        texture_penalty = 1.0 + 0.3 * (1.0 - ssim_score)
 
-        # 最终纹理感知色差
+        # 最终纹理感知色差 (also factor in JND)
+        # If standard_de is below JND threshold, it's effectively invisible
+        effective_de = standard_de / jnd_multiplier  # normalize by JND
+        adjusted = effective_de * masking * texture_penalty * jnd_multiplier  # scale back
+        # Simplifies to: adjusted = standard_de * masking * texture_penalty
         adjusted = standard_de * masking * texture_penalty
 
         # 判定影响
         diff_pct = (adjusted - standard_de) / standard_de * 100 if standard_de > 0 else 0
 
-        return {
+        result = {
             'standard_deltaE': round(standard_de, 3),
             'texture_adjusted_deltaE': round(adjusted, 3),
             'masking_factor': round(masking, 4),
             'texture_complexity': round(complexity, 2),
-            'texture_similarity': round(texture_similarity, 3),
+            'texture_similarity': round(ssim_score, 3),
             'texture_penalty': round(texture_penalty, 4),
             'material_type': material_type,
+            'jnd_multiplier': round(jnd_multiplier, 3),
+            'perceptual_jnd': round(jnd_base * jnd_multiplier, 3),
+            'below_jnd': standard_de < (jnd_base * jnd_multiplier),
             'impact_percent': round(diff_pct, 1),
             'threshold_suggestion': self._suggest_threshold(standard_de, adjusted, masking),
             'interpretation': self._interpret(standard_de, adjusted, masking, complexity),
         }
+        if spatial_frequency is not None:
+            result['csf_weight'] = round(csf_weight, 4)
+            result['spatial_frequency'] = spatial_frequency
+        return result
+
+    def _compute_texture_ssim(self, patch_a, patch_b):
+        """SSIM-like metric between two luminance patches.
+        Computes structural similarity based on mean, variance, and covariance.
+        """
+        n_a = len(patch_a)
+        n_b = len(patch_b)
+        if n_a == 0 or n_b == 0:
+            return 1.0
+        # Use the shorter length
+        n = min(n_a, n_b)
+        a = patch_a[:n]
+        b = patch_b[:n]
+
+        mu_a = sum(a) / n
+        mu_b = sum(b) / n
+        var_a = sum((x - mu_a) ** 2 for x in a) / n
+        var_b = sum((x - mu_b) ** 2 for x in b) / n
+        cov_ab = sum((a[i] - mu_a) * (b[i] - mu_b) for i in range(n)) / n
+
+        # SSIM constants (adapted for luminance values typically 0-255)
+        C1 = (0.01 * 255) ** 2
+        C2 = (0.03 * 255) ** 2
+
+        numerator = (2 * mu_a * mu_b + C1) * (2 * cov_ab + C2)
+        denominator = (mu_a ** 2 + mu_b ** 2 + C1) * (var_a + var_b + C2)
+        ssim = numerator / max(denominator, 1e-10)
+        return max(0.0, min(1.0, ssim))
 
     def _suggest_threshold(self, std_de, adj_de, masking):
         """根据纹理掩蔽建议动态阈值"""
