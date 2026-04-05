@@ -617,7 +617,8 @@ class DriftPredictor:
         Px = [self._P[0][0]*x[0]+self._P[0][1]*x[1],
               self._P[1][0]*x[0]+self._P[1][1]*x[1]]
         S = x[0]*Px[0] + x[1]*Px[1] + self._noise_var
-        if S == 0: return
+        if S <= 0:
+            S = 1e-10  # prevent division by zero but still update
         K = [Px[0]/S, Px[1]/S]
         innovation = y - (self._mu[0]*x[0] + self._mu[1]*x[1])
         self._mu[0] += K[0] * innovation
@@ -647,12 +648,14 @@ class DriftPredictor:
         if len(self.history) < 10:
             return False
         values = [h['de'] for h in self.history[-self.window:]]
+        if len(values) < 3:
+            return False
         n = len(values)
         # Compute linear residual variance
         intercept, slope = self._mu[0], self._mu[1]
         indices = [h['index'] for h in self.history[-self.window:]]
         linear_residuals = [v - (intercept + slope * idx) for v, idx in zip(values, indices)]
-        linear_var = sum(r ** 2 for r in linear_residuals) / n
+        linear_var = sum(r ** 2 for r in linear_residuals) / max(n, 1)
 
         # Compute exponential smoothing residual variance (one-step-ahead)
         level = values[0]
@@ -671,9 +674,9 @@ class DriftPredictor:
     def trend_confidence(self) -> dict:
         """How confident is the slope estimate? Uses posterior std of slope."""
         slope = self._mu[1]
-        slope_std = math.sqrt(max(self._P[1][1], 1e-10))
+        slope_std = math.sqrt(max(self._P[1][1], 1e-6))
         # z-score: how many sigma is slope away from zero
-        z = abs(slope) / max(slope_std, 1e-10)
+        z = abs(slope) / max(slope_std, 1e-6)
         # Approximate p-value using normal CDF complement
         # P(|Z| > z) ~ 2 * erfc(z / sqrt(2)) / 2
         p_value = math.erfc(z / math.sqrt(2))
@@ -846,6 +849,8 @@ class DriftPredictor:
             sigma_est = math.sqrt(max(first_half_var, 1e-8))
         else:
             sigma_est = 0.3  # fallback
+        if sigma_est < 1e-6:
+            sigma_est = 1.0  # default when data is constant
 
         # Page's CUSUM parameters scaled by estimated sigma
         drift_allowance = 0.5 * sigma_est  # k = 0.5 sigma (standard choice)
@@ -1331,6 +1336,7 @@ class InkRecipeCorrector:
         ks_total = self._KM_PRIMARIES['W'][wavelength_idx]  # 基底
         for ch, conc in concentrations.items():
             if ch in self._KM_PRIMARIES:
+                conc = max(0.0, min(100.0, conc))
                 ks_total += (conc / 100.0) * self._KM_PRIMARIES[ch][wavelength_idx]
         return ks_total
 
@@ -2178,8 +2184,8 @@ class SPCEngine:
             return {"status": "insufficient"}
         mu = statistics.mean(xbars)
         sigma = statistics.stdev(xbars) if n > 1 else 1e-6
-        if sigma < 1e-9:
-            sigma = 1e-6
+        if sigma < 1e-6:
+            sigma = 1.0  # default when data is constant
 
         K = k * sigma
         H = h * sigma
@@ -2832,6 +2838,8 @@ class SupplierScorecard:
         # Use trend-weighted average in score calculation (recent performance matters more)
         trend_score = max(0.0, min(100.0, (3.0 - trend_weighted_avg_de) / 3.0 * 100.0))
         score = round(trend_score * 0.3 + avg_score * 0.15 + consistency_score * 0.25 + pass_score * 0.3, 1)
+        if not math.isfinite(score):
+            score = 0.0
 
         if score >= 85:
             grade = "A"
@@ -2861,6 +2869,8 @@ class SupplierScorecard:
             risk_probability = 0.5 * math.erfc(z_risk / math.sqrt(2))
         else:
             risk_probability = 0.0 if trend_weighted_avg_de < risk_threshold else 1.0
+        if not math.isfinite(risk_probability):
+            risk_probability = 0.0
 
         risk_level = "low" if risk_probability < 0.05 else "medium" if risk_probability < 0.20 else "high"
 
