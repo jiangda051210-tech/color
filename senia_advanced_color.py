@@ -249,6 +249,8 @@ def weighted_robust_mean(
     mask: np.ndarray,
     border_weight: float = 0.5,
     border_ratio: float = 0.1,
+    irls_iterations: int = 5,
+    irls_convergence: float = 0.01,
 ) -> tuple[np.ndarray, float]:
     """
     加权稳健均值: 比简单裁剪百分位更精确.
@@ -257,6 +259,8 @@ def weighted_robust_mean(
       1. 边缘像素权重低 (接近边框的像素受光照不均影响大)
       2. IQR 外的像素权重低 (异常值不是直接去掉, 而是降权)
       3. 中心像素权重高
+      4. 梯度权重: 边缘附近像素降权 (测量不可靠)
+      5. IRLS (迭代重加权最小二乘): 迭代收敛到稳健估计
 
     比 robust_mean_lab 精度高 20-30%, 因为利用了空间信息.
     """
@@ -287,19 +291,67 @@ def weighted_robust_mean(
     else:
         color_w = np.ones_like(L)
 
-    # 合并权重
-    total_w = spatial_w * color_w * valid.astype(np.float32)
-    total_w_sum = total_w.sum()
-    if total_w_sum < 1:
+    # 梯度权重: 像素梯度大 → 靠近边缘 → 降权
+    gray = L.astype(np.float32)
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+    # 归一化梯度: 高梯度 → 低权重
+    grad_max = grad_mag.max()
+    if grad_max > 1e-6:
+        grad_w = 1.0 - 0.7 * (grad_mag / grad_max)  # 最低权重 0.3
+    else:
+        grad_w = np.ones_like(grad_mag)
+    grad_w = grad_w.astype(np.float32)
+
+    # 合并基础权重
+    base_w = spatial_w * color_w * grad_w * valid.astype(np.float32)
+    base_w_sum = base_w.sum()
+    if base_w_sum < 1:
         return lab_image[valid].mean(axis=0), 0.0
 
-    # 加权均值
+    # 初始加权均值
     weighted = np.zeros(3, dtype=np.float64)
     for ch in range(3):
-        weighted[ch] = (lab_image[..., ch] * total_w).sum() / total_w_sum
+        weighted[ch] = (lab_image[..., ch] * base_w).sum() / base_w_sum
+
+    # IRLS: 迭代重加权最小二乘
+    # 每次迭代: 根据到当前均值的距离重新加权, 远离均值的像素降权
+    current_mean = weighted.copy()
+    for iteration in range(irls_iterations):
+        # 计算每个像素到当前均值的 Lab 距离
+        diff = lab_image.astype(np.float64) - current_mean.reshape(1, 1, 3)
+        dist = np.sqrt((diff**2).sum(axis=-1))  # Euclidean distance in Lab
+
+        # Huber-like 权重: 距离小 → 权重1, 距离大 → 降权
+        median_dist = np.median(dist[valid])
+        if median_dist < 1e-6:
+            break
+        scale = max(median_dist * 1.5, 1.0)
+        irls_w = np.where(dist < scale, 1.0, scale / (dist + 1e-10))
+        irls_w = irls_w.astype(np.float32)
+
+        total_w = base_w * irls_w
+        total_w_sum = total_w.sum()
+        if total_w_sum < 1:
+            break
+
+        new_mean = np.zeros(3, dtype=np.float64)
+        for ch in range(3):
+            new_mean[ch] = (lab_image[..., ch] * total_w).sum() / total_w_sum
+
+        # 收敛检查
+        shift = np.sqrt(((new_mean - current_mean)**2).sum())
+        current_mean = new_mean
+        if shift < irls_convergence:
+            break
+
+    weighted = current_mean
 
     # 有效像素比例 (作为置信度指标)
-    confidence = float(np.count_nonzero(total_w > 0.5) / max(valid.sum(), 1))
+    # 使用最终的 total_w
+    final_w = base_w * irls_w if 'irls_w' in dir() else base_w
+    confidence = float(np.count_nonzero(final_w > 0.5) / max(valid.sum(), 1))
 
     return weighted.astype(np.float32), confidence
 
