@@ -277,6 +277,8 @@ def circular_median_deg(deg_values: np.ndarray) -> float:
     radians = np.deg2rad(deg_values)
     sin_mean = np.mean(np.sin(radians))
     cos_mean = np.mean(np.cos(radians))
+    if abs(sin_mean) < 1e-12 and abs(cos_mean) < 1e-12:
+        return 0.0
     return float(np.rad2deg(np.arctan2(sin_mean, cos_mean)))
 
 
@@ -288,7 +290,7 @@ def robust_mean_lab(lab: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.n
     # MAD-based robust filtering for each channel
     medians = np.median(vals, axis=0)
     mad = np.median(np.abs(vals - medians), axis=0) * 1.4826  # scale factor for normal distribution
-    mad = np.maximum(mad, 0.1)  # prevent zero division for constant channels
+    mad = np.maximum(mad, 0.5)  # prevent zero division for constant channels
 
     # Z-score based on MAD: |Xi - median| / MAD
     z_scores = np.abs(vals - medians) / mad
@@ -299,6 +301,8 @@ def robust_mean_lab(lab: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.n
     # Bimodal detection: if we removed > 40% of pixels, the distribution may be bimodal
     # In that case, find the dominant mode and filter around it
     filtered = vals[keep]
+    if len(filtered) == 0:
+        filtered = vals  # use all pixels if filtering was too aggressive
     if len(filtered) < max(60, int(len(vals) * 0.15)):
         # Fallback: use percentile clipping (original method)
         l_low, l_high = np.percentile(vals[:, 0], [4, 96])
@@ -344,6 +348,7 @@ def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarra
 
     gray = float(np.mean(means))
     gains = gray / np.maximum(means, 1e-6)
+    gains = np.clip(gains, 0.5, 2.0)
     balanced = np.clip(image_bgr.astype(np.float32) * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
 
     # Estimate CCT from R/B ratio
@@ -528,7 +533,7 @@ def compute_lbp_texture(image_bgr: np.ndarray, mask: np.ndarray | None = None,
         if len(vals) == 0:
             return np.zeros(nbins, dtype=float), 0.0
         hist = np.bincount(vals, minlength=nbins).astype(float)
-        hist /= max(hist.sum(), 1)
+        hist /= max(hist.sum(), 1e-9)
         # Entropy-based complexity
         nz = hist[hist > 0]
         entropy = -float(np.sum(nz * np.log2(nz)))
@@ -984,6 +989,8 @@ def build_material_mask(shape: tuple[int, int], border_ratio: float = 0.04) -> n
 
 def grabcut_foreground_mask(image_bgr: np.ndarray) -> np.ndarray:
     h, w = image_bgr.shape[:2]
+    if h < 50 or w < 50:
+        return np.ones((h, w), dtype=bool)
     rect = (int(w * 0.04), int(h * 0.06), int(w * 0.92), int(h * 0.88))
     mask = np.zeros((h, w), np.uint8)
     bgd = np.zeros((1, 65), np.float64)
@@ -1014,7 +1021,7 @@ def _extract_rect_candidates_from_mask(binary: np.ndarray, image_area: int,
         if rw < 25 or rh < 25:
             continue
         rect_area = float(rw * rh)
-        if rect_area <= 0:
+        if rect_area <= 0 or area <= 0:
             continue
         rectangularity = float(np.clip(area / rect_area, 0.0, 1.0))
         if rectangularity < min_rect:
@@ -1990,7 +1997,7 @@ def find_inner_sample_on_board(board_bgr: np.ndarray) -> np.ndarray | None:
         if rw < 35 or rh < 35:
             continue
         rect_area = float(rw * rh)
-        if rect_area <= 0:
+        if rect_area <= 0 or area <= 0:
             continue
         fill = area / rect_area
         if fill < 0.45:
