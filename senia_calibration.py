@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 # ── 标准色彩科学常数 ────────────────────────────────────────
 
 # ColorChecker Classic 24色标准 sRGB 值 (D65, 2° observer)
@@ -227,17 +229,55 @@ def _dot3x3(m: list[list[float]], v: tuple[float, float, float]) -> tuple[float,
     )
 
 
+def _fit_ccm_core(
+    measured: np.ndarray,
+    target: np.ndarray,
+    alpha: float = 0.0,
+) -> np.ndarray:
+    """
+    Fit a 3x3 CCM via SVD-based least squares with optional Tikhonov regularization.
+
+    Parameters:
+        measured: (N, 3) array of measured linear RGB values.
+        target:   (N, 3) array of target linear RGB values.
+        alpha:    Tikhonov regularization strength (0 = plain least squares).
+
+    Returns:
+        (3, 3) CCM matrix such that corrected = measured @ ccm.
+    """
+    if alpha > 0:
+        # Tikhonov: (A^T A + alpha*I) x = A^T b
+        ATA = measured.T @ measured + alpha * np.eye(measured.shape[1])
+        ATb = measured.T @ target
+        ccm = np.linalg.solve(ATA, ATb)
+    else:
+        # SVD-based least squares (numerically stable)
+        ccm, _residuals, _rank, _sv = np.linalg.lstsq(measured, target, rcond=None)
+    return ccm
+
+
 def fit_ccm_least_squares(
     measured_rgb: list[tuple[int, int, int]],
     reference_lab: list[tuple[float, float, float]] | None = None,
     illuminant: str = "D50",
+    alpha: float = 0.01,
+    reject_outliers: bool = True,
+    outlier_threshold: float = 2.5,
 ) -> CalibrationResult:
     """
-    用最小二乘法拟合 3×3 CCM.
+    用 SVD / Tikhonov 最小二乘法拟合 3×3 CCM, 含可选离群值剔除.
 
     输入: 实测 24色块 sRGB 值
     参考: 标准 Lab 值 (默认 X-Rite D50)
     流程: measured_linear_RGB × CCM → corrected_linear_RGB → Lab → 与 reference_Lab 比较
+
+    Parameters:
+        measured_rgb:      实测色块 sRGB 值列表.
+        reference_lab:     参考 Lab 值 (默认 ColorChecker D50).
+        illuminant:        "D50" 或 "D65".
+        alpha:             Tikhonov 正则化系数 (0 = 纯最小二乘).
+        reject_outliers:   是否剔除离群色块后重新拟合.
+        outlier_threshold: 离群值判定倍数 (残差 > threshold * median 时剔除).
 
     返回 CalibrationResult 含校正矩阵和质量评估.
     """
@@ -250,55 +290,36 @@ def fit_ccm_least_squares(
 
     # 把参考 Lab 反推到目标 linear RGB (近似)
     # 更精确的方法: 直接用标准 sRGB 作为目标
-    target_linear = [rgb_to_linear(*COLORCHECKER_SRGB_D65[i]) for i in range(n)]
-    measured_linear = [rgb_to_linear(*measured_rgb[i]) for i in range(n)]
+    target_linear = np.array([rgb_to_linear(*COLORCHECKER_SRGB_D65[i]) for i in range(n)])
+    measured_linear = np.array([rgb_to_linear(*measured_rgb[i]) for i in range(n)])
 
-    # 最小二乘: target = CCM × measured
-    # 即: T = C × M, 解 C = T × M^+ (伪逆)
-    # 3 通道独立拟合
-    ccm = [[0.0] * 3 for _ in range(3)]
+    # ── Fix 1 + 2: SVD-based least squares with Tikhonov regularization ──
+    ccm = _fit_ccm_core(measured_linear, target_linear, alpha=alpha)
 
-    for ch in range(3):  # R, G, B output channel
-        # 构造方程 Ax = b, A = measured (Nx3), b = target[:,ch] (Nx1)
-        # x = (A^T A)^(-1) A^T b
-        ata = [[0.0] * 3 for _ in range(3)]
-        atb = [0.0, 0.0, 0.0]
-        for i in range(n):
-            m = measured_linear[i]
-            t_val = target_linear[i][ch]
-            for r in range(3):
-                for c in range(3):
-                    ata[r][c] += m[r] * m[c]
-                atb[r] += m[r] * t_val
+    # ── Fix 3: Outlier rejection ──
+    if reject_outliers and n > 6:
+        predicted = measured_linear @ ccm
+        residuals = np.sqrt(np.sum((predicted - target_linear) ** 2, axis=1))
+        median_res = np.median(residuals)
+        inlier_mask = residuals < outlier_threshold * median_res
+        # Only refit if we still have enough patches after rejection
+        if np.sum(inlier_mask) >= 6:
+            ccm = _fit_ccm_core(
+                measured_linear[inlier_mask],
+                target_linear[inlier_mask],
+                alpha=alpha,
+            )
 
-        # 解 3×3 线性方程组 (Cramer's rule for robustness)
-        det = (ata[0][0] * (ata[1][1] * ata[2][2] - ata[1][2] * ata[2][1])
-               - ata[0][1] * (ata[1][0] * ata[2][2] - ata[1][2] * ata[2][0])
-               + ata[0][2] * (ata[1][0] * ata[2][1] - ata[1][1] * ata[2][0]))
-        if abs(det) < 1e-8:
-            # 退化或近退化矩阵: 回退到单位矩阵 (输入色块颜色差异不足)
-            ccm[ch] = [1.0 if j == ch else 0.0 for j in range(3)]
-            continue
-
-        inv = [[0.0] * 3 for _ in range(3)]
-        inv[0][0] = (ata[1][1] * ata[2][2] - ata[1][2] * ata[2][1]) / det
-        inv[0][1] = (ata[0][2] * ata[2][1] - ata[0][1] * ata[2][2]) / det
-        inv[0][2] = (ata[0][1] * ata[1][2] - ata[0][2] * ata[1][1]) / det
-        inv[1][0] = (ata[1][2] * ata[2][0] - ata[1][0] * ata[2][2]) / det
-        inv[1][1] = (ata[0][0] * ata[2][2] - ata[0][2] * ata[2][0]) / det
-        inv[1][2] = (ata[0][2] * ata[1][0] - ata[0][0] * ata[1][2]) / det
-        inv[2][0] = (ata[1][0] * ata[2][1] - ata[1][1] * ata[2][0]) / det
-        inv[2][1] = (ata[0][1] * ata[2][0] - ata[0][0] * ata[2][1]) / det
-        inv[2][2] = (ata[0][0] * ata[1][1] - ata[0][1] * ata[1][0]) / det
-
-        for j in range(3):
-            ccm[ch][j] = sum(inv[j][k] * atb[k] for k in range(3))
+    # Convert numpy CCM to list-of-lists (transpose: lstsq solves M @ C = T,
+    # but _dot3x3 expects CCM[out_ch][in_ch], i.e. corrected = CCM @ measured)
+    ccm_T = ccm.T
+    ccm_list = [[float(ccm_T[r][c]) for c in range(3)] for r in range(3)]
 
     # 计算校正误差
     to_lab = srgb_to_lab_d50 if illuminant == "D50" else srgb_to_lab_d65
     patch_errors: list[float] = []
     for i in range(n):
-        corrected = _dot3x3(ccm, measured_linear[i])
+        corrected = _dot3x3(ccm_list, tuple(measured_linear[i]))
         # Linear → sRGB → Lab
         cr = max(0, min(255, int(_linear_to_srgb(corrected[0]) * 255 + 0.5)))
         cg = max(0, min(255, int(_linear_to_srgb(corrected[1]) * 255 + 0.5)))
@@ -321,7 +342,7 @@ def fit_ccm_least_squares(
         quality = "poor"
 
     return CalibrationResult(
-        ccm=ccm,
+        ccm=ccm_list,
         rmse=round(rmse, 4),
         max_error=round(max_err, 4),
         patch_errors=patch_errors,
