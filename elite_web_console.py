@@ -2131,10 +2131,30 @@ SMART_HOME_PAGE_TEMPLATE = """
       q("#evidence_list").innerHTML = evidences.map((x) => `<li>${x}</li>`).join("");
       q("#kpi_evidence").textContent = String(evidences.length);
       q("#kpi_risk_basis").textContent = evidences.length ? evidences[0].slice(0, 18) : "--";
-      const summaryText = pass === true
-        ? `建议放行，决策码 ${dc?.decision_code || "--"}，风险 ${Number.isFinite(risk) ? fmtPct(risk) : "--"}。`
-        : `建议拦截/复核，决策码 ${dc?.decision_code || "--"}，风险 ${Number.isFinite(risk) ? fmtPct(risk) : "--"}。`;
+      // 智能决策解释 (auto_explanation优先, 否则自动生成)
+      const autoExpl = dc?.auto_explanation || data?.auto_explanation;
+      const dcReasons = dc?.decision_reasons || [];
+      let summaryText;
+      if (autoExpl) {
+        summaryText = autoExpl;
+      } else if (pass === true) {
+        summaryText = `✅ 自动放行 — 决策码 ${dc?.decision_code || "--"}，风险 ${Number.isFinite(risk) ? fmtPct(risk) : "--"}`;
+      } else {
+        const topReason = dcReasons.length ? ` (${dcReasons[0]})` : "";
+        summaryText = `⚠️ ${dc?.decision_code === "HOLD_AND_ESCALATE" ? "紧急扣留" : "需人工复核"} — ${dc?.decision_code || "--"}${topReason}，风险 ${Number.isFinite(risk) ? fmtPct(risk) : "--"}`;
+      }
       setSummary(summaryText);
+
+      // 校准状态显示
+      const calStatus = data?.calibration_status;
+      if (calStatus && calStatus.status !== "ok") {
+        setSummary(summaryText + ` | ⚠ ${calStatus.warning}`);
+      }
+
+      // 错误状态显示
+      if (data?.error) {
+        setSummary(`❌ 分析失败: ${data.error_detail || data.error}`);
+      }
 
       const htmlPath = data?.html_path;
       const reportLink = q("#report_link");
