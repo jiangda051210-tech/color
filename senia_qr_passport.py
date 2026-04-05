@@ -46,9 +46,10 @@ def generate_passport(
     返回包含: 护照数据 + SHA256签名 + 可嵌入QR码的验证URL
     """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # Use full SHA256 (64 hex chars) for passport_id for stronger uniqueness
     passport_id = hashlib.sha256(
         f"{lot_id}:{product_code}:{ts}".encode()
-    ).hexdigest()[:16]
+    ).hexdigest()
 
     passport_data = {
         "passport_id": passport_id,
@@ -67,7 +68,8 @@ def generate_passport(
     if extra:
         passport_data["extra"] = extra
 
-    # 防伪签名
+    # 防伪签名 — include timestamp in payload for freshness verification
+    passport_data["signature_timestamp"] = time.time()
     sig_payload = json.dumps(passport_data, sort_keys=True, ensure_ascii=False)
     signature = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()
     passport_data["signature"] = signature
@@ -75,17 +77,49 @@ def generate_passport(
     return passport_data
 
 
+    # Maximum age for passport freshness check (1 year in seconds)
+    PASSPORT_MAX_AGE_SECONDS = 365 * 24 * 3600
+
+
 def verify_passport(passport_data: dict[str, Any]) -> dict[str, Any]:
-    """验证护照签名是否被篡改."""
-    sig = passport_data.pop("signature", "")
+    """验证护照签名是否被篡改. Works on a copy to avoid modifying the original."""
+    data = dict(passport_data)  # shallow copy — don't modify caller's dict
+    sig = data.pop("signature", "")
     expected = hashlib.sha256(
-        json.dumps(passport_data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
-    passport_data["signature"] = sig  # 还原
+
+    signature_valid = sig == expected
+
+    # Timestamp freshness check (max 1 year)
+    sig_ts = data.get("signature_timestamp")
+    freshness_ok = True
+    freshness_detail = "no_timestamp"
+    if sig_ts is not None:
+        age = time.time() - float(sig_ts)
+        if age > PASSPORT_MAX_AGE_SECONDS:
+            freshness_ok = False
+            freshness_detail = f"expired (age={age / 86400:.0f} days, max={PASSPORT_MAX_AGE_SECONDS / 86400:.0f} days)"
+        elif age < 0:
+            freshness_ok = False
+            freshness_detail = "timestamp_in_future"
+        else:
+            freshness_detail = f"fresh (age={age / 86400:.0f} days)"
+
+    overall_valid = signature_valid and freshness_ok
+
     return {
-        "valid": sig == expected,
+        "valid": overall_valid,
         "passport_id": passport_data.get("passport_id", ""),
-        "tampered": sig != expected,
+        "tampered": not signature_valid,
+        "signature_valid": signature_valid,
+        "freshness_ok": freshness_ok,
+        "freshness_detail": freshness_detail,
+        "verdict": (
+            "VALID" if overall_valid
+            else "TAMPERED" if not signature_valid
+            else "EXPIRED"
+        ),
     }
 
 
@@ -97,8 +131,11 @@ def render_passport_html(passport: dict[str, Any], verify_url: str = "") -> str:
       2. 生成 QR 码指向的在线验证页
     """
     tier = passport.get("tier", "")
-    tier_color = {"PASS": "#22c55e", "MARGINAL": "#f59e0b", "FAIL": "#ef4444"}.get(tier, "#6b7280")
-    tier_cn = {"PASS": "合格", "MARGINAL": "临界", "FAIL": "不合格"}.get(tier, "")
+    tier_colors = {"PASS": "#22c55e", "MARGINAL": "#f59e0b", "FAIL": "#ef4444"}
+    tier_names = {"PASS": "合格", "MARGINAL": "临界", "FAIL": "不合格"}
+    # Fallback for unknown tiers
+    tier_color = tier_colors.get(tier, "#6b7280")
+    tier_cn = tier_names.get(tier, tier or "未知")
     lab = passport.get("lab", {})
     dirs = passport.get("directions", [])
 
@@ -126,6 +163,13 @@ body {{ font-family: -apple-system, sans-serif; max-width: 400px; margin: 20px a
         padding-top: 12px; border-top: 1px solid #f3f4f6; font-family: monospace; }}
 .verify {{ text-align: center; margin-top: 12px; }}
 .verify a {{ color: #2563eb; font-size: 13px; text-decoration: none; }}
+@media print {{
+  body {{ background: white; margin: 0; padding: 0; }}
+  .card {{ box-shadow: none; border: 1px solid #e5e7eb; border-radius: 8px;
+           page-break-inside: avoid; }}
+  .verify a {{ color: #2563eb; }}
+  .verify a::after {{ content: " (" attr(href) ")"; font-size: 10px; color: #6b7280; }}
+}}
 </style></head><body>
 <div class="card">
   <div class="header">

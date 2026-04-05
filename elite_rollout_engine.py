@@ -166,12 +166,37 @@ def _simulate_decision(row: dict[str, Any], policy: dict[str, Any]) -> str:
     return "RECAPTURE_REQUIRED"
 
 
+    # Default index weights (configurable via policy["index_weights"])
+    DEFAULT_INDEX_WEIGHTS = {
+        # boss_efficiency_index = w_throughput * throughput + w_quality * quality_score + w_cost * cost_score
+        "boss_w_throughput": 0.45,
+        "boss_w_quality": 0.35,
+        "boss_w_cost": 0.20,
+        # company_governance_index = w_customer * customer_idx + w_escape * escape_score + w_hold * hold_score
+        "company_w_customer": 0.44,
+        "company_w_escape": 0.30,
+        "company_w_hold": 0.26,
+    }
+
+
 def _evaluate(rows: list[dict[str, Any]], policy: dict[str, Any], factors: dict[str, float]) -> dict[str, Any]:
+    """Evaluate a policy against historical rows.
+
+    Weighting formulas:
+    - throughput = 100 * (auto_rate + 0.72*manual_rate + 0.55*recapture_rate + 0.28*(1-hold_rate))
+    - customer_acceptance_index = 100 - 135*escape_rate - 12*hold_rate
+    - boss_efficiency_index = w_throughput*throughput + w_quality*(100-escape%*100) + w_cost*cost_score
+    - company_governance_index = w_customer*customer_idx + w_escape*(100-escape%*100) + w_hold*(100-hold%*100)
+    """
     cm = policy.get("cost_model", {})
     manual_cost = _to_float(cm.get("manual_review_cost"), 18.0)
     recapture_cost = _to_float(cm.get("recapture_cost"), 10.0)
     hold_cost = _to_float(cm.get("hold_delay_cost"), 120.0)
     escape_cost = _to_float(cm.get("escape_cost"), 350.0)
+
+    # Configurable weights with defaults
+    iw = policy.get("index_weights", {})
+    w = {k: _to_float(iw.get(k), v) for k, v in DEFAULT_INDEX_WEIGHTS.items()}
 
     codes: list[str] = []
     bad_probs: list[float] = []
@@ -203,10 +228,15 @@ def _evaluate(rows: list[dict[str, Any]], policy: dict[str, Any], factors: dict[
     escape_rate = float(np.mean(np.array(bad_probs, dtype=np.float64)))
     auto_escape_rate = float(np.mean(np.array(auto_bad, dtype=np.float64))) if auto_bad else 0.0
     cost_per_run = float(np.mean(np.array(costs, dtype=np.float64)))
+    # Throughput: weighted sum of decision rates reflecting operational speed
     throughput = _clamp(100.0 * (auto_rate + 0.72 * manual_rate + 0.55 * recapture_rate + 0.28 * (1.0 - hold_rate)), 0.0, 100.0)
+    # Customer acceptance: penalizes escapes heavily (-135x) and holds moderately (-12x)
     customer_idx = _clamp(100.0 - 135.0 * escape_rate - 12.0 * hold_rate, 0.0, 100.0)
-    boss_idx = _clamp(0.45 * throughput + 0.35 * (100.0 - escape_rate * 100.0) + 0.20 * _clamp(100.0 - cost_per_run / max(1.0, escape_cost) * 100.0, 0.0, 100.0), 0.0, 100.0)
-    company_idx = _clamp(0.44 * customer_idx + 0.30 * (100.0 - escape_rate * 100.0) + 0.26 * (100.0 - hold_rate * 100.0), 0.0, 100.0)
+    # Boss efficiency: weighted blend of throughput, quality, and cost efficiency
+    cost_score = _clamp(100.0 - cost_per_run / max(1.0, escape_cost) * 100.0, 0.0, 100.0)
+    boss_idx = _clamp(w["boss_w_throughput"] * throughput + w["boss_w_quality"] * (100.0 - escape_rate * 100.0) + w["boss_w_cost"] * cost_score, 0.0, 100.0)
+    # Company governance: weighted blend of customer satisfaction, escape control, hold control
+    company_idx = _clamp(w["company_w_customer"] * customer_idx + w["company_w_escape"] * (100.0 - escape_rate * 100.0) + w["company_w_hold"] * (100.0 - hold_rate * 100.0), 0.0, 100.0)
     return {
         "sample_count": n,
         "auto_release_rate": auto_rate,

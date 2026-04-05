@@ -121,7 +121,12 @@ def _code_to_arm(decision_code: str, confidence: float, risk: float, passed: boo
     return "balanced"
 
 
-def _reward_from_outcome(outcome_row: dict[str, Any] | None, row: dict[str, Any], snap: dict[str, float]) -> tuple[float, float]:
+def _reward_from_outcome(
+    outcome_row: dict[str, Any] | None,
+    row: dict[str, Any],
+    snap: dict[str, float],
+    cost_denominator: float = 900.0,
+) -> tuple[float, float]:
     if outcome_row is None:
         fallback = (
             (0.60 if bool(row.get("pass", False)) else -0.35)
@@ -130,7 +135,8 @@ def _reward_from_outcome(outcome_row: dict[str, Any] | None, row: dict[str, Any]
             - 0.22 * max(0.0, snap["p95_ratio"] - 1.0)
             - 0.25 * snap["decision_risk"]
         )
-        return _clamp(fallback, -1.6, 1.6), 0.0
+        # Scale to [-1, +1] range
+        return _clamp(fallback, -1.0, 1.0), 0.0
 
     label = str(outcome_row.get("outcome") or "").lower()
     base = {
@@ -145,11 +151,13 @@ def _reward_from_outcome(outcome_row: dict[str, Any] | None, row: dict[str, Any]
     rating = _to_float(outcome_row.get("customer_rating"), np.nan)
     cost = max(0.0, _to_float(outcome_row.get("realized_cost"), 0.0))
     rating_term = 0.0 if np.isnan(rating) else (rating - 80.0) / 120.0
-    cost_penalty = min(0.55, cost / 900.0)
+    # Configurable cost denominator (can be derived from data)
+    cost_penalty = min(0.55, cost / max(1.0, cost_denominator))
     conf_term = 0.08 * (snap["confidence"] - 0.70)
     reward = base - 0.35 * sev - cost_penalty + rating_term + conf_term
     bad = 1.0 if label in ("complaint_major", "return") else 0.0
-    return _clamp(reward, -1.8, 1.8), bad
+    # Scale rewards to [-1, +1] range properly
+    return _clamp(reward, -1.0, 1.0), bad
 
 
 def _build_query_context(
@@ -158,6 +166,7 @@ def _build_query_context(
     p95_ratio: float | None,
     confidence: float | None,
     decision_risk: float | None,
+    feature_stats: dict[str, dict[str, float]] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     base = latest or {
         "avg_ratio": 1.0,
@@ -166,14 +175,37 @@ def _build_query_context(
         "decision_risk": 0.24,
         "pass_indicator": 1.0,
     }
-    ar = _clamp(float(avg_ratio) if avg_ratio is not None else _to_float(base.get("avg_ratio"), 1.0), 0.2, 3.5)
-    pr = _clamp(float(p95_ratio) if p95_ratio is not None else _to_float(base.get("p95_ratio"), 1.0), 0.2, 3.8)
+
+    # Use empirical bounds if provided, otherwise fall back to hardcoded clamps
+    def _empirical_clamp(value: float, key: str, default_lo: float, default_hi: float) -> float:
+        if feature_stats and key in feature_stats:
+            lo = feature_stats[key].get("min", default_lo)
+            hi = feature_stats[key].get("max", default_hi)
+            return _clamp(value, lo, hi)
+        return _clamp(value, default_lo, default_hi)
+
+    ar = _empirical_clamp(float(avg_ratio) if avg_ratio is not None else _to_float(base.get("avg_ratio"), 1.0), "avg_ratio", 0.2, 3.5)
+    pr = _empirical_clamp(float(p95_ratio) if p95_ratio is not None else _to_float(base.get("p95_ratio"), 1.0), "p95_ratio", 0.2, 3.8)
     cf = _clamp(float(confidence) if confidence is not None else _to_float(base.get("confidence"), 0.78), 0.0, 1.0)
     risk = _clamp(float(decision_risk) if decision_risk is not None else _to_float(base.get("decision_risk"), np.nan), 0.0, 1.0)
     if np.isnan(risk):
         risk = _risk_from_row(ar, pr, cf)
     pass_indicator = _clamp(_to_float(base.get("pass_indicator"), 1.0), 0.0, 1.0)
-    vector = np.array([1.0, ar, pr, 1.0 - cf, risk, pass_indicator], dtype=np.float64)
+
+    # Z-score normalization for all features
+    raw_features = {"avg_ratio": ar, "p95_ratio": pr, "inv_confidence": 1.0 - cf, "decision_risk": risk, "pass_indicator": pass_indicator}
+    z_features = {}
+    for key, val in raw_features.items():
+        if feature_stats and key in feature_stats:
+            mu = feature_stats[key].get("mean", val)
+            sigma = feature_stats[key].get("std", 1.0)
+            z_features[key] = (val - mu) / sigma if sigma > 1e-9 else 0.0
+        else:
+            z_features[key] = val  # no stats available, use raw
+
+    vector = np.array([1.0, z_features["avg_ratio"], z_features["p95_ratio"],
+                       z_features["inv_confidence"], z_features["decision_risk"],
+                       z_features["pass_indicator"]], dtype=np.float64)
     return vector, {
         "source": "override_or_latest",
         "avg_ratio": ar,
@@ -181,6 +213,7 @@ def _build_query_context(
         "confidence": cf,
         "decision_risk": risk,
         "pass_indicator": pass_indicator,
+        "z_normalized": feature_stats is not None,
     }
 
 
@@ -227,7 +260,14 @@ def recommend_open_bandit_policy(
             by_run[key] = o
 
     target_avg, target_p95 = _estimate_targets(runs)
+
+    # Derive cost_denominator from data for reward scaling
+    all_costs = [_to_float(by_run[k].get("realized_cost"), 0.0) for k in by_run if _to_float(by_run[k].get("realized_cost"), 0.0) > 0]
+    cost_denominator = float(np.percentile(all_costs, 90)) if len(all_costs) >= 5 else 900.0
+    cost_denominator = max(100.0, cost_denominator)  # floor to avoid tiny denominators
+
     prepared: list[dict[str, Any]] = []
+    suspicious_count = 0
     for row in runs:
         vec_and_snap = _vector_from_row(row, target_avg, target_p95)
         if vec_and_snap is None:
@@ -241,7 +281,22 @@ def recommend_open_bandit_policy(
             risk=snap["decision_risk"],
             passed=bool(row.get("pass", False)),
         )
-        reward, bad = _reward_from_outcome(by_run.get(rid), row, snap)
+        reward, bad = _reward_from_outcome(by_run.get(rid), row, snap, cost_denominator=cost_denominator)
+
+        # Data quality check: flag suspicious outcomes
+        is_suspicious = False
+        outcome_row = by_run.get(rid)
+        if outcome_row is not None:
+            oc_label = str(outcome_row.get("outcome") or "").lower()
+            oc_cost = _to_float(outcome_row.get("realized_cost"), 0.0)
+            # Suspicious: accepted but very high cost, or return but zero cost
+            if oc_label == "accepted" and oc_cost > cost_denominator * 2:
+                is_suspicious = True
+            if oc_label == "return" and oc_cost == 0.0 and _to_float(outcome_row.get("severity"), 0.0) == 0.0:
+                is_suspicious = True
+        if is_suspicious:
+            suspicious_count += 1
+
         prepared.append(
             {
                 "run_id": rid,
@@ -250,6 +305,7 @@ def recommend_open_bandit_policy(
                 "arm": arm,
                 "reward": reward,
                 "bad": bad,
+                "suspicious": is_suspicious,
             }
         )
 

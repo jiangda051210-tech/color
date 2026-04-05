@@ -943,11 +943,13 @@ def complaint_early_warning(
     escape30 = float(np.mean([1.0 if x in ("complaint_major", "return") else 0.0 for x in outcomes30])) if outcomes30 else 0.0
 
     slope = 0.0
+    # runs are newest-first from DB; reverse to ascending time for correct slope sign
     avg_seq = np.array([_to_float(r.get("avg_de"), np.nan) for r in runs[: min(40, len(runs))]], dtype=np.float64)
+    avg_seq = avg_seq[::-1]  # ascending time order
     avg_seq = avg_seq[~np.isnan(avg_seq)]
     if avg_seq.size >= 5 and np.std(avg_seq) > 1e-8:
         x = np.arange(avg_seq.size, dtype=np.float64)
-        slope = float(np.polyfit(x, avg_seq[::-1], 1)[0])
+        slope = float(np.polyfit(x, avg_seq, 1)[0])
 
     uplift_avg = max(0.0, avg7_m / max(1e-6, avg30_m) - 1.0)
     conf_drop = max(0.0, conf30_m - conf7_m)
@@ -1037,6 +1039,8 @@ def complaint_early_warning(
         "forecast": {
             "complaint_probability_7d": p7,
             "complaint_probability_30d": p30,
+            "complaint_probability_7d_ci95": [round(p7_lo, 4), round(p7_hi, 4)],
+            "complaint_probability_30d_ci95": [round(p30_lo, 4), round(p30_hi, 4)],
         },
         "signals": {
             "avg_deltae_mean_7d": avg7_m,

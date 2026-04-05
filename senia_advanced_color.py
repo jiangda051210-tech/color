@@ -47,6 +47,25 @@ BRADFORD = np.array([
 ])
 BRADFORD_INV = np.linalg.inv(BRADFORD)
 
+# CAT16 色适应矩阵 (from CAM16, Li et al. 2017)
+CAT16 = np.array([
+    [0.401288, 0.650173, -0.051461],
+    [-0.250268, 1.204414, 0.045854],
+    [-0.002079, 0.048952, 0.953127],
+])
+CAT16_INV = np.linalg.inv(CAT16)
+
+# Von Kries 色适应矩阵 (最简单, 基于 LMS 锥体)
+VONKRIES = np.array([
+    [0.40024, 0.70760, -0.08081],
+    [-0.22630, 1.16532, 0.04570],
+    [0.00000, 0.00000, 0.91822],
+])
+VONKRIES_INV = np.linalg.inv(VONKRIES)
+
+# 缓存已计算的色适应矩阵 {(method, src_wp_tuple, tgt_wp_tuple, D): M}
+_adapt_matrix_cache: dict[tuple, np.ndarray] = {}
+
 # sRGB → XYZ 矩阵 (D65)
 SRGB_TO_XYZ = np.array([
     [0.4124564, 0.3575761, 0.1804375],
@@ -63,18 +82,43 @@ def bradford_adapt(
     xyz: np.ndarray,
     source_wp: np.ndarray = ILLUMINANT_D65,
     target_wp: np.ndarray = ILLUMINANT_A,
+    method: str = "bradford",
+    D: float = 1.0,
 ) -> np.ndarray:
     """
-    Bradford 色适应: 精确预测颜色在不同光源下的变化.
+    色适应变换: 精确预测颜色在不同光源下的变化.
+
+    参数:
+      method: "bradford" (默认, CIE推荐) | "cat16" (CAM16) | "vonkries" (经典)
+      D: 适应程度, 0=无适应, 1=完全适应 (默认1.0)
 
     应用: 工厂 D65 → 客户家 A光源, 预测地板会怎么变色.
 
     比灰世界假设准 5-10 倍, 因为它模拟的是人眼的锥体细胞适应过程.
     """
-    src_cone = BRADFORD @ source_wp
-    tgt_cone = BRADFORD @ target_wp
-    scale = tgt_cone / (src_cone + 1e-10)
-    M = BRADFORD_INV @ np.diag(scale) @ BRADFORD
+    D = max(0.0, min(1.0, D))
+
+    # 缓存键: (method, source_wp, target_wp, D)
+    cache_key = (method, tuple(source_wp.flat), tuple(target_wp.flat), round(D, 6))
+    if cache_key in _adapt_matrix_cache:
+        M = _adapt_matrix_cache[cache_key]
+    else:
+        # 选择色适应矩阵
+        if method == "cat16":
+            cat_matrix, cat_inv = CAT16, CAT16_INV
+        elif method == "vonkries":
+            cat_matrix, cat_inv = VONKRIES, VONKRIES_INV
+        else:  # "bradford" (默认)
+            cat_matrix, cat_inv = BRADFORD, BRADFORD_INV
+
+        src_cone = cat_matrix @ source_wp
+        tgt_cone = cat_matrix @ target_wp
+
+        # 部分适应: scale = D * (tgt/src) + (1-D)
+        scale = D * tgt_cone / (src_cone + 1e-10) + (1 - D)
+        M = cat_inv @ np.diag(scale) @ cat_matrix
+        _adapt_matrix_cache[cache_key] = M
+
     if xyz.ndim == 1:
         return M @ xyz
     return (xyz @ M.T)  # 批量处理
@@ -128,12 +172,21 @@ def predict_under_illuminant(
 def adaptive_texture_suppress(
     image_bgr: np.ndarray,
     mask: np.ndarray | None = None,
-) -> np.ndarray:
+    return_texture_map: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """
     自适应纹理抑制: 根据实际纹理强度自动调节滤波力度.
 
     纹理弱 (纯色) → 轻滤波 (保持细微色差)
     纹理强 (木纹) → 强滤波 (消除纹理只保留底色)
+
+    增强:
+      - Otsu 自动阈值 (取代固定阈值) 分离纹理/非纹理
+      - 连续缩放滤波参数 (取代 3 个固定级别)
+      - 可选返回 texture_map (每像素纹理强度)
+
+    参数:
+      return_texture_map: 如果 True, 返回 (filtered, texture_map) 元组
 
     比固定参数的 bilateralFilter 更准确, 因为一个参数不适合所有产品.
     """
@@ -141,30 +194,49 @@ def adaptive_texture_suppress(
 
     # 测量纹理强度 (Laplacian 方差)
     lap = cv2.Laplacian(gray, cv2.CV_64F)
+    lap_abs = np.abs(lap).astype(np.float32)
+
+    # 每像素纹理强度图 (局部 Laplacian 标准差, 用高斯模糊近似)
+    lap_sq = lap_abs ** 2
+    local_mean = cv2.GaussianBlur(lap_abs, (31, 31), 0)
+    local_mean_sq = cv2.GaussianBlur(lap_sq, (31, 31), 0)
+    texture_map = np.sqrt(np.maximum(local_mean_sq - local_mean ** 2, 0))
+
     if mask is not None:
         texture_strength = float(np.std(lap[mask > 0]))
+        # Otsu 阈值在 texture_map 上, 自动分离纹理/非纹理区域
+        tex_valid = texture_map[mask > 0]
     else:
         texture_strength = float(np.std(lap))
+        tex_valid = texture_map.ravel()
 
-    # 自适应参数
-    if texture_strength < 5:
-        # 极低纹理 (纯色/高光): 最轻滤波
-        d, sigma_c, sigma_s = 5, 30, 5
-    elif texture_strength < 15:
-        # 低纹理 (石纹/浅色木纹): 中等滤波
-        d, sigma_c, sigma_s = 9, 45, 9
-    elif texture_strength < 30:
-        # 中纹理 (标准木纹): 标准滤波
-        d, sigma_c, sigma_s = 13, 55, 13
+    # Otsu 阈值: 自动找到纹理/非纹理分界点
+    tex_uint8 = np.clip(tex_valid * 4, 0, 255).astype(np.uint8)
+    if len(tex_uint8) > 0:
+        otsu_thresh, _ = cv2.threshold(tex_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        otsu_texture_level = float(otsu_thresh) / 4.0  # 映射回原始尺度
     else:
-        # 高纹理 (深色木纹/石材): 最强滤波
-        d, sigma_c, sigma_s = 17, 70, 17
+        otsu_texture_level = 15.0
 
-    # 双边滤波 + 中值
+    # 连续缩放参数: 根据 texture_strength 线性插值 (取代固定级别)
+    # 范围: texture_strength 0→50, d: 5→19, sigma_c: 25→75, sigma_s: 5→19
+    t = min(max(texture_strength / 50.0, 0.0), 1.0)
+    d = int(5 + t * 14)
+    if d % 2 == 0:
+        d += 1  # bilateralFilter 要求 d 为奇数或 <=0
+    sigma_c = 25.0 + t * 50.0
+    sigma_s = 5.0 + t * 14.0
+
+    # 双边滤波
     filtered = cv2.bilateralFilter(image_bgr, d, sigma_c, sigma_s)
-    if texture_strength > 10:
-        filtered = cv2.medianBlur(filtered, 5)
 
+    # 中值滤波: 根据 Otsu 阈值动态决定 (纹理水平超过 Otsu 阈值才加)
+    if texture_strength > otsu_texture_level * 0.7:
+        ksize = 5 if texture_strength < 30 else 7
+        filtered = cv2.medianBlur(filtered, ksize)
+
+    if return_texture_map:
+        return filtered, texture_map
     return filtered
 
 
