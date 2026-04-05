@@ -3792,18 +3792,23 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
     target_override = build_target_override(req.target_avg, req.target_p95, req.target_max)
     aruco_config = {"enabled": bool(req.use_aruco), "dict_name": req.aruco_dict, "ids_order": req.aruco_ids}
 
-    report = analyze_single_image(
-        image_bgr=image,
-        grid_rows=rows,
-        grid_cols=cols,
-        profile_name=req.profile,
-        output_dir=output_dir,
-        board_quad_override=board_quad,
-        sample_quad_override=sample_quad,
-        target_override=target_override,
-        aruco_config=aruco_config,
-        enable_shading_correction=not req.disable_shading_correction,
-    )
+    try:
+        report = analyze_single_image(
+            image_bgr=image,
+            grid_rows=rows,
+            grid_cols=cols,
+            profile_name=req.profile,
+            output_dir=output_dir,
+            board_quad_override=board_quad,
+            sample_quad_override=sample_quad,
+            target_override=target_override,
+            aruco_config=aruco_config,
+            enable_shading_correction=not req.disable_shading_correction,
+        )
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"Analysis failed: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal analysis error: {type(e).__name__}")
     report["inputs"] = {
         "image": req.image.path if req.image.path else "inline_b64",
         "grid": {"rows": rows, "cols": cols},
@@ -3812,17 +3817,20 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
 
     # 户外模式: 添加环境检测信息
     if req.outdoor_mode:
-        from senia_preflight import detect_outdoor_environment
-        from ultimate_color_film_system_v2_optimized import EnvironmentCompensatorV2
-        env_info = detect_outdoor_environment(image)
-        env_comp = EnvironmentCompensatorV2()
-        report["environment"] = {
-            "type": env_info.get("environment_type", "unknown"),
-            "lighting": env_comp.detect_lighting_source(image),
-            "confidence_penalty": env_comp.compute_outdoor_confidence_penalty(env_info),
-            "capture_suggestions": env_comp.suggest_outdoor_capture(env_info),
-            "details": env_info.get("details", {}),
-        }
+        try:
+            from senia_preflight import detect_outdoor_environment
+            from ultimate_color_film_system_v2_optimized import EnvironmentCompensatorV2
+            env_info = detect_outdoor_environment(image)
+            env_comp = EnvironmentCompensatorV2()
+            report["environment"] = {
+                "type": env_info.get("environment_type", "unknown"),
+                "lighting": env_comp.detect_lighting_source(image),
+                "confidence_penalty": env_comp.compute_outdoor_confidence_penalty(env_info),
+                "capture_suggestions": env_comp.suggest_outdoor_capture(env_info),
+                "details": env_info.get("details", {}),
+            }
+        except Exception as e:
+            report["environment"] = {"error": str(e), "type": "detection_failed"}
 
     _add_history_assessment(report, req.history)
     _add_policy_recommendation(report, req.history)

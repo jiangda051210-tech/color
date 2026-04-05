@@ -124,6 +124,21 @@ def analyze_dual_shot(
     smp_lab = bgr_to_lab_float(smp_tone)
     smp_mean, smp_conf = weighted_robust_mean(smp_lab, smp_mask)  # 加权稳健统计
 
+    # ── 参考/样品互换检测 + 色温一致性验证 ──
+    _swap_warnings: list[str] = []
+    ref_chroma = float(np.sqrt(ref_mean[1]**2 + ref_mean[2]**2))
+    smp_chroma = float(np.sqrt(smp_mean[1]**2 + smp_mean[2]**2))
+    if smp_chroma > ref_chroma * 1.3 and ref_chroma > 2:
+        _swap_warnings.append("样品饱和度显著高于标样 — 图片可能互换了")
+    # CCT一致性: 通过白平衡增益推断
+    ref_rb = ref_gains[2] / max(ref_gains[0], 1e-6) if len(ref_gains) >= 3 else 1.0
+    ref_cct_est = 6500.0 / max(ref_rb, 0.3)
+    smp_b_mean = float(smp_bgr[..., 0].astype(np.float64).mean())
+    smp_r_mean = float(smp_bgr[..., 2].astype(np.float64).mean())
+    smp_cct_est = 6500.0 / max(smp_r_mean / max(smp_b_mean, 1e-6), 0.3)
+    if abs(ref_cct_est - smp_cct_est) > 1500:
+        _swap_warnings.append(f"光源色温差异大: 标样≈{ref_cct_est:.0f}K vs 大货≈{smp_cct_est:.0f}K — 建议统一光源")
+
     # ── 材质识别 ──
     inferred_profile, profile_metrics = infer_profile(smp_tone, smp_mask, profile_name)
     profile = PROFILES[inferred_profile]
@@ -287,6 +302,13 @@ def analyze_dual_shot(
             "recommendations": recs,
             "quality_flags": [],
             "capture_guidance": ["双拍模式: 精度最高, 置信度 0.95"],
+            "swap_warnings": _swap_warnings,
+            "illuminant_check": {
+                "ref_cct_estimate": round(ref_cct_est),
+                "smp_cct_estimate": round(smp_cct_est),
+                "cct_difference": round(abs(ref_cct_est - smp_cct_est)),
+                "consistent": abs(ref_cct_est - smp_cct_est) <= 1500,
+            },
             "grid": grid,
         },
         # ── 高级分析 (自动嵌入) ──

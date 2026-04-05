@@ -21,8 +21,9 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -38,13 +39,20 @@ class BatchResult:
     errors: list[dict[str, Any]] = field(default_factory=list)
     elapsed_sec: float = 0.0
 
+    skipped: int = 0
+    error_categories: dict[str, int] = field(default_factory=dict)
+
     def summary(self) -> dict[str, Any]:
         return {
             "total": self.total,
             "success": self.success,
             "failed": self.failed,
+            "skipped": self.skipped,
+            "success_rate": round(self.success / max(self.total, 1) * 100, 1),
             "elapsed_sec": round(self.elapsed_sec, 2),
             "images_per_sec": round(self.total / max(self.elapsed_sec, 0.001), 2),
+            "avg_time_per_image": round(self.elapsed_sec / max(self.success + self.failed, 1), 2),
+            "error_categories": dict(self.error_categories),
         }
 
 
@@ -106,6 +114,8 @@ def run_parallel_batch(
 
     start = time.perf_counter()
     completed = 0
+    abort = False
+    task_timeout = 90  # seconds per image
 
     def _run(path: Path) -> tuple[Path, dict[str, Any] | None, str | None]:
         try:
@@ -117,19 +127,51 @@ def run_parallel_batch(
         except Exception as exc:
             return path, None, str(exc)
 
-    worker_count = max(1, min(max_workers, len(image_paths)))
+    def _categorize_error(err: str) -> str:
+        el = err.lower()
+        if "timeout" in el:
+            return "timeout"
+        if "轮廓" in el or "contour" in el:
+            return "detection_failed"
+        if "memory" in el or "oom" in el:
+            return "memory"
+        if "corrupt" in el or "decode" in el or "read" in el:
+            return "io_error"
+        return "other"
+
+    # Auto-tune workers: leave 1 core free, cap at 8
+    cpu = os.cpu_count() or 4
+    auto_workers = max(2, min(cpu - 1, 8))
+    worker_count = max(1, min(max_workers or auto_workers, len(image_paths)))
 
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = {pool.submit(_run, p): p for p in image_paths}
         for future in as_completed(futures):
-            path, result, error = future.result()
+            if abort:
+                batch.skipped += 1
+                continue
+            try:
+                path, result, error = future.result(timeout=task_timeout)
+            except FutureTimeout:
+                path = futures[future]
+                result, error = None, f"timeout_{task_timeout}s"
+            except Exception as exc:
+                path = futures[future]
+                result, error = None, str(exc)
             completed += 1
             if error is None and result is not None:
                 batch.success += 1
                 batch.results.append({"path": str(path), "report": result})
             else:
                 batch.failed += 1
-                batch.errors.append({"path": str(path), "error": error or "unknown"})
+                cat = _categorize_error(error or "unknown")
+                batch.error_categories[cat] = batch.error_categories.get(cat, 0) + 1
+                batch.errors.append({"path": str(path), "error": error or "unknown", "category": cat})
+            # Early termination: abort if >30% fail after at least 5 processed
+            processed = batch.success + batch.failed
+            if processed >= 5 and batch.failed / processed > 0.30:
+                abort = True
+                batch.errors.append({"path": "", "error": "batch_aborted_high_error_rate", "category": "abort"})
             if on_progress is not None:
                 try:
                     on_progress(completed, batch.total, str(path))

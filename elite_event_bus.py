@@ -96,7 +96,11 @@ class EventSubscriber(Protocol):
 
 
 class WebhookSubscriber:
-    """Publish events via HTTP POST to a webhook URL."""
+    """Publish events via HTTP POST to a webhook URL with retry and circuit breaker."""
+
+    _MAX_RETRIES = 3
+    _CIRCUIT_THRESHOLD = 5
+    _CIRCUIT_COOLDOWN = 60.0
 
     def __init__(
         self,
@@ -104,19 +108,46 @@ class WebhookSubscriber:
         timeout_sec: int = 5,
         headers: dict[str, str] | None = None,
     ) -> None:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Invalid webhook scheme: {parsed.scheme}")
         self._url = url
         self._timeout = timeout_sec
         self._headers = headers or {}
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+
+    def _circuit_ok(self) -> bool:
+        if self._consecutive_failures < self._CIRCUIT_THRESHOLD:
+            return True
+        if time.time() >= self._circuit_open_until:
+            self._consecutive_failures = 0
+            return True
+        return False
 
     def handle(self, event: dict[str, Any]) -> bool:
+        if not self._circuit_ok():
+            return False
         payload = json.dumps(event, ensure_ascii=False).encode("utf-8")
         hdrs = {"Content-Type": "application/json", **self._headers}
-        req = urllib.request.Request(self._url, data=payload, headers=hdrs, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return resp.status < 400
-        except (urllib.error.URLError, TimeoutError, OSError):
-            return False
+        for attempt in range(self._MAX_RETRIES):
+            req = urllib.request.Request(self._url, data=payload, headers=hdrs, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    if resp.status < 400:
+                        self._consecutive_failures = 0
+                        return True
+                    if resp.status < 500:
+                        break
+            except (urllib.error.URLError, TimeoutError, OSError):
+                pass
+            if attempt < self._MAX_RETRIES - 1:
+                time.sleep(min(2 ** attempt, 8))
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._CIRCUIT_THRESHOLD:
+            self._circuit_open_until = time.time() + self._CIRCUIT_COOLDOWN
+        return False
 
 
 class FileQueueSubscriber:

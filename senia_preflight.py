@@ -171,14 +171,21 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     warnings: list[str] = []
     scores: dict[str, float] = {}
 
-    # ── 1. 模糊检测 (Laplacian 方差) ──
+    # ── 1. 模糊检测 (噪声感知 Laplacian 方差) ──
     lap = cv2.Laplacian(gray, cv2.CV_64F)
     blur_score = float(lap.var())
+    # 噪声估计: 高频噪声会抬高Laplacian方差，需要补偿
+    noise_est = float(np.median(np.abs(lap))) * 1.4826  # MAD-based noise
+    adjusted_sharpness = blur_score / max(1.0 + noise_est * 0.1, 1.0)
     scores["sharpness"] = round(blur_score, 1)
-    if blur_score < 30:
+    scores["noise_estimate"] = round(noise_est, 1)
+    scores["adjusted_sharpness"] = round(adjusted_sharpness, 1)
+    if adjusted_sharpness < 30:
         errors.append("照片严重模糊，请稳住手机重新拍摄")
-    elif blur_score < 80:
+    elif adjusted_sharpness < 80:
         warnings.append("照片轻微模糊，可能影响精度")
+    if noise_est > 50:
+        warnings.append(f"检测到较高图像噪声 (噪声指数={noise_est:.0f})，建议在更好光线下拍摄")
 
     # ── 2. 亮度检测 ──
     mean_brightness = float(gray.mean())
@@ -263,10 +270,16 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     if border_mean < center_mean * 0.5 and border_mean < 40:
         warnings.append("边缘异常暗，可能手指挡住了镜头")
 
-    # ── 10. 低饱和度检测 (可能是灰卡/参考板误放) ──
+    # ── 10. 饱和度检测 (低=灰卡误放, 高=手机HDR过处理) ──
     saturation = hsv[..., 1]
     mean_sat = float(saturation.mean())
     scores["saturation"] = round(mean_sat, 1)
+    over_sat_pct = float(np.mean(saturation > 240)) * 100
+    scores["over_saturation_pct"] = round(over_sat_pct, 1)
+    if over_sat_pct > 15:
+        warnings.append(f"检测到过饱和像素 ({over_sat_pct:.1f}%)，可能是手机HDR/AI增强导致色彩失真，建议关闭自动增强")
+    elif over_sat_pct > 8:
+        warnings.append(f"部分过饱和 ({over_sat_pct:.1f}%)，色彩可能被手机处理过")
 
     # ── 综合判定 ──
     ok = len(errors) == 0
