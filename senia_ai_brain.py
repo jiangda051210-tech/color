@@ -79,23 +79,35 @@ class ExperienceMemory:
     def recall_similar(self, dE: float, profile: str, customer_id: str = "",
                        product_code: str = "", top_k: int = 5) -> list[dict[str, Any]]:
         """回忆类似的历史案例."""
+        # Weights for each distance component
+        W_DE = 1.0
+        W_CUSTOMER = 2.0
+        W_PRODUCT = 1.5
+        W_PROFILE = 0.8
+
         with self._lock:
             scored = []
             for c in self._cases:
-                # 相似度: 色差接近 + 同客户 + 同产品 → 更相似
-                similarity = max(0, 1 - abs(c.dE - dE) / 3)
-                if c.customer_id == customer_id and customer_id:
-                    similarity += 0.3
-                if c.product_code == product_code and product_code:
-                    similarity += 0.2
-                if c.profile == profile:
-                    similarity += 0.1
+                # Weighted distance: continuous dE distance + binary match penalties
+                dE_dist = abs(c.dE - dE)
+                customer_dist = 0.0 if (c.customer_id == customer_id and customer_id) else 1.0
+                product_dist = 0.0 if (c.product_code == product_code and product_code) else 1.0
+                profile_dist = 0.0 if c.profile == profile else 1.0
+
+                weighted_distance = (
+                    W_DE * dE_dist
+                    + W_CUSTOMER * customer_dist
+                    + W_PRODUCT * product_dist
+                    + W_PROFILE * profile_dist
+                )
+                # Normalized similarity in [0, 1] via inverse distance
+                similarity = 1.0 / (1.0 + weighted_distance)
                 scored.append((similarity, c))
             scored.sort(key=lambda x: x[0], reverse=True)
             return [
                 {
                     "case_id": c.case_id,
-                    "similarity": round(s, 2),
+                    "similarity": round(s, 4),
                     "dE": c.dE,
                     "system_said": c.system_tier,
                     "operator_said": c.operator_override or c.system_tier,
@@ -217,33 +229,48 @@ def expert_reasoning_chain(
       Step 6: 决策 — 最终建议
     """
     tags = context_tags or []
-    chain: list[dict[str, str]] = []
+    chain: list[dict[str, Any]] = []
+
+    # Material profile configuration for dynamic thresholds
+    profile_config: dict[str, dict[str, Any]] = {
+        "wood":  {"pass": 1.2, "marginal": 2.8, "direction_threshold": 0.5, "sensitivity": {"dL": 1.0, "da": 1.0, "db": 1.0}},
+        "solid": {"pass": 0.8, "marginal": 2.0, "direction_threshold": 0.3, "sensitivity": {"dL": 1.2, "da": 1.3, "db": 1.1}},
+        "stone": {"pass": 1.5, "marginal": 3.2, "direction_threshold": 0.6, "sensitivity": {"dL": 0.9, "da": 1.0, "db": 0.9}},
+    }
+    pconf = profile_config.get(profile, {"pass": 1.0, "marginal": 2.5, "direction_threshold": 0.5, "sensitivity": {"dL": 1.0, "da": 1.0, "db": 1.0}})
+    dir_threshold = pconf["direction_threshold"]
+    sensitivity = pconf["sensitivity"]
 
     # ── Step 1: 观察 ──
+    step1_confidence = min(1.0, 1.0 / (1.0 + 0.1 * abs(dE - (pconf["pass"] + pconf["marginal"]) / 2)))
     chain.append({
         "step": "观察",
         "thinking": f"色差 ΔE={dE:.2f}, 偏差: dL={dL:+.2f} da={da:+.2f} db={db:+.2f}",
+        "confidence": round(step1_confidence, 3),
     })
 
     dirs = []
-    if abs(dL) > 0.5: dirs.append("偏亮" if dL > 0 else "偏暗")
-    if abs(da) > 0.5: dirs.append("偏红" if da > 0 else "偏绿")
-    if abs(db) > 0.5: dirs.append("偏黄" if db > 0 else "偏蓝")
+    if abs(dL) > dir_threshold: dirs.append("偏亮" if dL > 0 else "偏暗")
+    if abs(da) > dir_threshold: dirs.append("偏红" if da > 0 else "偏绿")
+    if abs(db) > dir_threshold: dirs.append("偏黄" if db > 0 else "偏蓝")
 
     if dirs:
-        chain.append({"step": "观察", "thinking": f"主要偏差方向: {'、'.join(dirs)}"})
+        chain.append({"step": "观察", "thinking": f"主要偏差方向: {'、'.join(dirs)}", "confidence": round(step1_confidence, 3)})
 
     # ── Step 2: 回忆类似案例 ──
     similar_cases = []
+    recall_confidence = 0.5  # default when no memory
     if memory:
         similar_cases = memory.recall_similar(dE, profile, customer_id, product_code)
         if similar_cases:
             best = similar_cases[0]
+            recall_confidence = min(1.0, best["similarity"] * (1.0 + 0.1 * len(similar_cases)))
             chain.append({
                 "step": "回忆",
                 "thinking": f"找到 {len(similar_cases)} 个类似案例. 最相似的: "
                             f"ΔE={best['dE']:.2f}, 系统判{best['system_said']}, "
                             f"{'客户接受' if best.get('customer_accepted') else '客户退货' if best.get('customer_accepted') is False else '结果未知'}",
+                "confidence": round(recall_confidence, 3),
             })
             # 从历史案例中学习
             rejected_similar = [c for c in similar_cases if c.get("customer_accepted") is False]
@@ -251,6 +278,7 @@ def expert_reasoning_chain(
                 chain.append({
                     "step": "回忆",
                     "thinking": f"⚠️ 类似情况 {len(rejected_similar)} 次被客户退货, 需要更谨慎",
+                    "confidence": round(recall_confidence, 3),
                 })
 
     # ── Step 3: 分析原因 ──

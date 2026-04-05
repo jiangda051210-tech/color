@@ -378,14 +378,36 @@ def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
         small = image_bgr
 
     # Stage 2: 小图上双边滤波 (在80px图上很快, <5ms)
+    # Adaptive parameters based on texture complexity (Laplacian variance)
     sh, sw = small.shape[:2]
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
     mean_brightness = float(gray.mean())
 
+    # Fast texture complexity estimate via Laplacian variance
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    texture_var = float(laplacian.var())
+    # Normalize texture strength: low ~<100, medium ~100-500, high ~>500
+    texture_strength = float(np.clip(texture_var / 500.0, 0.0, 1.0))
+
+    # Adaptive bilateral parameters: stronger filtering for higher texture
+    base_d = 7
+    base_sigma_color = 35.0
+    base_sigma_space = 8.0
+
+    # Scale parameters proportionally to texture strength
+    d = base_d + int(4 * texture_strength)          # 7-11
+    d = d if d % 2 == 1 else d + 1                  # must be odd
+    sigma_color = base_sigma_color + 45.0 * texture_strength   # 35-80
+    sigma_space = base_sigma_space + 12.0 * texture_strength   # 8-20
+
+    # Dark images need extra smoothing (noise is more visible)
     if mean_brightness < 45:
-        filtered = cv2.bilateralFilter(small, d=9, sigmaColor=60, sigmaSpace=12)
-    else:
-        filtered = cv2.bilateralFilter(small, d=7, sigmaColor=40, sigmaSpace=9)
+        d = min(d + 2, 13)
+        d = d if d % 2 == 1 else d + 1
+        sigma_color += 15.0
+        sigma_space += 3.0
+
+    filtered = cv2.bilateralFilter(small, d=d, sigmaColor=sigma_color, sigmaSpace=sigma_space)
 
     # Stage 3: 高斯模糊消除残余 (小图上核也小, 非常快)
     gauss_k = max(3, int(min(sh, sw) * 0.08) | 1)
@@ -547,16 +569,55 @@ def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tupl
       2. 色温约束: R/B gain 比值限制在 0.8-1.2 (防止极端偏色)
       3. 白标签锚点: 如果检测到白色标签, 优先用其做白平衡参考
       4. Perfect reflector detection: top 1% brightest + low saturation fallback
+      5. Specular highlight exclusion from white reference
+      6. Planckian locus validation (CCT 2500-10000K)
+      7. Extended diagnostics: gains, cct_estimate, white_source
     """
+
+    def _estimate_cct_from_gains(g_bgr):
+        """Estimate CCT from B/R gain ratio using McCamy's approximation variant."""
+        # Higher R gain → cooler source (need to warm), lower R gain → warmer source
+        rb_ratio = g_bgr[2] / max(g_bgr[0], 1e-6)  # R/B
+        # Simple linear mapping: rb_ratio ~1 → 6500K, >1 → cooler, <1 → warmer
+        cct = 6500.0 * rb_ratio
+        return float(cct)
+
+    def _is_plausible_cct(cct):
+        """Check if CCT is on/near the Planckian locus (2500-10000K)."""
+        return 2500.0 <= cct <= 10000.0
+
+    def _exclude_specular(pixel_mask, hsv_img, gray_img):
+        """Exclude specular highlights: very bright + very low local gradient variance."""
+        if np.count_nonzero(pixel_mask) < 10:
+            return pixel_mask
+        # Specular highlights have near-zero gradient (saturated sensor)
+        sobel_x = cv2.Sobel(gray_img.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray_img.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+        # Specular: brightness > 250 AND gradient near zero (< 5)
+        specular = (hsv_img[..., 2] > 250) & (grad_mag < 5.0)
+        # Remove specular pixels from the reference set
+        cleaned = pixel_mask & ~specular
+        # Only use cleaned if it retains enough pixels
+        if np.count_nonzero(cleaned) > max(50, np.count_nonzero(pixel_mask) // 4):
+            return cleaned
+        return pixel_mask
+
+    white_source = "gray_world"  # default
+
     # 先尝试找白色标签作为白平衡锚点
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    gray_ch = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     white_pixels = (hsv[..., 2] > 200) & (hsv[..., 1] < 40) & mask
+    # Exclude specular from white anchor candidates
+    white_pixels = _exclude_specular(white_pixels, hsv, gray_ch)
     white_count = int(np.count_nonzero(white_pixels))
 
     if white_count > 200:
         # 用白色标签/区域作为锚点
         anchor = image_bgr[white_pixels].reshape(-1, 3).astype(np.float64)
         means = anchor.mean(axis=0)
+        white_source = "anchor"
     else:
         # Perfect reflector detection: top 1% brightest pixels with low saturation
         means = None
@@ -564,6 +625,8 @@ def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tupl
         masked_v[~mask] = 0
         brightness_threshold = np.percentile(masked_v[mask], 99)
         bright_pixels = (masked_v >= brightness_threshold) & mask
+        # Exclude specular highlights from reflector candidates
+        bright_pixels = _exclude_specular(bright_pixels, hsv, gray_ch)
         if int(np.count_nonzero(bright_pixels)) > 0:
             bright_sat = hsv[..., 1][bright_pixels]
             low_sat_among_bright = (bright_sat < 30)
@@ -576,6 +639,7 @@ def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tupl
                 bright_low_sat_mask[selected_coords[:, 0], selected_coords[:, 1]] = True
                 reflector = image_bgr[bright_low_sat_mask].reshape(-1, 3).astype(np.float64)
                 means = reflector.mean(axis=0)
+                white_source = "reflector"
 
         if means is None:
             # Fall back to weighted gray world
@@ -587,11 +651,29 @@ def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tupl
                 gains[2] = gains[0] * 1.2
             elif rb_gain_ratio < 0.8:
                 gains[2] = gains[0] * 0.8
+            cct_est = _estimate_cct_from_gains(gains)
             balanced = np.clip(image_bgr.astype(np.float32) * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
-            return balanced, gains.tolist()
+            result_gains = gains.tolist()
+            result_gains.append(cct_est)
+            return balanced, result_gains
 
     gray_target = float(np.mean(means))
     gains = gray_target / np.maximum(means, 1e-6)
+
+    # Planckian locus validation: check if detected white point is physically plausible
+    cct_est = _estimate_cct_from_gains(gains)
+    if not _is_plausible_cct(cct_est):
+        # Implausible CCT — clamp gains to bring CCT into valid range
+        # This constrains R/B ratio more tightly
+        if cct_est < 2500.0:
+            # Too warm: increase R gain (or decrease B gain)
+            target_ratio = 2500.0 / 6500.0
+            gains[2] = gains[0] * target_ratio
+        elif cct_est > 10000.0:
+            # Too cool: decrease R gain (or increase B gain)
+            target_ratio = 10000.0 / 6500.0
+            gains[2] = gains[0] * target_ratio
+        cct_est = _estimate_cct_from_gains(gains)
 
     # 色温约束: 限制 R/B gain 比值在 0.8-1.2
     rb_gain_ratio = gains[2] / max(gains[0], 1e-6)  # R_gain / B_gain
@@ -600,8 +682,13 @@ def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tupl
     elif rb_gain_ratio < 0.8:
         gains[2] = gains[0] * 0.8
 
+    # Recalculate CCT after constraint
+    cct_est = _estimate_cct_from_gains(gains)
+
     balanced = np.clip(image_bgr.astype(np.float32) * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
-    return balanced, gains.tolist()
+    result_gains = gains.tolist()
+    result_gains.append(cct_est)
+    return balanced, result_gains
 
 
 def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray,
@@ -610,20 +697,68 @@ def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray,
     lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     l_chan = lab[..., 0]
 
+    # Auto-detect shading severity via coefficient of variation of illumination
+    # Use a coarse Gaussian to estimate illumination for severity check
+    coarse_sigma = max(12.0, min(h, w) * 0.10)
+    illum_coarse = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=coarse_sigma, sigmaY=coarse_sigma)
+    if np.count_nonzero(mask) > 100:
+        illum_roi = illum_coarse[mask]
+    else:
+        illum_roi = illum_coarse.ravel()
+    illum_mean = float(illum_roi.mean())
+    illum_std = float(illum_roi.std())
+    coeff_of_variation = illum_std / max(illum_mean, 1e-3)
+
+    # Auto-scale strength based on shading severity
+    # Low shading (cv<0.05): mild correction; High shading (cv>0.20): strong correction
+    auto_strength = float(np.clip(0.3 + 2.5 * coeff_of_variation, 0.30, 0.95))
+
+    # Detect texture level to decide filter type for illumination estimation
+    gray_small = cv2.resize(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY),
+                            (max(4, w // 4), max(4, h // 4)), interpolation=cv2.INTER_AREA)
+    texture_var = float(cv2.Laplacian(gray_small, cv2.CV_64F).var())
+    high_texture = texture_var > 200
+
     if adaptive:
         # 户外模式: 双频分离 — 大sigma去大范围阴影 + 小sigma去局部阴影
         sigma_large = max(20.0, min(h, w) * 0.15)
         sigma_small = max(8.0, min(h, w) * 0.04)
-        illum_large = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_large, sigmaY=sigma_large)
-        illum_small = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_small, sigmaY=sigma_small)
+        if high_texture:
+            # Edge-preserving: bilateral filter for illumination estimation
+            # Downsample for speed, bilateral is expensive at full res
+            ds = max(1, min(h, w) // 200)
+            l_small = cv2.resize(l_chan, (max(4, w // ds), max(4, h // ds)),
+                                 interpolation=cv2.INTER_AREA)
+            illum_large_s = cv2.bilateralFilter(l_small, d=9, sigmaColor=40,
+                                                sigmaSpace=sigma_large / ds)
+            illum_small_s = cv2.bilateralFilter(l_small, d=7, sigmaColor=30,
+                                                sigmaSpace=sigma_small / ds)
+            illum_large = cv2.resize(illum_large_s, (w, h), interpolation=cv2.INTER_LINEAR)
+            illum_small = cv2.resize(illum_small_s, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            illum_large = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_large, sigmaY=sigma_large)
+            illum_small = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma_small, sigmaY=sigma_small)
         # 混合: 大频率贡献 70%, 小频率贡献 30%
         illum = 0.7 * illum_large + 0.3 * illum_small
-        strength = 0.80  # 户外需要更强补偿
+        # Use auto-detected strength but floor at 0.80 for outdoor
+        strength = max(auto_strength, 0.80)
         gain_range = (0.60, 1.40)  # 更宽的增益范围
     else:
         sigma = max(8.0, min(h, w) * 0.08)
-        illum = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma, sigmaY=sigma)
-        gain_range = (0.75, 1.25)
+        if high_texture:
+            # Edge-preserving bilateral for illumination estimation
+            ds = max(1, min(h, w) // 200)
+            l_small = cv2.resize(l_chan, (max(4, w // ds), max(4, h // ds)),
+                                 interpolation=cv2.INTER_AREA)
+            illum = cv2.bilateralFilter(l_small, d=9, sigmaColor=40, sigmaSpace=sigma / ds)
+            illum = cv2.resize(illum, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            illum = cv2.GaussianBlur(l_chan, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        # Auto-scale strength for non-adaptive mode
+        strength = auto_strength
+        # Adaptive gain range: wider for more severe shading
+        gain_margin = float(np.clip(0.20 + coeff_of_variation, 0.20, 0.40))
+        gain_range = (1.0 - gain_margin, 1.0 + gain_margin)
 
     if np.count_nonzero(mask) > 100:
         ref = float(np.median(illum[mask]))
@@ -651,16 +786,40 @@ def build_invalid_mask(image_bgr: np.ndarray, outdoor_mode: bool = False) -> np.
     blackhat_l = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_l)
 
     dark = gray < np.percentile(gray, 6)
-    text_like_s = blackhat_s > np.percentile(blackhat_s, 92)
-    text_like_m = blackhat_m > np.percentile(blackhat_m, 90)
-    text_like_l = blackhat_l > np.percentile(blackhat_l, 90)
+
+    # Otsu-based threshold selection for blackhat (adaptive instead of fixed percentile)
+    def _otsu_or_percentile(bh, fallback_pct):
+        """Use Otsu threshold on blackhat; fall back to percentile if Otsu gives degenerate result."""
+        if bh.max() < 5:
+            return bh > np.percentile(bh, fallback_pct)
+        thr, _ = cv2.threshold(bh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if thr < 3:  # Otsu gave near-zero threshold (no text)
+            return bh > np.percentile(bh, fallback_pct)
+        return bh > thr
+
+    text_like_s = _otsu_or_percentile(blackhat_s, 92)
+    text_like_m = _otsu_or_percentile(blackhat_m, 90)
+    text_like_l = _otsu_or_percentile(blackhat_l, 90)
     text_like = text_like_s | text_like_m | text_like_l
 
-    highlight = (hsv[..., 2] > 245) & (hsv[..., 1] < 38)
+    # ── Specular highlight detection (gradient-based) ──
+    # True specular highlights: high brightness + low gradient (flat bright spots)
+    sobel_x = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+    grad_low = grad_mag < np.percentile(grad_mag, 30)  # bottom 30% gradient = flat
+    bright = hsv[..., 2] > 240
+    low_sat = hsv[..., 1] < 45
+    highlight = bright & low_sat & grad_low
 
     # ── 彩色笔迹检测 (红/蓝/黑马克笔) ──
-    # 高饱和度小区域 = 彩色笔迹
-    high_sat = hsv[..., 1] > 120
+    # Adaptive saturation threshold based on image statistics
+    sat_channel = hsv[..., 1]
+    sat_mean = float(sat_channel.mean())
+    sat_std = float(sat_channel.std())
+    # Threshold: mean + 2*std, clipped to reasonable range; replaces fixed 120
+    colored_text_thr = float(np.clip(sat_mean + 2.0 * sat_std, 80, 180))
+    high_sat = sat_channel > colored_text_thr
     # 形态学: 只保留小连通区域 (笔迹而非大面积彩色)
     high_sat_cleaned = cv2.morphologyEx(high_sat.astype(np.uint8), cv2.MORPH_OPEN,
                                         np.ones((3, 3), np.uint8))

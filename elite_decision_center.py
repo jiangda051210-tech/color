@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -167,20 +168,27 @@ def _decide(ctx: dict[str, Any], policy: dict[str, Any]) -> tuple[str, list[str]
     recapture_flags = set(str(x) for x in p.get("recapture_flags", []))
     critical_levels = set(str(x) for x in p.get("critical_process_risk_levels", []))
 
-    if flags & hard_stop_flags:
+    hit_hard = flags & hard_stop_flags
+    if hit_hard:
         reasons.append("hard_stop_flags_hit")
+        reasons.append(f"triggered flags: {', '.join(sorted(hit_hard))}")
         return "HOLD_AND_ESCALATE", reasons
 
-    if ctx["confidence"] <= _to_float(p.get("recapture_max_confidence"), 0.62):
+    recap_conf = _to_float(p.get("recapture_max_confidence"), 0.62)
+    if ctx["confidence"] <= recap_conf:
         reasons.append("confidence_too_low_for_judgement")
+        reasons.append(f"confidence={ctx['confidence']:.3f} <= threshold={recap_conf:.3f}")
         return "RECAPTURE_REQUIRED", reasons
 
-    if flags & recapture_flags:
+    hit_recap = flags & recapture_flags
+    if hit_recap:
         reasons.append("capture_quality_insufficient")
+        reasons.append(f"triggered flags: {', '.join(sorted(hit_recap))}")
         return "RECAPTURE_REQUIRED", reasons
 
     if ctx["process_risk"] in critical_levels and not ctx["pass"]:
         reasons.append("process_risk_critical_and_quality_fail")
+        reasons.append(f"process_risk={ctx['process_risk']}, pass={ctx['pass']}")
         return "HOLD_AND_ESCALATE", reasons
 
     auto_conf = _to_float(p.get("auto_release_min_confidence"), 0.82)
@@ -194,14 +202,29 @@ def _decide(ctx: dict[str, Any], policy: dict[str, Any]) -> tuple[str, list[str]
         and ctx["process_risk"] not in critical_levels
     ):
         reasons.append("all_auto_release_gates_passed")
+        reasons.append(
+            f"confidence={ctx['confidence']:.3f}>={auto_conf:.3f}, "
+            f"avg_ratio={ctx['avg_ratio']:.3f}<={max_avg_ratio:.3f}, "
+            f"p95_ratio={ctx['p95_ratio']:.3f}<={max_p95_ratio:.3f}"
+        )
         return "AUTO_RELEASE", reasons
 
     manual_conf = _to_float(p.get("manual_review_min_confidence"), 0.68)
     if ctx["confidence"] >= manual_conf:
         reasons.append("requires_human_confirmation")
+        gate_misses: list[str] = []
+        if not ctx["pass"]:
+            gate_misses.append("pass=False")
+        if ctx["avg_ratio"] > max_avg_ratio:
+            gate_misses.append(f"avg_ratio={ctx['avg_ratio']:.3f}>{max_avg_ratio:.3f}")
+        if ctx["p95_ratio"] > max_p95_ratio:
+            gate_misses.append(f"p95_ratio={ctx['p95_ratio']:.3f}>{max_p95_ratio:.3f}")
+        if gate_misses:
+            reasons.append(f"auto-release blocked by: {'; '.join(gate_misses)}")
         return "MANUAL_REVIEW", reasons
 
     reasons.append("confidence_borderline_retake_safer")
+    reasons.append(f"confidence={ctx['confidence']:.3f} < manual_threshold={manual_conf:.3f}")
     return "RECAPTURE_REQUIRED", reasons
 
 
