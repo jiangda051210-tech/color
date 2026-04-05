@@ -31,9 +31,15 @@ import numpy as np
 # 基础色彩科学工具
 # ─────────────────────────────────────────────
 
+from elite_color_science import (
+    srgb_to_linear as _srgb_to_linear_core,
+    rgb_to_lab_scalar as _rgb_to_lab_core,
+    ciede2000_scalar as _ciede2000_core,
+)
+
+
 def _srgb_to_linear(c: float) -> float:
-    c /= 255.0
-    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    return _srgb_to_linear_core(c / 255.0)
 
 def rgb_to_xyz(r, g, b):
     lr, lg, lb = _srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b)
@@ -50,45 +56,15 @@ def xyz_to_lab(x, y, z):
     return {'L': 116*fy - 16, 'a': 500*(fx - fy), 'b': 200*(fy - fz)}
 
 def rgb_to_lab(r, g, b):
-    x, y, z = rgb_to_xyz(r, g, b)
-    return xyz_to_lab(x, y, z)
+    L, a, bv = _rgb_to_lab_core(r, g, b)
+    return {'L': L, 'a': a, 'b': bv}
 
 def delta_e_2000(lab1: dict, lab2: dict) -> dict:
-    """完整 CIE DE2000，返回 total + dL/dC/dH 分量"""
-    L1, a1, b1 = lab1['L'], lab1['a'], lab1['b']
-    L2, a2, b2 = lab2['L'], lab2['a'], lab2['b']
-    rad, deg = math.pi / 180, 180 / math.pi
-    C1 = math.sqrt(a1**2 + b1**2); C2 = math.sqrt(a2**2 + b2**2)
-    Cab = (C1 + C2) / 2; Cab7 = Cab ** 7
-    G = 0.5 * (1 - math.sqrt(Cab7 / (Cab7 + 25**7)))
-    ap1 = a1 * (1 + G); ap2 = a2 * (1 + G)
-    Cp1 = math.sqrt(ap1**2 + b1**2); Cp2 = math.sqrt(ap2**2 + b2**2)
-    hp1 = math.atan2(b1, ap1) * deg;
-    if hp1 < 0: hp1 += 360
-    hp2 = math.atan2(b2, ap2) * deg
-    if hp2 < 0: hp2 += 360
-    dLp = L2 - L1; dCp = Cp2 - Cp1
-    if Cp1 * Cp2 == 0: dhp = 0
-    elif abs(hp2 - hp1) <= 180: dhp = hp2 - hp1
-    elif hp2 - hp1 > 180: dhp = hp2 - hp1 - 360
-    else: dhp = hp2 - hp1 + 360
-    dHp = 2 * math.sqrt(Cp1 * Cp2) * math.sin(dhp / 2 * rad)
-    Lp = (L1 + L2) / 2; Cp = (Cp1 + Cp2) / 2
-    if Cp1 * Cp2 == 0: hp = hp1 + hp2
-    elif abs(hp1 - hp2) <= 180: hp = (hp1 + hp2) / 2
-    elif hp1 + hp2 < 360: hp = (hp1 + hp2 + 360) / 2
-    else: hp = (hp1 + hp2 - 360) / 2
-    T = (1 - 0.17*math.cos((hp-30)*rad) + 0.24*math.cos(2*hp*rad)
-         + 0.32*math.cos((3*hp+6)*rad) - 0.20*math.cos((4*hp-63)*rad))
-    Lp50sq = (Lp - 50)**2
-    SL = 1 + 0.015 * Lp50sq / math.sqrt(20 + Lp50sq)
-    SC = 1 + 0.045 * Cp; SH = 1 + 0.015 * Cp * T
-    Cp7 = Cp ** 7
-    RT = (-2 * math.sqrt(Cp7 / (Cp7 + 25**7))
-          * math.sin(60 * math.exp(-((hp-275)/25)**2) * rad))
-    vdL = dLp / SL; vdC = dCp / SC; vdH = dHp / SH
-    total = math.sqrt(vdL**2 + vdC**2 + vdH**2 + RT * vdC * vdH)
-    return {'total': total, 'dL': vdL, 'dC': vdC, 'dH': vdH}
+    """CIEDE2000 — 委托给统一色彩科学模块."""
+    return _ciede2000_core(
+        lab1.get('L', 0), lab1.get('a', 0), lab1.get('b', 0),
+        lab2.get('L', 0), lab2.get('a', 0), lab2.get('b', 0),
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -20,7 +20,15 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
-from color_film_mvp_v3_optimized import de2000
+from elite_color_science import ciede2000_scalar as _ciede2000_scalar
+
+
+def de2000(lab1: dict[str, float], lab2: dict[str, float]) -> dict[str, float]:
+    """CIEDE2000 wrapper: dict-based interface for backward compatibility."""
+    return _ciede2000_scalar(
+        lab1.get("L", 0), lab1.get("a", 0), lab1.get("b", 0),
+        lab2.get("L", 0), lab2.get("a", 0), lab2.get("b", 0),
+    )
 
 
 def _now_iso() -> str:
