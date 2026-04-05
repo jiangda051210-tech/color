@@ -282,40 +282,46 @@ def expert_reasoning_chain(
                 })
 
     # ── Step 3: 分析原因 ──
-    if abs(dL) > abs(da) and abs(dL) > abs(db):
+    # Apply sensitivity weights for analysis
+    weighted_dL = abs(dL) * sensitivity["dL"]
+    weighted_da = abs(da) * sensitivity["da"]
+    weighted_db = abs(db) * sensitivity["db"]
+    analysis_confidence = min(1.0, max(weighted_dL, weighted_da, weighted_db) / 2.0)
+
+    if weighted_dL > weighted_da and weighted_dL > weighted_db:
         main_issue = "明度" + ("偏亮" if dL > 0 else "偏暗")
-        chain.append({"step": "分析", "thinking": f"主要问题是{main_issue}, 可能原因: 墨量{'不足' if dL > 0 else '过多'}或涂布厚度变化"})
-    elif abs(da) > abs(db):
-        chain.append({"step": "分析", "thinking": f"红绿轴偏差最大 (da={da:+.2f}), 可能原因: 红色色精{'过量' if da > 0 else '不足'}"})
-    elif abs(db) > 0.3:
-        chain.append({"step": "分析", "thinking": f"黄蓝轴偏差最大 (db={db:+.2f}), 可能原因: 黄色色精{'过量' if db > 0 else '不足'}"})
+        chain.append({"step": "分析", "thinking": f"主要问题是{main_issue}, 可能原因: 墨量{'不足' if dL > 0 else '过多'}或涂布厚度变化", "confidence": round(analysis_confidence, 3)})
+    elif weighted_da > weighted_db:
+        chain.append({"step": "分析", "thinking": f"红绿轴偏差最大 (da={da:+.2f}), 可能原因: 红色色精{'过量' if da > 0 else '不足'}", "confidence": round(analysis_confidence, 3)})
+    elif abs(db) > dir_threshold:
+        chain.append({"step": "分析", "thinking": f"黄蓝轴偏差最大 (db={db:+.2f}), 可能原因: 黄色色精{'过量' if db > 0 else '不足'}", "confidence": round(analysis_confidence, 3)})
 
     # 批次趋势
     if batch_history and len(batch_history) >= 5:
         recent = batch_history[-5:]
         trend = recent[-1] - recent[0]
         if trend > 0.3:
-            chain.append({"step": "分析", "thinking": f"⚠️ 色差在最近 5 次中上升了 {trend:.2f}, 趋势不好"})
+            chain.append({"step": "分析", "thinking": f"⚠️ 色差在最近 5 次中上升了 {trend:.2f}, 趋势不好", "confidence": round(analysis_confidence, 3)})
         elif trend < -0.3:
-            chain.append({"step": "分析", "thinking": f"✓ 色差在最近 5 次中下降了 {abs(trend):.2f}, 趋势在改善"})
+            chain.append({"step": "分析", "thinking": f"✓ 色差在最近 5 次中下降了 {abs(trend):.2f}, 趋势在改善", "confidence": round(analysis_confidence, 3)})
 
     # ── Step 4: 考虑上下文 ──
     risk_multiplier = 1.0
+    context_confidence = 0.9  # context is generally reliable when present
     if "VIP" in tags or "vip" in tags:
         risk_multiplier *= 1.5
-        chain.append({"step": "上下文", "thinking": "VIP客户, 需要更严格的标准"})
+        chain.append({"step": "上下文", "thinking": "VIP客户, 需要更严格的标准", "confidence": round(context_confidence, 3)})
     if "急单" in tags:
-        chain.append({"step": "上下文", "thinking": "急单, 返工时间成本高"})
+        chain.append({"step": "上下文", "thinking": "急单, 返工时间成本高", "confidence": round(context_confidence, 3)})
     if "出口" in tags or "export" in tags:
-        chain.append({"step": "上下文", "thinking": "出口订单, 运输+退货成本高, 需要更谨慎"})
+        chain.append({"step": "上下文", "thinking": "出口订单, 运输+退货成本高, 需要更谨慎", "confidence": round(context_confidence, 3)})
     if "内销" in tags:
-        chain.append({"step": "上下文", "thinking": "内销订单, 沟通成本低, 可以适当放宽"})
+        chain.append({"step": "上下文", "thinking": "内销订单, 沟通成本低, 可以适当放宽", "confidence": round(context_confidence, 3)})
 
     # ── Step 5: 权衡 ──
-    # 基础判定
-    thresholds = {"wood": (1.2, 2.8), "solid": (0.8, 2.0), "stone": (1.5, 3.2)}.get(profile, (1.0, 2.5))
-    pass_th = thresholds[0] / risk_multiplier  # VIP 客户阈值更严
-    marginal_th = thresholds[1] / risk_multiplier
+    # Use dynamic thresholds from material profile config
+    pass_th = pconf["pass"] / risk_multiplier  # VIP 客户阈值更严
+    marginal_th = pconf["marginal"] / risk_multiplier
 
     if dE <= pass_th:
         base_tier = "PASS"
@@ -324,21 +330,27 @@ def expert_reasoning_chain(
     else:
         base_tier = "FAIL"
 
-    chain.append({"step": "权衡", "thinking": f"基础判定: {base_tier} (阈值: pass<{pass_th:.1f}, fail≥{marginal_th:.1f})"})
+    # Confidence for the weighing step: higher when dE is far from thresholds
+    dist_to_boundary = min(abs(dE - pass_th), abs(dE - marginal_th))
+    weigh_confidence = min(1.0, 0.5 + dist_to_boundary / 2.0)
+    chain.append({"step": "权衡", "thinking": f"基础判定: {base_tier} (阈值: pass<{pass_th:.1f}, fail≥{marginal_th:.1f})", "confidence": round(weigh_confidence, 3)})
 
     # 历史退货经验调整
     if similar_cases:
         reject_count = sum(1 for c in similar_cases[:3] if c.get("customer_accepted") is False)
         if reject_count >= 2 and base_tier == "PASS":
             base_tier = "MARGINAL"
-            chain.append({"step": "权衡", "thinking": "类似案例多次退货, 从合格提升为临界"})
+            chain.append({"step": "权衡", "thinking": "类似案例多次退货, 从合格提升为临界", "confidence": round(recall_confidence, 3)})
         elif reject_count >= 2 and base_tier == "MARGINAL":
             base_tier = "FAIL"
-            chain.append({"step": "权衡", "thinking": "类似案例多次退货, 从临界提升为不合格"})
+            chain.append({"step": "权衡", "thinking": "类似案例多次退货, 从临界提升为不合格", "confidence": round(recall_confidence, 3)})
 
     # ── Step 6: 最终决策 ──
     tier_cn = {"PASS": "合格", "MARGINAL": "临界", "FAIL": "不合格"}[base_tier]
-    chain.append({"step": "决策", "thinking": f"最终判定: {tier_cn}"})
+    # Overall decision confidence: weighted combination of step confidences
+    step_confidences = [s.get("confidence", 0.5) for s in chain if "confidence" in s]
+    overall_confidence = round(statistics.mean(step_confidences), 3) if step_confidences else 0.5
+    chain.append({"step": "决策", "thinking": f"最终判定: {tier_cn}", "confidence": round(overall_confidence, 3)})
 
     # 生成行动建议
     actions: list[str] = []
@@ -359,7 +371,7 @@ def expert_reasoning_chain(
             if recipe.advices:
                 actions.append(f"调色方向: {recipe.advices[0].action}")
 
-    chain.append({"step": "决策", "thinking": "行动: " + "; ".join(actions)})
+    chain.append({"step": "决策", "thinking": "行动: " + "; ".join(actions), "confidence": round(overall_confidence, 3)})
 
     return {
         "tier": base_tier,
@@ -368,6 +380,8 @@ def expert_reasoning_chain(
         "similar_cases": similar_cases[:3],
         "risk_multiplier": round(risk_multiplier, 2),
         "context_tags": tags,
+        "overall_confidence": overall_confidence,
+        "profile_config": pconf,
     }
 
 
@@ -387,6 +401,9 @@ def parse_operator_input(text: str) -> dict[str, Any]:
     text = text.strip().lower()
     result: dict[str, Any] = {"raw": text, "understood": False}
 
+    # Negation prefixes: "不偏红" → NOT red
+    negation_prefixes = ["不", "没有", "没", "非", "无"]
+
     # 颜色方向关键词
     direction_map = {
         "红": ("da", 1), "偏红": ("da", 1), "发红": ("da", 1),
@@ -399,11 +416,16 @@ def parse_operator_input(text: str) -> dict[str, Any]:
         "艳": ("dC", 1), "鲜艳": ("dC", 1),
     }
 
-    # 程度关键词
+    # Intensity parsing: per-keyword intensity detection
+    # "很偏红" → significant, "略偏红" → slight, "偏红" → medium
+    intensity_prefixes_significant = ["太", "很", "非常", "严重", "明显", "特别"]
+    intensity_prefixes_slight = ["一点", "稍微", "略", "轻微", "有点", "微"]
+
+    # Global magnitude (fallback)
     magnitude = "medium"
-    if any(w in text for w in ["太", "很", "非常", "严重", "明显"]):
+    if any(w in text for w in intensity_prefixes_significant):
         magnitude = "significant"
-    elif any(w in text for w in ["一点", "稍微", "略", "轻微", "有点"]):
+    elif any(w in text for w in intensity_prefixes_slight):
         magnitude = "slight"
 
     magnitude_values = {"slight": 0.5, "medium": 1.0, "significant": 2.0}
@@ -411,8 +433,39 @@ def parse_operator_input(text: str) -> dict[str, Any]:
     detected_directions: list[dict[str, Any]] = []
     for keyword, (axis, sign) in direction_map.items():
         if keyword in text:
-            value = sign * magnitude_values[magnitude]
-            detected_directions.append({"keyword": keyword, "axis": axis, "value": value})
+            # Check for negation: look for negation prefix right before the keyword
+            keyword_idx = text.index(keyword)
+            negated = False
+            for neg in negation_prefixes:
+                neg_start = keyword_idx - len(neg)
+                if neg_start >= 0 and text[neg_start:keyword_idx] == neg:
+                    negated = True
+                    break
+
+            # Check for per-keyword intensity prefix
+            local_magnitude = magnitude  # default to global
+            for prefix in intensity_prefixes_significant:
+                pstart = keyword_idx - len(prefix)
+                if pstart >= 0 and text[pstart:keyword_idx] == prefix:
+                    local_magnitude = "significant"
+                    break
+            for prefix in intensity_prefixes_slight:
+                pstart = keyword_idx - len(prefix)
+                if pstart >= 0 and text[pstart:keyword_idx] == prefix:
+                    local_magnitude = "slight"
+                    break
+
+            if negated:
+                detected_directions.append({
+                    "keyword": keyword, "axis": axis, "value": 0.0,
+                    "negated": True, "intensity": local_magnitude,
+                })
+            else:
+                value = sign * magnitude_values[local_magnitude]
+                detected_directions.append({
+                    "keyword": keyword, "axis": axis, "value": value,
+                    "negated": False, "intensity": local_magnitude,
+                })
 
     if detected_directions:
         result["understood"] = True
@@ -465,22 +518,55 @@ def proactive_suggestions(
     suggestions: list[dict[str, str]] = []
     hour = hour_of_day if hour_of_day is not None else int(_time.strftime("%H"))
 
+    # Configurable shift schedule: read from config or use default
+    # Default: 3 shifts with transition windows
+    _default_shift_hours = {7, 8, 15, 16, 23, 0}
+    shift_change_hours = _default_shift_hours
+    try:
+        config_path = Path(__file__).parent / "config" / "shift_schedule.json"
+        if config_path.exists():
+            import json as _json
+            _cfg = _json.loads(config_path.read_text(encoding="utf-8"))
+            shift_change_hours = set(_cfg.get("shift_change_hours", _default_shift_hours))
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+
     # 换班时间提醒
-    if hour in (7, 8, 15, 16, 23, 0):
+    if hour in shift_change_hours:
         suggestions.append({
             "type": "换班提醒",
             "message": "换班后第一批建议多测几块, 确认新班次的设备状态",
             "priority": "medium",
         })
 
-    # 色差趋势提醒
+    # 色差趋势提醒 — Mann-Kendall style trend test
     if batch_history and len(batch_history) >= 5:
         recent = batch_history[-5:]
-        if all(recent[i] < recent[i + 1] for i in range(len(recent) - 1)):
+        # Mann-Kendall sign test: count concordant vs discordant pairs
+        n = len(recent)
+        s_stat = 0
+        for i in range(n - 1):
+            for j in range(i + 1, n):
+                diff = recent[j] - recent[i]
+                if diff > 0:
+                    s_stat += 1
+                elif diff < 0:
+                    s_stat -= 1
+        # Maximum possible S for n items
+        max_s = n * (n - 1) // 2
+        # Normalized trend score in [-1, 1] (Kendall's tau)
+        tau = s_stat / max_s if max_s > 0 else 0.0
+        if tau > 0.6:
             suggestions.append({
                 "type": "趋势警告",
-                "message": f"连续 {len(recent)} 次色差递增 ({recent[0]:.2f}→{recent[-1]:.2f}), 建议检查设备",
+                "message": f"色差呈显著上升趋势 (tau={tau:.2f}, {recent[0]:.2f}→{recent[-1]:.2f}), 建议检查设备",
                 "priority": "high",
+            })
+        elif tau > 0.3:
+            suggestions.append({
+                "type": "趋势提醒",
+                "message": f"色差有上升趋势 (tau={tau:.2f}), 建议关注",
+                "priority": "medium",
             })
 
     # 基于历史错误的提醒

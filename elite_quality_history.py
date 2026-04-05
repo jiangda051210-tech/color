@@ -1,11 +1,61 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+
+def _mann_kendall(x: np.ndarray) -> dict[str, Any]:
+    """Simple Mann-Kendall trend test implementation.
+
+    Returns S statistic, normalised Tau, variance, z-score, and two-sided p-value.
+    Works for n >= 3.  For ties the basic variance formula is used (no tie correction).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    n = len(x)
+    if n < 3:
+        return {"S": 0, "tau": 0.0, "z": 0.0, "p": 1.0, "trend": "no_data"}
+
+    s = 0
+    for k in range(n - 1):
+        for j in range(k + 1, n):
+            diff = x[j] - x[k]
+            if diff > 0:
+                s += 1
+            elif diff < 0:
+                s -= 1
+
+    n_pairs = n * (n - 1) / 2.0
+    tau = s / n_pairs if n_pairs > 0 else 0.0
+
+    var_s = n * (n - 1) * (2 * n + 5) / 18.0
+    std_s = math.sqrt(var_s) if var_s > 0 else 1e-12
+
+    if s > 0:
+        z = (s - 1) / std_s
+    elif s < 0:
+        z = (s + 1) / std_s
+    else:
+        z = 0.0
+
+    # Two-sided p-value via normal approximation
+    p = 2.0 * (1.0 - _norm_cdf(abs(z)))
+
+    if p < 0.05:
+        trend = "increasing" if s > 0 else "decreasing"
+    else:
+        trend = "no_trend"
+
+    return {"S": int(s), "tau": round(tau, 4), "z": round(z, 4), "p": round(p, 4), "trend": trend}
+
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF approximation (Abramowitz & Stegun)."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -239,25 +289,36 @@ def recent_stats(
         return {"count": 0}
 
     arr = np.array(rows, dtype=np.float64)
+    # Rows come ORDER BY id DESC (newest first); reverse to ascending time order
+    arr = arr[::-1]
     avg = arr[:, 0]
     p95 = arr[:, 1]
     maxv = arr[:, 2]
     conf = arr[:, 3]
 
+    # polyfit on ascending-time data: x[0]=oldest, x[-1]=newest
     x = np.arange(len(avg), dtype=np.float64)
     slope = 0.0
     if len(avg) >= 4 and np.std(avg) > 1e-8:
-        slope = float(np.polyfit(x, avg[::-1], 1)[0])
+        slope = float(np.polyfit(x, avg, 1)[0])
 
+    # Mann-Kendall trend test for robust trend detection
+    mk_result = _mann_kendall(avg)
+
+    # Also compute std for p95 and max for z-score use downstream
     return {
         "count": int(len(avg)),
         "avg_mean": float(np.mean(avg)),
         "avg_std": float(np.std(avg)),
         "avg_p95": float(np.percentile(avg, 95)),
         "p95_mean": float(np.mean(p95)),
+        "p95_std": float(np.std(p95)),
         "max_mean": float(np.mean(maxv)),
+        "max_std": float(np.std(maxv)),
         "conf_mean": float(np.mean(conf)),
+        "conf_std": float(np.std(conf)),
         "avg_slope_per_run": slope,
+        "mann_kendall": mk_result,
     }
 
 
@@ -278,23 +339,51 @@ def assess_current_vs_history(
     m = extract_metrics(report)
     flags: list[str] = []
 
+    # Consistent z-score approach across all metrics: flag when current > mean + k*std
+    k_high = 2.2  # z-score threshold for "outlier high"
+    k_conf = 2.0  # z-score threshold for confidence drop (lower tail)
+
     avg_mean = stats["avg_mean"]
     avg_std = max(1e-6, stats["avg_std"])
-    if m["avg_de"] > avg_mean + 2.2 * avg_std:
+    p95_mean = stats["p95_mean"]
+    p95_std = max(1e-6, stats.get("p95_std", avg_std))
+    max_mean = stats["max_mean"]
+    max_std = max(1e-6, stats.get("max_std", avg_std))
+    conf_mean = stats["conf_mean"]
+    conf_std = max(1e-6, stats.get("conf_std", 0.05))
+
+    z_avg = (m["avg_de"] - avg_mean) / avg_std
+    z_p95 = (m["p95_de"] - p95_mean) / p95_std
+    z_max = (m["max_de"] - max_mean) / max_std
+    z_conf = (conf_mean - m["confidence"]) / conf_std  # positive = current is worse
+
+    if z_avg > k_high:
         flags.append("history_avg_outlier_high")
-    if m["p95_de"] > stats["p95_mean"] * 1.25:
+    if z_p95 > k_high:
         flags.append("history_p95_outlier_high")
-    if m["max_de"] > stats["max_mean"] * 1.30:
+    if z_max > k_high:
         flags.append("history_max_outlier_high")
-    if m["confidence"] < stats["conf_mean"] - 0.10:
+    if z_conf > k_conf:
         flags.append("history_confidence_drop")
-    if stats["avg_slope_per_run"] > 0.03:
+
+    # Use Mann-Kendall if available for more robust trend detection
+    mk = stats.get("mann_kendall", {})
+    if mk.get("trend") == "increasing" and mk.get("p", 1.0) < 0.05:
+        flags.append("history_drift_uptrend")
+    elif stats["avg_slope_per_run"] > 0.03:
+        # Fallback to slope-based detection
         flags.append("history_drift_uptrend")
 
     return {
         "enabled": True,
         "history_count": int(stats["count"]),
         "flags": flags,
+        "z_scores": {
+            "avg_de": round(z_avg, 3),
+            "p95_de": round(z_p95, 3),
+            "max_de": round(z_max, 3),
+            "confidence": round(z_conf, 3),
+        },
         "stats": stats,
         "current": m,
     }
@@ -864,20 +953,58 @@ def complaint_early_warning(
     conf_drop = max(0.0, conf30_m - conf7_m)
     slope_pos = max(0.0, slope)
 
-    drivers = {
-        "avg_deltae_uplift": 32.0 * uplift_avg,
-        "confidence_drop": 120.0 * conf_drop,
-        "recent_decision_risk": 26.0 * max(0.0, risk7_m),
-        "recent_hold_rate": 22.0 * hold7_r,
-        "recent_complaint_rate": 36.0 * complaint30,
-        "recent_escape_rate": 44.0 * escape30,
-        "avg_trend_slope": 380.0 * slope_pos,
+    # --- Proper normalization: each raw driver to [0, 1] before scaling ---
+    # Saturation points (beyond which the driver is at max contribution)
+    _sat_uplift = 0.5        # 50% uplift saturates
+    _sat_conf_drop = 0.15    # 15-point confidence drop saturates
+    _sat_risk = 0.8          # risk_probability near 0.8 saturates
+    _sat_hold = 0.5          # 50% hold rate saturates
+    _sat_complaint = 0.15    # 15% complaint rate saturates
+    _sat_escape = 0.10       # 10% escape rate saturates
+    _sat_slope = 0.08        # slope of 0.08 ΔE/run saturates
+
+    norm_uplift = min(uplift_avg / _sat_uplift, 1.0)
+    norm_conf_drop = min(conf_drop / _sat_conf_drop, 1.0)
+    norm_risk = min(max(0.0, risk7_m) / _sat_risk, 1.0)
+    norm_hold = min(hold7_r / _sat_hold, 1.0)
+    norm_complaint = min(complaint30 / _sat_complaint, 1.0)
+    norm_escape = min(escape30 / _sat_escape, 1.0)
+    norm_slope = min(slope_pos / _sat_slope, 1.0)
+
+    # Weights (sum to 100 so final score is 0-100)
+    drivers_raw = {
+        "avg_deltae_uplift": norm_uplift,
+        "confidence_drop": norm_conf_drop,
+        "recent_decision_risk": norm_risk,
+        "recent_hold_rate": norm_hold,
+        "recent_complaint_rate": norm_complaint,
+        "recent_escape_rate": norm_escape,
+        "avg_trend_slope": norm_slope,
     }
+    driver_weights = {
+        "avg_deltae_uplift": 16.0,
+        "confidence_drop": 18.0,
+        "recent_decision_risk": 13.0,
+        "recent_hold_rate": 11.0,
+        "recent_complaint_rate": 16.0,
+        "recent_escape_rate": 16.0,
+        "avg_trend_slope": 10.0,
+    }
+    drivers = {k: driver_weights[k] * drivers_raw[k] for k in drivers_raw}
     score = float(np.clip(sum(drivers.values()), 0.0, 100.0))
 
     # Convert to near-term probabilities with conservative floor.
     p7 = float(np.clip(0.01 + 0.58 * (score / 100.0) + 0.35 * complaint30, 0.0, 0.95))
     p30 = float(np.clip(0.03 + 0.72 * (score / 100.0) + 0.45 * complaint30, 0.0, 0.98))
+
+    # --- Confidence intervals on early warning probability ---
+    # Use a simple logit-normal approximation: CI width scales with data sparsity
+    n_data = max(len(runs7), 1)
+    se_factor = 1.96 / math.sqrt(n_data)  # 95% CI
+    p7_lo = float(np.clip(p7 - se_factor * p7 * (1 - p7), 0.0, 1.0))
+    p7_hi = float(np.clip(p7 + se_factor * p7 * (1 - p7), 0.0, 1.0))
+    p30_lo = float(np.clip(p30 - se_factor * p30 * (1 - p30), 0.0, 1.0))
+    p30_hi = float(np.clip(p30 + se_factor * p30 * (1 - p30), 0.0, 1.0))
 
     if score >= 70:
         level = "red"

@@ -228,12 +228,28 @@ def _decide(ctx: dict[str, Any], policy: dict[str, Any]) -> tuple[str, list[str]
     return "RECAPTURE_REQUIRED", reasons
 
 
-def _estimate_cost(decision_code: str, risk_probability: float, policy: dict[str, Any]) -> float:
+def _estimate_cost(
+    decision_code: str,
+    risk_probability: float,
+    policy: dict[str, Any],
+    ctx: dict[str, Any] | None = None,
+) -> float:
     c = policy["cost_model"]
-    manual = _to_float(c.get("manual_review_cost"), 18.0)
-    recapture = _to_float(c.get("recapture_cost"), 10.0)
-    hold = _to_float(c.get("hold_delay_cost"), 120.0)
-    escape = _to_float(c.get("escape_cost"), 350.0)
+    # Per-product overrides: cost_model may contain product-specific costs keyed by
+    # product_code (e.g. "per_product": {"ABC": {"escape_cost": 500}}).
+    product_code = (ctx or {}).get("product_code")
+    per_product = c.get("per_product", {})
+    if isinstance(per_product, dict) and product_code and product_code in per_product:
+        pc = per_product[product_code]
+        manual = _to_float(pc.get("manual_review_cost", c.get("manual_review_cost")), 18.0)
+        recapture = _to_float(pc.get("recapture_cost", c.get("recapture_cost")), 10.0)
+        hold = _to_float(pc.get("hold_delay_cost", c.get("hold_delay_cost")), 120.0)
+        escape = _to_float(pc.get("escape_cost", c.get("escape_cost")), 350.0)
+    else:
+        manual = _to_float(c.get("manual_review_cost"), 18.0)
+        recapture = _to_float(c.get("recapture_cost"), 10.0)
+        hold = _to_float(c.get("hold_delay_cost"), 120.0)
+        escape = _to_float(c.get("escape_cost"), 350.0)
 
     if decision_code == "AUTO_RELEASE":
         return float(risk_probability * escape)
@@ -254,6 +270,7 @@ def _stakeholder_scores(
     w = policy["stakeholder_weights"]
     max_ref_cost = max(1.0, _to_float(policy["cost_model"].get("escape_cost"), 350.0))
 
+    # --- sub-scores are all on 0-100 scale ---
     quality_score = _clamp(
         100.0
         - 45.0 * max(0.0, ctx["avg_ratio"] - 1.0)
@@ -265,13 +282,14 @@ def _stakeholder_scores(
     stability_score = _clamp(100.0 - len(ctx["all_flags"]) * 8.5, 0.0, 100.0)
     confidence_score = _clamp(ctx["confidence"] * 100.0, 0.0, 100.0)
 
-    customer_score = _clamp(
+    # Customer: weighted sum of 0-100 sub-scores (weights sum to 1) -> already 0-100
+    customer_raw = (
         w["customer"]["quality"] * quality_score
         + w["customer"]["stability"] * stability_score
-        + w["customer"]["confidence"] * confidence_score,
-        0.0,
-        100.0,
+        + w["customer"]["confidence"] * confidence_score
     )
+    cust_wsum = sum(w["customer"].values())
+    customer_score = _clamp(customer_raw / max(cust_wsum, 1e-9) * 1.0, 0.0, 100.0) if cust_wsum != 1.0 else _clamp(customer_raw, 0.0, 100.0)
 
     throughput_map = {
         "AUTO_RELEASE": 98.0,
@@ -282,13 +300,15 @@ def _stakeholder_scores(
     throughput_score = throughput_map.get(decision_code, 60.0)
     risk_score = _clamp(100.0 - risk_probability * 100.0, 0.0, 100.0)
     cost_score = _clamp(100.0 - (estimated_cost / max_ref_cost) * 100.0, 0.0, 100.0)
-    boss_score = _clamp(
+
+    # Boss: normalize by weight sum for comparable scale
+    boss_raw = (
         w["boss"]["throughput"] * throughput_score
         + w["boss"]["risk"] * risk_score
-        + w["boss"]["cost"] * cost_score,
-        0.0,
-        100.0,
+        + w["boss"]["cost"] * cost_score
     )
+    boss_wsum = sum(w["boss"].values())
+    boss_score = _clamp(boss_raw / max(boss_wsum, 1e-9) * 1.0, 0.0, 100.0) if boss_wsum != 1.0 else _clamp(boss_raw, 0.0, 100.0)
 
     governance_score = 100.0
     if not ctx.get("mode"):
@@ -299,13 +319,14 @@ def _stakeholder_scores(
         governance_score -= min(30.0, len(ctx["all_flags"]) * 5.0)
     governance_score = _clamp(governance_score, 0.0, 100.0)
 
-    company_score = _clamp(
+    # Company: normalize by weight sum for comparable scale
+    company_raw = (
         w["company"]["governance"] * governance_score
         + w["company"]["customer_risk"] * customer_score
-        + w["company"]["operational_risk"] * risk_score,
-        0.0,
-        100.0,
+        + w["company"]["operational_risk"] * risk_score
     )
+    comp_wsum = sum(w["company"].values())
+    company_score = _clamp(company_raw / max(comp_wsum, 1e-9) * 1.0, 0.0, 100.0) if comp_wsum != 1.0 else _clamp(company_raw, 0.0, 100.0)
 
     return {
         "customer_score": customer_score,
@@ -333,24 +354,72 @@ def _messages(decision_code: str, scores: dict[str, float]) -> dict[str, str]:
     return {"customer": customer, "boss": boss, "company": company}
 
 
+def _decision_confidence(scores: dict[str, float], decision_code: str) -> dict[str, Any]:
+    """Compute decision confidence from agreement between stakeholder perspectives.
+
+    If all three scores are on the same side of a threshold (all high or all low),
+    confidence is high.  Disagreement lowers confidence.
+    """
+    vals = [scores["customer_score"], scores["boss_score"], scores["company_score"]]
+    mean_s = sum(vals) / 3.0
+    spread = max(vals) - min(vals)
+    # Normalise spread: 0 spread -> 1.0 agreement, 100 spread -> 0.0
+    agreement = _clamp(1.0 - spread / 100.0, 0.0, 1.0)
+
+    # Severity-adjusted: riskier decisions need tighter agreement
+    severity_weight = {
+        "AUTO_RELEASE": 0.85,
+        "MANUAL_REVIEW": 0.75,
+        "RECAPTURE_REQUIRED": 0.65,
+        "HOLD_AND_ESCALATE": 0.55,
+    }.get(decision_code, 0.75)
+    confidence = _clamp(agreement * 0.7 + (mean_s / 100.0) * 0.3 * severity_weight + (1 - severity_weight) * 0.3, 0.0, 1.0)
+
+    if agreement >= 0.85:
+        label = "high"
+    elif agreement >= 0.60:
+        label = "medium"
+    else:
+        label = "low"
+
+    return {
+        "value": round(confidence, 4),
+        "label": label,
+        "agreement": round(agreement, 4),
+        "score_spread": round(spread, 2),
+    }
+
+
+# Priority ordering: lower number = more urgent.  HOLD(P0) > RECAPTURE(P1) > MANUAL(P2) > AUTO(P3)
+_PRIORITY_MAP: dict[str, str] = {
+    "HOLD_AND_ESCALATE": "P0",
+    "RECAPTURE_REQUIRED": "P1",
+    "MANUAL_REVIEW": "P2",
+    "AUTO_RELEASE": "P3",
+}
+_PRIORITY_ORDER: dict[str, int] = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
 def build_decision_center(report: dict[str, Any], policy: dict[str, Any], policy_source: str) -> dict[str, Any]:
     ctx = _extract_context(report)
     decision_code, reasons = _decide(ctx, policy)
     risk_probability = _risk_probability(ctx)
-    estimated_cost = _estimate_cost(decision_code, risk_probability, policy)
+    estimated_cost = _estimate_cost(decision_code, risk_probability, policy, ctx)
     scores = _stakeholder_scores(ctx, decision_code, risk_probability, estimated_cost, policy)
     msgs = _messages(decision_code, scores)
+    decision_conf = _decision_confidence(scores, decision_code)
 
     actions = ctx["process_actions"][:]
     if not actions:
         actions = ["建议先采集 2-3 张补充图像，再执行人工复核。"]
 
-    priority = {
-        "AUTO_RELEASE": "P3",
-        "MANUAL_REVIEW": "P2",
-        "RECAPTURE_REQUIRED": "P1",
-        "HOLD_AND_ESCALATE": "P0",
-    }.get(decision_code, "P2")
+    priority = _PRIORITY_MAP.get(decision_code, "P2")
+
+    # Validate priority consistency: if risk is very high but decision is lenient,
+    # escalate the priority (never downgrade).
+    if risk_probability > 0.6 and _PRIORITY_ORDER.get(priority, 2) > _PRIORITY_ORDER["P1"]:
+        priority = "P1"
+        reasons.append("priority_escalated_due_to_high_risk")
 
     return {
         "enabled": True,
@@ -358,6 +427,7 @@ def build_decision_center(report: dict[str, Any], policy: dict[str, Any], policy
         "decision_code": decision_code,
         "priority": priority,
         "decision_reasons": reasons,
+        "decision_confidence": decision_conf,
         "risk_probability": risk_probability,
         "estimated_cost": estimated_cost,
         "stakeholder_scores": scores,

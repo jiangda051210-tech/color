@@ -148,12 +148,43 @@ ILLUMINANTS = {
 
 
 class SpectralReconstructor:
-    """从 RGB 重建 31 通道光谱反射率，检测同色异谱风险"""
+    """从 RGB 重建 31 通道光谱反射率，检测同色异谱风险
+
+    v2 升级:
+      - Wiener 估计: 使用已知基光谱基底进行约束重建
+      - spectral_gamut_check: 标记重建光谱中的负值/物理不合理值
+      - CRI (Ra) 计算用于照明比较评估
+    """
+
+    # Known basis spectra for common materials (simplified 31-channel)
+    # Used as prior in Wiener estimation
+    _BASIS_SPECTRA = {
+        'white': [0.85] * 31,
+        'red': [0.05]*6 + [0.1]*4 + [0.15]*3 + [0.3]*3 + [0.7]*5 + [0.85]*5 + [0.9]*5,
+        'green': [0.05]*3 + [0.1]*3 + [0.3]*4 + [0.7]*5 + [0.5]*4 + [0.2]*5 + [0.1]*4 + [0.05]*3,
+        'blue': [0.3]*3 + [0.6]*4 + [0.7]*4 + [0.4]*4 + [0.2]*4 + [0.1]*4 + [0.05]*4 + [0.03]*4,
+        'yellow': [0.05]*4 + [0.1]*3 + [0.2]*3 + [0.5]*4 + [0.75]*5 + [0.85]*5 + [0.9]*4 + [0.88]*3,
+        'neutral_gray': [0.45] * 31,
+    }
+
+    # CIE test color sample spectral reflectances (simplified, 8 TCS for CRI Ra)
+    # Only first 8 TCS needed for Ra. Using flat approximations per color region.
+    _TCS_APPROX = [
+        [0.3]*5 + [0.4]*5 + [0.5]*5 + [0.45]*5 + [0.35]*6 + [0.3]*5,  # TCS01 (light greyish red)
+        [0.25]*5 + [0.35]*5 + [0.45]*5 + [0.5]*5 + [0.45]*6 + [0.3]*5,  # TCS02 (dark greyish yellow)
+        [0.2]*5 + [0.35]*5 + [0.5]*5 + [0.55]*5 + [0.4]*6 + [0.25]*5,  # TCS03 (strong yellow green)
+        [0.2]*5 + [0.4]*5 + [0.5]*5 + [0.45]*5 + [0.3]*6 + [0.2]*5,  # TCS04 (moderate yellowish green)
+        [0.25]*5 + [0.45]*5 + [0.5]*5 + [0.4]*5 + [0.3]*6 + [0.25]*5,  # TCS05 (light bluish green)
+        [0.3]*5 + [0.5]*5 + [0.45]*5 + [0.35]*5 + [0.25]*6 + [0.2]*5,  # TCS06 (light blue)
+        [0.35]*5 + [0.4]*5 + [0.35]*5 + [0.3]*5 + [0.35]*6 + [0.45]*5,  # TCS07 (light violet)
+        [0.35]*5 + [0.35]*5 + [0.3]*5 + [0.35]*5 + [0.4]*6 + [0.5]*5,  # TCS08 (light reddish purple)
+    ]
 
     def __init__(self):
         # 默认 Wiener 矩阵（31×3，基于 Munsell 训练集近似）
         # 生产环境应通过 calibrate() 用实拍 ColorChecker 替换
         self._W = self._default_wiener()
+        self._use_wiener_basis = True
 
     def _default_wiener(self):
         """基于经验的默认重建矩阵"""
@@ -184,16 +215,118 @@ class SpectralReconstructor:
         return {'status': 'ok', 'patches_used': n}
 
     def reconstruct(self, r, g, b):
-        """RGB → 31 通道光谱反射率"""
+        """RGB → 31 通道光谱反射率 (Wiener estimation with basis spectra constraint)"""
         rgb = [r / 255.0, g / 255.0, b / 255.0]
         spec = []
         for i in range(31):
             val = sum(self._W[i][j] * rgb[j] for j in range(3))
             spec.append(max(0.0, min(1.0, val)))
+
+        if self._use_wiener_basis:
+            # Refine using basis spectra: find best linear combination
+            # that matches the initial reconstruction while staying physical
+            spec = self._wiener_refine(spec, rgb)
+
         return spec
 
-    def spectral_to_lab(self, reflectance, illuminant_name='D65'):
-        spd = ILLUMINANTS.get(illuminant_name, _D65_SPD)
+    def _wiener_refine(self, initial_spec, rgb):
+        """Wiener estimation refinement using known basis spectra.
+        Projects the initial reconstruction onto the span of known basis spectra
+        to produce a more physically plausible result.
+        """
+        bases = list(self._BASIS_SPECTRA.values())
+        n_bases = len(bases)
+
+        # Find weights that best approximate initial_spec as weighted sum of bases
+        # Using simple least-squares: w = (B^T B + lambda I)^-1 B^T s
+        # Simplified: compute weight for each basis as dot(basis, spec) / dot(basis, basis)
+        weights = []
+        for b in bases:
+            dot_bs = sum(b[i] * initial_spec[i] for i in range(31))
+            dot_bb = sum(b[i] * b[i] for i in range(31))
+            weights.append(dot_bs / max(dot_bb, 1e-8))
+
+        # Normalize weights to sum to 1 (convex combination for physical plausibility)
+        w_sum = sum(max(0, w) for w in weights)
+        if w_sum < 1e-8:
+            return initial_spec
+
+        weights = [max(0, w) / w_sum for w in weights]
+
+        # Reconstruct from basis
+        refined = []
+        for i in range(31):
+            val = sum(weights[k] * bases[k][i] for k in range(n_bases))
+            # Blend: 70% refined (physical), 30% original (preserves detail)
+            blended = 0.7 * val + 0.3 * initial_spec[i]
+            refined.append(max(0.0, min(1.0, blended)))
+
+        return refined
+
+    def spectral_gamut_check(self, reflectance):
+        """Flag if reconstructed spectrum has negative or out-of-range values.
+        Returns gamut status and problematic wavelengths.
+        """
+        issues = []
+        for i, val in enumerate(reflectance):
+            wl = 400 + i * 10
+            if val < 0:
+                issues.append({'wavelength': wl, 'value': round(val, 4), 'issue': 'negative'})
+            elif val > 1.0:
+                issues.append({'wavelength': wl, 'value': round(val, 4), 'issue': 'exceeds_unity'})
+
+        # Check for sharp discontinuities (unphysical)
+        discontinuities = []
+        for i in range(1, len(reflectance)):
+            diff = abs(reflectance[i] - reflectance[i-1])
+            if diff > 0.3:
+                discontinuities.append({
+                    'wavelength': 400 + i * 10,
+                    'jump': round(diff, 4),
+                })
+
+        in_gamut = len(issues) == 0
+        return {
+            'in_gamut': in_gamut,
+            'issues': issues,
+            'discontinuities': discontinuities,
+            'smoothness': round(1.0 - min(1.0, len(discontinuities) / 5.0), 3),
+            'message': '光谱重建物理合理' if in_gamut else f'发现{len(issues)}个超范围波长点',
+        }
+
+    def compute_cri_ra(self, test_illuminant_spd, reference_illuminant_spd=None):
+        """Compute Color Rendering Index (CRI Ra) for a test illuminant.
+        Compares color appearance of 8 test color samples under test vs reference illuminant.
+        If reference is not provided, D65 is used as reference.
+        """
+        if reference_illuminant_spd is None:
+            reference_illuminant_spd = _D65_SPD
+
+        ri_values = []
+        for tcs in self._TCS_APPROX:
+            # Compute Lab under test illuminant
+            lab_test = self.spectral_to_lab(tcs, '_custom_test')
+            lab_ref = self.spectral_to_lab(tcs, '_custom_ref')
+
+            # Override with direct computation
+            lab_test = self._spectral_to_lab_direct(tcs, test_illuminant_spd)
+            lab_ref = self._spectral_to_lab_direct(tcs, reference_illuminant_spd)
+
+            de = delta_e_2000(lab_test, lab_ref)
+            # CRI Ri = 100 - 4.6 * dE (CIE 1995 formula using dE*ab, approximated with dE2000)
+            ri = max(0, 100 - 4.6 * de['total'])
+            ri_values.append(ri)
+
+        ra = sum(ri_values) / len(ri_values) if ri_values else 0
+        return {
+            'Ra': round(ra, 1),
+            'Ri_values': [round(r, 1) for r in ri_values],
+            'min_Ri': round(min(ri_values), 1) if ri_values else 0,
+            'grade': 'excellent' if ra >= 90 else 'good' if ra >= 80 else 'moderate' if ra >= 60 else 'poor',
+        }
+
+    def _spectral_to_lab_direct(self, reflectance, spd):
+        """Compute Lab from reflectance and arbitrary SPD (not from ILLUMINANTS dict)."""
         X, Y, Z = 0.0, 0.0, 0.0
         k_denom = sum(_CMF_Y[i] * spd[i] for i in range(31))
         k = 100.0 / k_denom if k_denom > 0 else 1.0
@@ -205,10 +338,19 @@ class SpectralReconstructor:
         X *= k; Y *= k; Z *= k
         return xyz_to_lab(X / 100, Y / 100, Z / 100)
 
+    def spectral_to_lab(self, reflectance, illuminant_name='D65'):
+        spd = ILLUMINANTS.get(illuminant_name, _D65_SPD)
+        return self._spectral_to_lab_direct(reflectance, spd)
+
     def metamerism_index(self, rgb_sample, rgb_film):
-        """计算同色异谱指数"""
+        """计算同色异谱指数 + CRI for each illuminant"""
         spec_s = self.reconstruct(*rgb_sample)
         spec_f = self.reconstruct(*rgb_film)
+
+        # Gamut check on reconstructed spectra
+        gamut_sample = self.spectral_gamut_check(spec_s)
+        gamut_film = self.spectral_gamut_check(spec_f)
+
         results = {}
         for name in ILLUMINANTS:
             lab_s = self.spectral_to_lab(spec_s, name)
@@ -222,6 +364,14 @@ class SpectralReconstructor:
         if mi < 0.5: risk = 'low'
         elif mi < 1.5: risk = 'medium'
         else: risk = 'high'
+
+        # Compute CRI for each illuminant against D65
+        cri_info = {}
+        for name, spd in ILLUMINANTS.items():
+            if name != 'D65':
+                cri = self.compute_cri_ra(spd, _D65_SPD)
+                cri_info[name] = cri['Ra']
+
         return {
             'metamerism_index': round(mi, 3),
             'risk_level': risk,
@@ -230,6 +380,11 @@ class SpectralReconstructor:
             'worst_deltaE': round(results[worst]['deltaE'], 3),
             'best_illuminant': best,
             'best_deltaE': round(results[best]['deltaE'], 3),
+            'spectral_gamut': {
+                'sample_in_gamut': gamut_sample['in_gamut'],
+                'film_in_gamut': gamut_film['in_gamut'],
+            },
+            'illuminant_cri': cri_info,
             'recommendation': (
                 f"⚠ {worst} 光源下 ΔE={results[worst]['deltaE']:.2f}，"
                 f"比最佳光源 {best} 高 {mi:.2f}，存在同色异谱风险"
@@ -336,8 +491,14 @@ class TextureAwareDeltaE:
 
 class DriftPredictor:
     """
-    在线贝叶斯线性回归 + CUSUM 变点检测
+    在线贝叶斯线性回归 + 指数平滑 + Page's CUSUM 变点检测
     预测 "还有多少批会飘出规格" (Time-to-Breach)
+
+    v2 升级:
+      - 指数平滑预测作为非线性替代
+      - Page's CUSUM 自适应阈值 (基于前半段估计sigma)
+      - trend_confidence: 斜率估计置信度 (后验标准差)
+      - seasonal_check: 残差自相关检测周期性漂移
     """
 
     def __init__(self, threshold: float = 3.0, window: int = 60):
@@ -348,6 +509,11 @@ class DriftPredictor:
         self._mu = [0.0, 0.0]       # [intercept, slope]
         self._P = [[10.0, 0.0], [0.0, 10.0]]  # 协方差
         self._noise_var = 0.3
+        # 指数平滑状态
+        self._es_level = None       # 平滑水平
+        self._es_trend = 0.0        # 平滑趋势
+        self._es_alpha = 0.3        # 水平平滑系数
+        self._es_beta = 0.1         # 趋势平滑系数
 
     def update(self, batch_index: int, delta_e: float, extra: dict = None):
         """每批次检测后调用"""
@@ -360,6 +526,8 @@ class DriftPredictor:
         # Bayesian update
         x = [1.0, float(batch_index)]
         self._bayesian_update(x, delta_e)
+        # Exponential smoothing (Holt's double) update
+        self._es_update(delta_e)
 
     def _bayesian_update(self, x, y):
         """递推贝叶斯线性回归"""
@@ -376,6 +544,120 @@ class DriftPredictor:
             for j in range(2):
                 self._P[i][j] -= K[i] * Px[j]
 
+    def _es_update(self, value):
+        """Holt's double exponential smoothing update"""
+        if self._es_level is None:
+            self._es_level = value
+            self._es_trend = 0.0
+            return
+        prev_level = self._es_level
+        self._es_level = self._es_alpha * value + (1 - self._es_alpha) * (prev_level + self._es_trend)
+        self._es_trend = self._es_beta * (self._es_level - prev_level) + (1 - self._es_beta) * self._es_trend
+
+    def _es_forecast(self, steps_ahead: int) -> float:
+        """Exponential smoothing forecast"""
+        if self._es_level is None:
+            return 0.0
+        return self._es_level + self._es_trend * steps_ahead
+
+    def _is_nonlinear(self) -> bool:
+        """Heuristic: check if data is better fit by exponential smoothing than linear"""
+        if len(self.history) < 10:
+            return False
+        values = [h['de'] for h in self.history[-self.window:]]
+        n = len(values)
+        # Compute linear residual variance
+        intercept, slope = self._mu[0], self._mu[1]
+        indices = [h['index'] for h in self.history[-self.window:]]
+        linear_residuals = [v - (intercept + slope * idx) for v, idx in zip(values, indices)]
+        linear_var = sum(r ** 2 for r in linear_residuals) / n
+
+        # Compute exponential smoothing residual variance (one-step-ahead)
+        level = values[0]
+        trend = 0.0
+        es_residuals = []
+        for i in range(1, n):
+            forecast = level + trend
+            es_residuals.append(values[i] - forecast)
+            prev_level = level
+            level = self._es_alpha * values[i] + (1 - self._es_alpha) * (prev_level + trend)
+            trend = self._es_beta * (level - prev_level) + (1 - self._es_beta) * trend
+        es_var = sum(r ** 2 for r in es_residuals) / max(len(es_residuals), 1)
+
+        return es_var < linear_var * 0.85  # ES is significantly better
+
+    def trend_confidence(self) -> dict:
+        """How confident is the slope estimate? Uses posterior std of slope."""
+        slope = self._mu[1]
+        slope_std = math.sqrt(max(self._P[1][1], 1e-10))
+        # z-score: how many sigma is slope away from zero
+        z = abs(slope) / max(slope_std, 1e-10)
+        # Approximate p-value using normal CDF complement
+        # P(|Z| > z) ~ 2 * erfc(z / sqrt(2)) / 2
+        p_value = math.erfc(z / math.sqrt(2))
+        # Confidence that slope is non-zero
+        confidence = 1.0 - p_value
+        return {
+            'slope': round(slope, 6),
+            'slope_std': round(slope_std, 6),
+            'z_score': round(z, 3),
+            'confidence_nonzero': round(confidence, 4),
+            'significant_at_95': confidence > 0.95,
+            'interpretation': (
+                '斜率估计显著(>95%置信度)，趋势可信' if confidence > 0.95
+                else '斜率估计不够显著，趋势方向不确定' if confidence > 0.80
+                else '数据波动大，无法确定趋势方向'
+            ),
+        }
+
+    def seasonal_check(self) -> dict:
+        """Detect if drift is periodic using autocorrelation on residuals."""
+        if len(self.history) < 20:
+            return {'periodic': False, 'message': '数据不足(需>=20批)'}
+
+        values = [h['de'] for h in self.history[-self.window:]]
+        indices = [h['index'] for h in self.history[-self.window:]]
+        n = len(values)
+
+        # Compute residuals from linear fit
+        intercept, slope = self._mu[0], self._mu[1]
+        residuals = [v - (intercept + slope * idx) for v, idx in zip(values, indices)]
+        mean_r = sum(residuals) / n
+        residuals = [r - mean_r for r in residuals]
+
+        # Compute autocorrelation for lags 2..n//3
+        var_r = sum(r ** 2 for r in residuals) / n
+        if var_r < 1e-10:
+            return {'periodic': False, 'message': '残差方差过小，无法检测'}
+
+        max_lag = max(3, n // 3)
+        acf = []
+        best_lag = 0
+        best_acf = 0.0
+        for lag in range(2, max_lag):
+            cov = sum(residuals[i] * residuals[i - lag] for i in range(lag, n)) / n
+            ac = cov / var_r
+            acf.append({'lag': lag, 'autocorrelation': round(ac, 4)})
+            if ac > best_acf:
+                best_acf = ac
+                best_lag = lag
+
+        # Significance threshold: 2/sqrt(n) for approximate 95% CI
+        significance_threshold = 2.0 / math.sqrt(n)
+        periodic = best_acf > significance_threshold and best_lag >= 2
+
+        return {
+            'periodic': periodic,
+            'dominant_period': best_lag if periodic else None,
+            'peak_autocorrelation': round(best_acf, 4),
+            'significance_threshold': round(significance_threshold, 4),
+            'acf_values': acf[:10],  # first 10 lags
+            'message': (
+                f'检测到周期性漂移，周期约{best_lag}批，自相关={best_acf:.3f}'
+                if periodic else '未检测到显著周期性'
+            ),
+        }
+
     def predict(self) -> dict:
         """预测何时突破阈值"""
         if len(self.history) < 5:
@@ -385,28 +667,56 @@ class DriftPredictor:
         current_idx = self.history[-1]['index']
         current_de = self.history[-1]['de']
 
+        # Choose prediction method: exponential smoothing if data is non-linear
+        use_es = self._is_nonlinear()
+
         # 趋势方向
-        if slope <= 0.001:
-            trend = 'stable' if abs(slope) < 0.001 else 'improving'
+        effective_slope = slope
+        if use_es:
+            effective_slope = self._es_trend
+
+        if effective_slope <= 0.001:
+            trend = 'stable' if abs(effective_slope) < 0.001 else 'improving'
             return {
                 'breach_predicted': False,
                 'trend': trend,
-                'slope_per_batch': round(slope, 5),
+                'slope_per_batch': round(effective_slope, 5),
                 'current_deltaE': round(current_de, 3),
+                'prediction_method': 'exponential_smoothing' if use_es else 'bayesian_linear',
+                'trend_confidence': self.trend_confidence(),
                 'message': '色差趋势平稳' if trend == 'stable' else '色差正在改善',
             }
 
         # 预测突破点
-        predicted_de_now = intercept + slope * current_idx
-        if predicted_de_now >= self.threshold:
+        if use_es:
+            predicted_de_now = self._es_forecast(0)
+            # Find steps to breach via ES forecast
             batches_left = 0
+            for step in range(1, 1000):
+                if self._es_forecast(step) >= self.threshold:
+                    batches_left = step
+                    break
+            else:
+                batches_left = 999
         else:
-            batches_left = (self.threshold - predicted_de_now) / slope
+            predicted_de_now = intercept + slope * current_idx
+            if predicted_de_now >= self.threshold:
+                batches_left = 0
+            else:
+                batches_left = (self.threshold - predicted_de_now) / slope
 
         # 不确定性
         slope_std = math.sqrt(max(self._P[1][1], 1e-8))
-        batches_upper = (self.threshold - predicted_de_now) / max(slope - 2*slope_std, 0.0005) if slope > 2*slope_std else 999
-        batches_lower = (self.threshold - predicted_de_now) / (slope + 2*slope_std) if slope + 2*slope_std > 0 else 0
+        if not use_es:
+            batches_upper = (self.threshold - predicted_de_now) / max(slope - 2*slope_std, 0.0005) if slope > 2*slope_std else 999
+            batches_lower = (self.threshold - predicted_de_now) / (slope + 2*slope_std) if slope + 2*slope_std > 0 else 0
+        else:
+            # For ES, use +-20% uncertainty on trend
+            es_trend_low = self._es_trend * 0.8
+            es_trend_high = self._es_trend * 1.2
+            gap = max(self.threshold - predicted_de_now, 0)
+            batches_lower = gap / max(es_trend_high, 0.0005) if es_trend_high > 0 else 0
+            batches_upper = gap / max(es_trend_low, 0.0005) if es_trend_low > 0 else 999
 
         bl = max(0, int(batches_lower))
         bu = min(999, int(batches_upper))
@@ -417,48 +727,88 @@ class DriftPredictor:
         # 变点检测
         cp = self.detect_changepoint()
 
+        # Forecast next 5 using chosen method
+        if use_es:
+            forecast_5 = [round(self._es_forecast(i), 3) for i in range(1, 6)]
+        else:
+            forecast_5 = [round(predicted_de_now + slope * i, 3) for i in range(1, 6)]
+
         return {
             'breach_predicted': True,
             'batches_remaining': bm,
             'confidence_interval_90': [bl, bu],
-            'slope_per_batch': round(slope, 5),
+            'slope_per_batch': round(effective_slope, 5),
             'current_deltaE': round(current_de, 3),
             'predicted_deltaE_now': round(predicted_de_now, 3),
             'threshold': self.threshold,
             'urgency': urgency,
+            'prediction_method': 'exponential_smoothing' if use_es else 'bayesian_linear',
+            'trend_confidence': self.trend_confidence(),
             'changepoint': cp,
-            'recommendation': self._recommend(bm, slope, urgency),
-            'forecast_next_5': [
-                round(predicted_de_now + slope * i, 3) for i in range(1, 6)
-            ],
+            'seasonal': self.seasonal_check(),
+            'recommendation': self._recommend(bm, effective_slope, urgency),
+            'forecast_next_5': forecast_5,
         }
 
     def detect_changepoint(self) -> dict:
-        """CUSUM 变点检测"""
+        """Page's CUSUM 变点检测 with adaptive threshold based on estimated sigma from first half"""
         if len(self.history) < 10:
             return {'detected': False}
         values = [h['de'] for h in self.history[-self.window:]]
         half = len(values) // 2
         baseline = sum(values[:half]) / half
+
+        # Estimate sigma from the first half for adaptive threshold
+        if half > 1:
+            first_half_var = sum((v - baseline) ** 2 for v in values[:half]) / (half - 1)
+            sigma_est = math.sqrt(max(first_half_var, 1e-8))
+        else:
+            sigma_est = 0.3  # fallback
+
+        # Page's CUSUM parameters scaled by estimated sigma
+        drift_allowance = 0.5 * sigma_est  # k = 0.5 sigma (standard choice)
+        threshold_h = 5.0 * sigma_est      # h = 5 sigma (ARL0 ~ 465)
+
         cusum_pos, cusum_neg = 0.0, 0.0
-        drift_allowance = 0.3
-        threshold_h = 4.5
+        changepoint_pos = None
+        changepoint_neg = None
+        max_cusum_pos = 0.0
+        max_cusum_neg = 0.0
+
         for i, v in enumerate(values):
             cusum_pos = max(0, cusum_pos + v - baseline - drift_allowance)
             cusum_neg = max(0, cusum_neg - v + baseline - drift_allowance)
+
+            if cusum_pos > max_cusum_pos:
+                max_cusum_pos = cusum_pos
+            if cusum_neg > max_cusum_neg:
+                max_cusum_neg = cusum_neg
+
             if cusum_pos > threshold_h:
                 return {
                     'detected': True, 'type': 'upward_shift',
                     'at_batch': self.history[-(len(values)-i)]['index'],
-                    'message': f'检测到色差上升突变(第{i}点)，建议排查工艺参数',
+                    'sigma_est': round(sigma_est, 4),
+                    'cusum_value': round(cusum_pos, 4),
+                    'threshold_h': round(threshold_h, 4),
+                    'message': f'检测到色差上升突变(第{i}点，CUSUM={cusum_pos:.2f}>h={threshold_h:.2f})，建议排查工艺参数',
                 }
             if cusum_neg > threshold_h:
                 return {
                     'detected': True, 'type': 'downward_shift',
                     'at_batch': self.history[-(len(values)-i)]['index'],
-                    'message': f'检测到色差下降突变(第{i}点)，可能是调参生效',
+                    'sigma_est': round(sigma_est, 4),
+                    'cusum_value': round(cusum_neg, 4),
+                    'threshold_h': round(threshold_h, 4),
+                    'message': f'检测到色差下降突变(第{i}点，CUSUM={cusum_neg:.2f}>h={threshold_h:.2f})，可能是调参生效',
                 }
-        return {'detected': False}
+        return {
+            'detected': False,
+            'sigma_est': round(sigma_est, 4),
+            'max_cusum_pos': round(max_cusum_pos, 4),
+            'max_cusum_neg': round(max_cusum_neg, 4),
+            'threshold_h': round(threshold_h, 4),
+        }
 
     def _recommend(self, batches, slope, urgency):
         if urgency == 'critical':
@@ -546,11 +896,65 @@ class ColorAgingPredictor:
         'outdoor_exposed': {'name': '室外直晒', 'uv_factor': 8.0, 'humidity_factor': 2.0, 'temp_factor': 2.0},
     }
 
+    # Material UV absorption factors (dimensionless, relative to PVC baseline)
+    _UV_ABSORPTION = {
+        'pvc_film': 1.0,
+        'pet_film': 0.65,
+        'melamine': 0.35,
+        'hpl': 0.25,
+        'uv_coating': 0.80,
+    }
+
+    # Material-specific Lab component fade rates (relative multipliers for differential fading)
+    _COMPONENT_FADE_RATES = {
+        'pvc_film': {'L': 1.0, 'a': 0.8, 'b': 1.3},    # b fades fastest (yellowing)
+        'pet_film': {'L': 0.9, 'a': 0.6, 'b': 1.1},
+        'melamine': {'L': 0.7, 'a': 0.4, 'b': 0.9},
+        'hpl': {'L': 0.5, 'a': 0.3, 'b': 0.6},
+        'uv_coating': {'L': 0.95, 'a': 0.75, 'b': 1.2},
+    }
+
+    # Arrhenius parameters
+    _ARRHENIUS_EA = 50000.0    # Activation energy in J/mol (typical for polymer degradation)
+    _ARRHENIUS_R = 8.314       # Gas constant J/(mol*K)
+    _ARRHENIUS_T_REF = 298.15  # Reference temperature 25C in Kelvin
+
+    def _arrhenius_factor(self, temperature_c: float) -> float:
+        """Arrhenius acceleration factor for temperature.
+        AF = exp(Ea/R * (1/T_ref - 1/T))
+        """
+        T = temperature_c + 273.15
+        T_ref = self._ARRHENIUS_T_REF
+        exponent = (self._ARRHENIUS_EA / self._ARRHENIUS_R) * (1.0 / T_ref - 1.0 / T)
+        # Clamp to avoid overflow
+        exponent = max(-10.0, min(10.0, exponent))
+        return math.exp(exponent)
+
+    def _uv_dose(self, irradiance_w_m2: float, hours_per_year: float,
+                 material: str, years: float) -> float:
+        """Calculate cumulative UV dose in kJ/m2.
+        UV_dose = irradiance * hours * material_absorption_factor * years
+        """
+        absorption = self._UV_ABSORPTION.get(material, 1.0)
+        # Convert W/m2 * hours to kJ/m2 (W = J/s, 1 hour = 3600s, /1000 for kJ)
+        dose = irradiance_w_m2 * hours_per_year * 3.6 * absorption * years
+        return dose
+
     def predict(self, lab_current: dict, material: str = 'pvc_film',
                 environment: str = 'indoor_normal',
-                years: list[int] = None) -> dict:
+                years: list[int] = None,
+                temperature_c: float = 25.0,
+                uv_irradiance_w_m2: float = 0.0,
+                uv_hours_per_year: float = 0.0,
+                monte_carlo_runs: int = 0) -> dict:
         """
         预测未来各时间点的颜色和色差
+
+        v2 升级:
+          - Arrhenius 温度加速因子
+          - UV dose 计算
+          - 按材质不同 Lab 分量差异化衰减
+          - Monte Carlo 置信区间 (monte_carlo_runs > 0 时启用)
         """
         if years is None:
             years = [1, 3, 5, 10, 15]
@@ -558,11 +962,16 @@ class ColorAgingPredictor:
         profile = self.AGING_PROFILES.get(material, self.AGING_PROFILES['pvc_film'])
         env = self.ENVIRONMENTS.get(environment, self.ENVIRONMENTS['indoor_normal'])
 
+        # Arrhenius acceleration factor
+        arrhenius_af = self._arrhenius_factor(temperature_c)
+
         predictions = []
         for yr in years:
-            aged_lab = self._age_lab(lab_current, profile, env, yr)
+            aged_lab = self._age_lab(lab_current, profile, env, yr,
+                                     material=material, arrhenius_af=arrhenius_af)
             de = delta_e_2000(lab_current, aged_lab)
-            predictions.append({
+
+            pred_entry = {
                 'year': yr,
                 'predicted_lab': {k: round(v, 2) for k, v in aged_lab.items()},
                 'deltaE_from_original': round(de['total'], 3),
@@ -571,28 +980,77 @@ class ColorAgingPredictor:
                 'db': round(aged_lab['b'] - lab_current['b'], 2),
                 'primary_change': self._primary_change(aged_lab, lab_current),
                 'visual_grade': self._visual_grade(de['total']),
-            })
+            }
+
+            # UV dose info
+            if uv_irradiance_w_m2 > 0 and uv_hours_per_year > 0:
+                pred_entry['uv_dose_kJ_m2'] = round(
+                    self._uv_dose(uv_irradiance_w_m2, uv_hours_per_year, material, yr), 1)
+
+            # Arrhenius info
+            if abs(temperature_c - 25.0) > 0.5:
+                pred_entry['arrhenius_factor'] = round(arrhenius_af, 3)
+
+            # Monte Carlo confidence intervals
+            if monte_carlo_runs > 0:
+                ci = self._monte_carlo_ci(lab_current, profile, env, yr,
+                                           material, arrhenius_af, monte_carlo_runs)
+                pred_entry['confidence_interval_95'] = ci
+
+            predictions.append(pred_entry)
 
         # 保修风险评估
         warranty_risk = self._warranty_risk(predictions)
 
-        # 样板 vs 彩膜的差异老化预测
         return {
             'material': profile['name'],
             'environment': env['name'],
             'current_lab': lab_current,
+            'arrhenius_acceleration': round(arrhenius_af, 3),
+            'temperature_c': temperature_c,
             'predictions': predictions,
             'warranty_risk': warranty_risk,
             'recommendation': self._recommend(predictions, warranty_risk),
         }
 
+    def _monte_carlo_ci(self, lab, profile, env, years, material, arrhenius_af, n_runs):
+        """Monte Carlo confidence interval with +/-10% parameter perturbation."""
+        import random as _rng
+        de_samples = []
+        for _ in range(n_runs):
+            # Perturb profile parameters by +/-10%
+            perturbed = {}
+            for k, v in profile.items():
+                if isinstance(v, (int, float)):
+                    perturbed[k] = v * (1.0 + (_rng.random() - 0.5) * 0.2)
+                else:
+                    perturbed[k] = v
+            # Perturb Arrhenius factor by +/-10%
+            perturbed_af = arrhenius_af * (1.0 + (_rng.random() - 0.5) * 0.2)
+            aged = self._age_lab(lab, perturbed, env, years,
+                                  material=material, arrhenius_af=perturbed_af)
+            de = delta_e_2000(lab, aged)
+            de_samples.append(de['total'])
+        de_samples.sort()
+        lo_idx = max(0, int(n_runs * 0.025))
+        hi_idx = min(n_runs - 1, int(n_runs * 0.975))
+        return {
+            'deltaE_low_95': round(de_samples[lo_idx], 3),
+            'deltaE_high_95': round(de_samples[hi_idx], 3),
+            'deltaE_median': round(de_samples[n_runs // 2], 3),
+            'n_runs': n_runs,
+        }
+
     def predict_differential_aging(self, lab_sample: dict, lab_film: dict,
                                     material_sample: str, material_film: str,
                                     environment: str = 'indoor_normal',
-                                    years: list[int] = None) -> dict:
+                                    years: list[int] = None,
+                                    temperature_c: float = 25.0) -> dict:
         """
         ★ 核心创新: 预测样板和彩膜在老化后的色差变化
         可能出厂时ΔE=1.5合格，但5年后因为老化速率不同变成ΔE=4.0
+
+        v2: Different Lab components fade at different rates based on material type
         """
         if years is None:
             years = [0, 1, 3, 5, 10]
@@ -600,14 +1058,17 @@ class ColorAgingPredictor:
         prof_s = self.AGING_PROFILES.get(material_sample, self.AGING_PROFILES['pvc_film'])
         prof_f = self.AGING_PROFILES.get(material_film, self.AGING_PROFILES['pvc_film'])
         env = self.ENVIRONMENTS.get(environment, self.ENVIRONMENTS['indoor_normal'])
+        arrhenius_af = self._arrhenius_factor(temperature_c)
 
         timeline = []
         for yr in years:
             if yr == 0:
                 aged_s, aged_f = lab_sample, lab_film
             else:
-                aged_s = self._age_lab(lab_sample, prof_s, env, yr)
-                aged_f = self._age_lab(lab_film, prof_f, env, yr)
+                aged_s = self._age_lab(lab_sample, prof_s, env, yr,
+                                        material=material_sample, arrhenius_af=arrhenius_af)
+                aged_f = self._age_lab(lab_film, prof_f, env, yr,
+                                        material=material_film, arrhenius_af=arrhenius_af)
             de = delta_e_2000(aged_s, aged_f)
             timeline.append({
                 'year': yr,
@@ -639,8 +1100,11 @@ class ColorAgingPredictor:
             ),
         }
 
-    def _age_lab(self, lab, profile, env, years):
-        """模拟Lab色值随时间的变化"""
+    def _age_lab(self, lab, profile, env, years, material='pvc_film', arrhenius_af=1.0):
+        """模拟Lab色值随时间的变化
+
+        v2: Arrhenius acceleration, material-specific component fade rates
+        """
         # 非线性衰减: 前几年变化快，后面趋缓 (对数模型)
         t_eff = math.log(1 + years) / math.log(2) * years  # 有效时间
 
@@ -648,9 +1112,15 @@ class ColorAgingPredictor:
         hum_mult = profile['humidity_sensitivity'] * env['humidity_factor']
         env_mult = (uv_mult + hum_mult) / 2 * env['temp_factor']
 
-        dL = profile['dL_per_year'] * t_eff * env_mult
-        da = profile['da_per_year'] * t_eff * env_mult
-        db = profile['db_per_year'] * t_eff * uv_mult  # 黄变主要受UV影响
+        # Apply Arrhenius acceleration
+        env_mult *= arrhenius_af
+
+        # Material-specific component fade rates
+        fade_rates = self._COMPONENT_FADE_RATES.get(material, {'L': 1.0, 'a': 1.0, 'b': 1.0})
+
+        dL = profile['dL_per_year'] * t_eff * env_mult * fade_rates['L']
+        da = profile['da_per_year'] * t_eff * env_mult * fade_rates['a']
+        db = profile['db_per_year'] * t_eff * uv_mult * arrhenius_af * fade_rates['b']  # 黄变主要受UV影响
 
         # 彩度衰减
         C_current = math.sqrt(lab['a']**2 + lab['b']**2)

@@ -420,15 +420,21 @@ def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
     return filtered
 
 
-def compute_lbp_texture(image_bgr: np.ndarray, mask: np.ndarray | None = None) -> dict:
+def compute_lbp_texture(image_bgr: np.ndarray, mask: np.ndarray | None = None,
+                        rotation_invariant: bool = False) -> dict:
     """
     Compute LBP (Local Binary Pattern) texture descriptor for material identification.
+
+    Multi-radius computation (R=1 and R=2) for richer descriptor.
+    Optional rotation-invariant variant.
 
     Returns dict with:
       - complexity: float 0-1, how textured the surface is
       - uniformity: float 0-1, how uniform the texture pattern is
       - profile_hint: suggested material profile based on texture
-      - histogram: LBP histogram (58 uniform bins + 1 non-uniform)
+      - histogram: combined LBP histogram from R=1 and R=2
+      - complexity_r1: complexity from radius=1 only
+      - complexity_r2: complexity from radius=2 only
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
@@ -443,20 +449,22 @@ def compute_lbp_texture(image_bgr: np.ndarray, mask: np.ndarray | None = None) -
 
     gh, gw = gray.shape
 
-    # Compute LBP with radius=1, 8 neighbors (uniform pattern)
-    lbp = np.zeros((gh - 2, gw - 2), dtype=np.uint8)
-    for dy, dx, bit in [(-1,-1,0),(-1,0,1),(-1,1,2),(0,1,3),(1,1,4),(1,0,5),(1,-1,6),(0,-1,7)]:
-        neighbor = gray[1+dy:gh-1+dy, 1+dx:gw-1+dx]
-        center = gray[1:gh-1, 1:gw-1]
-        lbp |= ((neighbor >= center).astype(np.uint8) << bit)
-
     # Count transitions for uniform pattern classification
     # A pattern is "uniform" if it has <= 2 bitwise transitions (0->1 or 1->0)
     def count_transitions(val):
         bits = [(val >> i) & 1 for i in range(8)]
         return sum(bits[i] != bits[(i+1) % 8] for i in range(8))
 
-    # Build uniform LBP lookup table
+    def rotation_invariant_label(val):
+        """Minimum circular rotation of the 8-bit pattern."""
+        min_val = val
+        rotated = val
+        for _ in range(7):
+            rotated = ((rotated << 1) | (rotated >> 7)) & 0xFF
+            min_val = min(min_val, rotated)
+        return min_val
+
+    # Build uniform LBP lookup table (shared for both radii)
     uniform_table = np.zeros(256, dtype=np.uint8)
     uniform_count = 0
     for i in range(256):
@@ -467,30 +475,92 @@ def compute_lbp_texture(image_bgr: np.ndarray, mask: np.ndarray | None = None) -
             uniform_table[i] = uniform_count  # non-uniform bin
     n_bins = uniform_count + 1  # 58 uniform + 1 non-uniform = 59
 
-    # Apply uniform mapping
-    lbp_uniform = uniform_table[lbp]
+    # Build rotation-invariant lookup table if requested
+    if rotation_invariant:
+        ri_table = np.zeros(256, dtype=np.uint8)
+        ri_labels = {}
+        ri_count = 0
+        for i in range(256):
+            ri_val = rotation_invariant_label(i)
+            if ri_val not in ri_labels:
+                ri_labels[ri_val] = ri_count
+                ri_count += 1
+            ri_table[i] = ri_labels[ri_val]
+        n_ri_bins = ri_count
 
-    # Compute histogram (with mask if provided)
-    if mask is not None:
-        m = mask[1:gh-1, 1:gw-1]
-        hist_vals = lbp_uniform[m]
+    def _compute_lbp_radius(gray_img, radius):
+        """Compute LBP for a given radius using 8 neighbors."""
+        ih, iw = gray_img.shape
+        border = radius
+        if ih <= 2 * border + 1 or iw <= 2 * border + 1:
+            return None, None, None
+        # 8 neighbors at given radius (approximate circular sampling)
+        # Offsets for 8 neighbors at distance=radius
+        angles = np.arange(8) * (2 * np.pi / 8)
+        offsets = [(int(round(radius * np.sin(a))), int(round(radius * np.cos(a)))) for a in angles]
+
+        lbp_img = np.zeros((ih - 2 * border, iw - 2 * border), dtype=np.uint8)
+        center = gray_img[border:ih - border, border:iw - border]
+        for bit_idx, (dy, dx) in enumerate(offsets):
+            neighbor = gray_img[border + dy:ih - border + dy, border + dx:iw - border + dx]
+            # Handle potential size mismatches from rounding
+            min_h = min(lbp_img.shape[0], neighbor.shape[0], center.shape[0])
+            min_w = min(lbp_img.shape[1], neighbor.shape[1], center.shape[1])
+            lbp_img[:min_h, :min_w] |= ((neighbor[:min_h, :min_w] >= center[:min_h, :min_w]).astype(np.uint8) << bit_idx)
+
+        return lbp_img, border, (min_h, min_w)
+
+    def _lbp_to_hist(lbp_img, border, valid_shape, use_mask):
+        """Convert LBP image to normalized histogram."""
+        if rotation_invariant:
+            mapped = ri_table[lbp_img[:valid_shape[0], :valid_shape[1]]]
+            nbins = n_ri_bins
+        else:
+            mapped = uniform_table[lbp_img[:valid_shape[0], :valid_shape[1]]]
+            nbins = n_bins
+
+        if use_mask is not None:
+            m = use_mask[border:border + valid_shape[0], border:border + valid_shape[1]]
+            vals = mapped[m[:valid_shape[0], :valid_shape[1]]]
+        else:
+            vals = mapped.ravel()
+
+        if len(vals) == 0:
+            return np.zeros(nbins, dtype=float), 0.0
+        hist = np.bincount(vals, minlength=nbins).astype(float)
+        hist /= max(hist.sum(), 1)
+        # Entropy-based complexity
+        nz = hist[hist > 0]
+        entropy = -float(np.sum(nz * np.log2(nz)))
+        max_ent = np.log2(nbins) if nbins > 1 else 1.0
+        compl = entropy / max_ent if max_ent > 0 else 0.0
+        return hist, compl
+
+    # ── Radius 1 (fine texture) ──
+    lbp_r1, border_r1, vs_r1 = _compute_lbp_radius(gray, 1)
+    if lbp_r1 is None:
+        return {"complexity": 0.5, "uniformity": 0.5, "profile_hint": "solid",
+                "histogram": [], "complexity_r1": 0.5, "complexity_r2": 0.5}
+    hist_r1, complexity_r1 = _lbp_to_hist(lbp_r1, border_r1, vs_r1, mask)
+
+    # ── Radius 2 (coarser texture) ──
+    lbp_r2, border_r2, vs_r2 = _compute_lbp_radius(gray, 2)
+    if lbp_r2 is not None:
+        hist_r2, complexity_r2 = _lbp_to_hist(lbp_r2, border_r2, vs_r2, mask)
     else:
-        hist_vals = lbp_uniform.ravel()
+        hist_r2 = np.zeros_like(hist_r1)
+        complexity_r2 = complexity_r1
 
-    if len(hist_vals) == 0:
-        return {"complexity": 0.5, "uniformity": 0.5, "profile_hint": "solid", "histogram": []}
+    # ── Combine histograms: concatenate R=1 and R=2 for richer descriptor ──
+    combined_hist = np.concatenate([hist_r1 * 0.6, hist_r2 * 0.4])
+    combined_hist /= max(combined_hist.sum(), 1e-9)
 
-    hist = np.bincount(hist_vals, minlength=n_bins).astype(float)
-    hist /= max(hist.sum(), 1)
+    # Combined complexity: weighted average (fine texture matters more)
+    complexity = float(0.6 * complexity_r1 + 0.4 * complexity_r2)
 
-    # Texture complexity: entropy of LBP histogram
-    nonzero = hist[hist > 0]
-    entropy = -np.sum(nonzero * np.log2(nonzero))
-    max_entropy = np.log2(n_bins)
-    complexity = float(entropy / max_entropy) if max_entropy > 0 else 0.0
-
-    # Uniformity: ratio of dominant pattern
-    uniformity = float(1.0 - hist[-1])  # 1 - non-uniform ratio
+    # Uniformity from R=1 uniform pattern table
+    nbins_used = n_ri_bins if rotation_invariant else n_bins
+    uniformity = float(1.0 - hist_r1[-1]) if len(hist_r1) > 0 else 0.5
 
     # Profile hint based on complexity
     if complexity < 0.35:
@@ -508,14 +578,36 @@ def compute_lbp_texture(image_bgr: np.ndarray, mask: np.ndarray | None = None) -
         "complexity": round(complexity, 4),
         "uniformity": round(uniformity, 4),
         "profile_hint": profile_hint,
-        "histogram": hist.tolist(),
+        "histogram": combined_hist.tolist(),
+        "complexity_r1": round(float(complexity_r1), 4),
+        "complexity_r2": round(float(complexity_r2), 4),
     }
 
 
-def compute_gabor_energy(image_bgr: np.ndarray, mask: np.ndarray | None = None) -> dict:
+_gabor_kernel_cache: dict[tuple, np.ndarray] = {}
+
+
+def _get_gabor_kernel(kernel_size: int, sigma: float, theta: float,
+                      lambd: float, gamma: float) -> np.ndarray:
+    """Get a cached Gabor kernel (avoids recomputation every call)."""
+    key = (kernel_size, round(sigma, 6), round(theta, 6), round(lambd, 6), gamma)
+    if key not in _gabor_kernel_cache:
+        _gabor_kernel_cache[key] = cv2.getGaborKernel(
+            (kernel_size, kernel_size), sigma, theta, lambd, gamma, 0, ktype=cv2.CV_32F
+        )
+    return _gabor_kernel_cache[key]
+
+
+def compute_gabor_energy(image_bgr: np.ndarray, mask: np.ndarray | None = None,
+                         reference_energies: list[float] | None = None) -> dict:
     """
     Multi-scale multi-orientation Gabor filter texture energy.
     Useful for quantifying texture consistency between reference and film.
+
+    If reference_energies is provided, computes texture consistency metric
+    (cosine similarity of energy vectors between this image and a reference).
+
+    Gabor kernels are cached for speed across repeated calls.
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     h, w = gray.shape
@@ -536,8 +628,7 @@ def compute_gabor_energy(image_bgr: np.ndarray, mask: np.ndarray | None = None) 
             sigma = 1.0 / (2 * np.pi * freq)
             kernel_size = int(6 * sigma) | 1
             kernel_size = max(3, min(31, kernel_size))
-            kernel = cv2.getGaborKernel((kernel_size, kernel_size), sigma, theta,
-                                         1.0/freq, 0.5, 0, ktype=cv2.CV_32F)
+            kernel = _get_gabor_kernel(kernel_size, sigma, theta, 1.0 / freq, 0.5)
             response = cv2.filter2D(gray, cv2.CV_32F, kernel)
             if mask is not None:
                 energy = float(np.mean(response[mask[: response.shape[0], :response.shape[1]]] ** 2))
@@ -552,12 +643,27 @@ def compute_gabor_energy(image_bgr: np.ndarray, mask: np.ndarray | None = None) 
     total_orient = sum(orient_energies) if orient_energies else 1
     orientation_dominance = float(max_orient / max(total_orient, 1e-9))
 
-    return {
+    # Texture consistency metric: cosine similarity with reference energy vector
+    texture_consistency = None
+    if reference_energies is not None and len(reference_energies) == len(energies):
+        ref_vec = np.array(reference_energies, dtype=np.float64)
+        cur_vec = np.array(energies, dtype=np.float64)
+        ref_norm = np.linalg.norm(ref_vec)
+        cur_norm = np.linalg.norm(cur_vec)
+        if ref_norm > 1e-9 and cur_norm > 1e-9:
+            texture_consistency = float(np.dot(ref_vec, cur_vec) / (ref_norm * cur_norm))
+        else:
+            texture_consistency = 0.0
+
+    result = {
         "total_energy": round(total_energy, 6),
         "orientation_dominance": round(orientation_dominance, 4),
         "energies": [round(e, 6) for e in energies],
         "is_directional": orientation_dominance > 0.4,  # strong directional texture (wood grain)
     }
+    if texture_consistency is not None:
+        result["texture_consistency"] = round(texture_consistency, 4)
+    return result
 
 
 def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, list[float]]:
@@ -943,6 +1049,30 @@ def _deduplicate_candidates(cands: list[RectCandidate], iou_threshold: float = 0
     return keep
 
 
+def _deduplicate_candidates_with_rectangularity(cands: list[RectCandidate],
+                                                 iou_threshold: float = 0.5) -> list[RectCandidate]:
+    """Deduplicate overlapping candidates, preferring higher rectangularity (not just larger area)."""
+    if not cands:
+        return []
+    # Sort by rectangularity (descending) so best-shaped candidates are kept first
+    cands = sorted(cands, key=lambda c: c.rectangularity, reverse=True)
+    keep: list[RectCandidate] = []
+    for c in cands:
+        is_dup = False
+        for i, k in enumerate(keep):
+            dist = np.sqrt((c.center[0] - k.center[0]) ** 2 + (c.center[1] - k.center[1]) ** 2)
+            min_dim = min(np.sqrt(c.rect_area), np.sqrt(k.rect_area)) * 0.5
+            area_ratio = min(c.rect_area, k.rect_area) / max(c.rect_area, k.rect_area)
+            if dist < min_dim and area_ratio > 0.5:
+                # Overlap detected: keep the one with higher rectangularity (already sorted)
+                # Current candidate c has lower or equal rectangularity than k (already in keep)
+                is_dup = True
+                break
+        if not is_dup:
+            keep.append(c)
+    return keep
+
+
 def _lab_color_segmentation(image_bgr: np.ndarray, n_clusters: int = 3) -> list[RectCandidate]:
     """
     基于 LAB 颜色空间的 K-Means 分割 — 用于轮廓法失效时的后备.
@@ -1048,33 +1178,59 @@ def contour_candidates(image_bgr: np.ndarray) -> list[RectCandidate]:
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     smooth = cv2.GaussianBlur(gray, (5, 5), 0)
 
+    # Adaptive Canny thresholds using Otsu's method on gradient magnitude
+    sobel_x = cv2.Sobel(smooth.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(smooth.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+    grad_u8 = np.clip(grad_mag, 0, 255).astype(np.uint8)
+    otsu_grad_thr, _ = cv2.threshold(grad_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    canny_low = max(10, int(otsu_grad_thr * 0.5))
+    canny_high = max(30, int(otsu_grad_thr * 1.0))
+
     all_candidates: list[RectCandidate] = []
 
     # ── 策略组A: 原始前景检测 (亮板暗背景) ──
-    edge_canny = cv2.Canny(smooth, 30, 100)
+    edge_canny = cv2.Canny(smooth, canny_low, canny_high)
     _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     adapt = cv2.adaptiveThreshold(smooth, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                   cv2.THRESH_BINARY_INV, 51, 6)
     combined_a = cv2.bitwise_or(edge_canny, cv2.bitwise_or(otsu, adapt))
     combined_a = cv2.morphologyEx(combined_a, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
     combined_a = cv2.morphologyEx(combined_a, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
-    all_candidates.extend(_extract_rect_candidates_from_mask(combined_a, image_area))
+    cands_a = _extract_rect_candidates_from_mask(combined_a, image_area)
+    all_candidates.extend(cands_a)
 
     # ── 策略组B: 反向前景检测 (暗板亮背景) ── 独立运行, 不与A合并
     _, otsu_rev = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    edge_canny_inv = cv2.Canny(255 - smooth, 30, 100)
+    edge_canny_inv = cv2.Canny(255 - smooth, canny_low, canny_high)
     combined_b = cv2.bitwise_or(otsu_rev, edge_canny_inv)
     combined_b = cv2.morphologyEx(combined_b, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
     combined_b = cv2.morphologyEx(combined_b, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
-    all_candidates.extend(_extract_rect_candidates_from_mask(combined_b, image_area))
+    cands_b = _extract_rect_candidates_from_mask(combined_b, image_area)
+    all_candidates.extend(cands_b)
 
     # ── 策略组C: 纯 Otsu (不加 Canny/Adaptive, 减少噪声) ──
     otsu_clean = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=3)
     otsu_clean = cv2.morphologyEx(otsu_clean, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8), iterations=2)
-    all_candidates.extend(_extract_rect_candidates_from_mask(otsu_clean, image_area))
+    cands_c = _extract_rect_candidates_from_mask(otsu_clean, image_area)
+    all_candidates.extend(cands_c)
 
-    # 去重合并
-    all_candidates = _deduplicate_candidates(all_candidates)
+    # ── Aspect ratio filter: reject very elongated contours (> 5:1) ──
+    filtered_candidates: list[RectCandidate] = []
+    for c in all_candidates:
+        # Compute aspect ratio from minAreaRect dimensions
+        rw_c = np.linalg.norm(c.quad[0] - c.quad[1])
+        rh_c = np.linalg.norm(c.quad[1] - c.quad[2])
+        if rw_c > 0 and rh_c > 0:
+            aspect = max(rw_c, rh_c) / min(rw_c, rh_c)
+            if aspect > 5.0:
+                continue  # reject overly elongated
+        filtered_candidates.append(c)
+    all_candidates = filtered_candidates
+
+    # ── Overlap resolution: when strategies find overlapping candidates, keep higher rectangularity ──
+    # Enhanced deduplication that prefers rectangularity over size
+    all_candidates = _deduplicate_candidates_with_rectangularity(all_candidates)
 
     # ── 后备策略: LAB 颜色分割 ──
     # 如果轮廓法只找到0-1个巨大候选 (>90% 面积), 说明轮廓法失效

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -107,17 +108,35 @@ def _calibrate_factors(rows: list[dict[str, Any]], outcomes: list[dict[str, Any]
         buckets[hist].append((float(row["risk"]), bad))
 
     out: dict[str, float] = {}
+    out_uncertainty: dict[str, dict[str, float]] = {}
+    LAPLACE_ALPHA = 1.0  # Laplace smoothing constant
     for k, vals in buckets.items():
         if len(vals) < 4:
             out[k] = default[k]
+            out_uncertainty[k] = {"low": default[k], "high": default[k], "n": len(vals)}
             continue
         r = np.array([v[0] for v in vals], dtype=np.float64)
         b = np.array([v[1] for v in vals], dtype=np.float64)
         r_mean = float(np.mean(r))
-        if r_mean < 1e-6:
-            out[k] = default[k]
-            continue
-        out[k] = _clamp(float(np.mean(b) / r_mean), 0.05, 1.50)
+        # Laplace smoothing: add LAPLACE_ALPHA to numerator and denominator
+        # to avoid division by zero and stabilize small-sample estimates
+        n = len(vals)
+        smoothed_factor = _clamp(float((np.sum(b) + LAPLACE_ALPHA) / (np.sum(r) + LAPLACE_ALPHA)), 0.05, 1.50)
+        out[k] = smoothed_factor
+        # Uncertainty interval via bootstrap-like standard error estimate
+        if r_mean > 1e-6 and n >= 4:
+            b_std = float(np.std(b, ddof=1))
+            se = b_std / (math.sqrt(n) * max(r_mean, 1e-6))
+            out_uncertainty[k] = {
+                "low": round(_clamp(smoothed_factor - 1.96 * se, 0.05, 1.50), 4),
+                "high": round(_clamp(smoothed_factor + 1.96 * se, 0.05, 1.50), 4),
+                "n": n,
+            }
+        else:
+            out_uncertainty[k] = {"low": smoothed_factor, "high": smoothed_factor, "n": n}
+    # Attach uncertainty as an attribute-like dict entry; callers access via _calibrate_factors
+    # We return just the factors dict for backward compat; store uncertainty in module-level cache
+    _calibrate_factors._last_uncertainty = out_uncertainty  # type: ignore[attr-defined]
     return out
 
 
@@ -209,12 +228,51 @@ def _evaluate(rows: list[dict[str, Any]], policy: dict[str, Any], factors: dict[
     }
 
 
+def _two_proportion_z_test(p1: float, n1: int, p2: float, n2: int) -> float:
+    """Two-proportion z-test. Returns p-value (two-sided).
+
+    Tests H0: p1 == p2 vs H1: p1 != p2.
+    """
+    if n1 <= 0 or n2 <= 0:
+        return 1.0
+    p_pool = (p1 * n1 + p2 * n2) / (n1 + n2)
+    if p_pool <= 0 or p_pool >= 1:
+        return 1.0
+    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+    if se < 1e-12:
+        return 1.0
+    z = (p1 - p2) / se
+    # Two-sided p-value using normal CDF approximation (erfc)
+    p_value = math.erfc(abs(z) / math.sqrt(2))
+    return p_value
+
+
+MIN_SAMPLE_SIZE_PER_ARM = 20
+
+
 def _rollout_decision(champ: dict[str, Any], chall: dict[str, Any]) -> tuple[str, list[str]]:
     reasons: list[str] = []
+
+    n_champ = int(_to_float(champ.get("sample_count"), 0))
+    n_chall = int(_to_float(chall.get("sample_count"), 0))
+
+    # Minimum sample size requirement
+    if n_champ < MIN_SAMPLE_SIZE_PER_ARM or n_chall < MIN_SAMPLE_SIZE_PER_ARM:
+        return "CANARY", [
+            f"insufficient_sample_size: champion={n_champ}, challenger={n_chall}, "
+            f"minimum={MIN_SAMPLE_SIZE_PER_ARM}"
+        ]
+
     escape_gain = _to_float(champ.get("expected_escape_rate"), 1.0) - _to_float(chall.get("expected_escape_rate"), 1.0)
     cost_gain = _to_float(champ.get("expected_cost_per_run"), 1e9) - _to_float(chall.get("expected_cost_per_run"), 1e9)
     customer_gain = _to_float(chall.get("customer_acceptance_index"), 0.0) - _to_float(champ.get("customer_acceptance_index"), 0.0)
     throughput_gain = _to_float(chall.get("auto_release_rate"), 0.0) - _to_float(champ.get("auto_release_rate"), 0.0)
+
+    # Statistical significance test: two-proportion z-test on escape rates
+    p_champ = _to_float(champ.get("expected_escape_rate"), 0.0)
+    p_chall = _to_float(chall.get("expected_escape_rate"), 0.0)
+    sig_p_value = _two_proportion_z_test(p_champ, n_champ, p_chall, n_chall)
+    is_significant = sig_p_value < 0.05
 
     if escape_gain >= 0.006 and customer_gain >= 0.8:
         reasons.append("challenger_reduces_escape_and_improves_customer")
@@ -222,8 +280,15 @@ def _rollout_decision(champ: dict[str, Any], chall: dict[str, Any]) -> tuple[str
         reasons.append("challenger_reduces_expected_cost")
     if throughput_gain >= 0.02:
         reasons.append("challenger_improves_auto_release_rate")
+    if is_significant:
+        reasons.append(f"statistically_significant (p={sig_p_value:.4f})")
+    else:
+        reasons.append(f"not_statistically_significant (p={sig_p_value:.4f})")
 
-    if escape_gain >= 0.010 and customer_gain >= 1.5 and _to_float(chall.get("expected_escape_rate"), 1.0) <= 0.03:
+    # Require statistical significance (p < 0.05) for PROMOTE
+    if (escape_gain >= 0.010 and customer_gain >= 1.5
+            and _to_float(chall.get("expected_escape_rate"), 1.0) <= 0.03
+            and is_significant):
         return "PROMOTE", reasons or ["strong_win_on_quality_and_risk"]
     if escape_gain >= -0.002 and customer_gain >= -0.5:
         return "CANARY", reasons or ["borderline_win_requires_canary"]

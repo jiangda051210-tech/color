@@ -156,21 +156,47 @@ class CausalRootCauseAnalyzer:
         des = np.array([r["dE"] for r in self._records])
         correlations: list[dict[str, Any]] = []
 
-        # 对每个数值参数计算与dE的相关性
+        # 对每个数值参数计算与dE的相关性 (Pearson + Spearman)
         numeric_params = ["temperature", "humidity", "speed", "pressure"]
+        num_numeric_tests = sum(
+            1 for p in numeric_params
+            if all(r.get(p) is not None for r in self._records)
+            and np.array([r.get(p) for r in self._records], dtype=np.float64).std() > 1e-6
+        )
+        bonferroni_m = max(num_numeric_tests, 1)
+
         for param in numeric_params:
             values = [r.get(param) for r in self._records]
             if all(v is not None for v in values):
                 vals = np.array(values, dtype=np.float64)
                 if vals.std() > 1e-6:
+                    # Pearson (linear)
                     corr = float(np.corrcoef(des, vals)[0, 1])
-                    if abs(corr) > 0.3:
+                    # Spearman (non-linear / monotonic)
+                    spearman_r, spearman_p = _scipy_stats.spearmanr(des, vals)
+                    # Pearson p-value
+                    n = len(des)
+                    if abs(corr) < 1.0 and n > 2:
+                        t_stat = corr * math.sqrt((n - 2) / (1 - corr ** 2))
+                        pearson_p = float(2 * _scipy_stats.t.sf(abs(t_stat), n - 2))
+                    else:
+                        pearson_p = 0.0
+
+                    # Bonferroni adjustment
+                    adj_pearson_p = min(pearson_p * bonferroni_m, 1.0)
+                    adj_spearman_p = min(float(spearman_p) * bonferroni_m, 1.0)
+
+                    if abs(corr) > 0.3 or abs(float(spearman_r)) > 0.3:
                         direction = "正相关" if corr > 0 else "负相关"
                         correlations.append({
                             "参数": param,
                             "相关系数": round(corr, 3),
+                            "spearman_r": round(float(spearman_r), 3),
+                            "pearson_p_adj": round(adj_pearson_p, 4),
+                            "spearman_p_adj": round(adj_spearman_p, 4),
                             "方向": direction,
                             "强度": "强" if abs(corr) > 0.7 else "中" if abs(corr) > 0.5 else "弱",
+                            "统计显著": adj_pearson_p < 0.05 or adj_spearman_p < 0.05,
                         })
 
         # 分类参数分析 (墨水批号/基材批号/操作员)
@@ -241,6 +267,57 @@ class MultiSiteAgreement:
         self._path.write_text(json.dumps(self._sites, ensure_ascii=False,
                                          indent=2, default=str), encoding="utf-8")
 
+    @staticmethod
+    def _ciede2000(lab1: dict[str, float], lab2: dict[str, float]) -> float:
+        """Compute CIEDE2000 colour difference between two L*a*b* colours."""
+        L1, a1, b1 = lab1["L"], lab1["a"], lab1["b"]
+        L2, a2, b2 = lab2["L"], lab2["a"], lab2["b"]
+        # Mean L'
+        Lbar = (L1 + L2) / 2.0
+        C1 = math.sqrt(a1 ** 2 + b1 ** 2)
+        C2 = math.sqrt(a2 ** 2 + b2 ** 2)
+        Cbar = (C1 + C2) / 2.0
+        Cbar7 = Cbar ** 7
+        G = 0.5 * (1 - math.sqrt(Cbar7 / (Cbar7 + 25.0 ** 7)))
+        a1p = a1 * (1 + G)
+        a2p = a2 * (1 + G)
+        C1p = math.sqrt(a1p ** 2 + b1 ** 2)
+        C2p = math.sqrt(a2p ** 2 + b2 ** 2)
+        Cbarp = (C1p + C2p) / 2.0
+        h1p = math.degrees(math.atan2(b1, a1p)) % 360
+        h2p = math.degrees(math.atan2(b2, a2p)) % 360
+        if abs(h1p - h2p) <= 180:
+            Hbarp = (h1p + h2p) / 2.0
+        elif h1p + h2p < 360:
+            Hbarp = (h1p + h2p + 360) / 2.0
+        else:
+            Hbarp = (h1p + h2p - 360) / 2.0
+        T = (1
+             - 0.17 * math.cos(math.radians(Hbarp - 30))
+             + 0.24 * math.cos(math.radians(2 * Hbarp))
+             + 0.32 * math.cos(math.radians(3 * Hbarp + 6))
+             - 0.20 * math.cos(math.radians(4 * Hbarp - 63)))
+        if abs(h2p - h1p) <= 180:
+            dhp = h2p - h1p
+        elif h2p - h1p > 180:
+            dhp = h2p - h1p - 360
+        else:
+            dhp = h2p - h1p + 360
+        dLp = L2 - L1
+        dCp = C2p - C1p
+        dHp = 2 * math.sqrt(C1p * C2p) * math.sin(math.radians(dhp / 2.0))
+        SL = 1 + 0.015 * (Lbar - 50) ** 2 / math.sqrt(20 + (Lbar - 50) ** 2)
+        SC = 1 + 0.045 * Cbarp
+        SH = 1 + 0.015 * Cbarp * T
+        Cbarp7 = Cbarp ** 7
+        RT = (-math.sin(2 * math.radians(60 * math.exp(-((Hbarp - 275) / 25) ** 2)))
+              * 2 * math.sqrt(Cbarp7 / (Cbarp7 + 25.0 ** 7)))
+        dE = math.sqrt(
+            (dLp / SL) ** 2 + (dCp / SC) ** 2 + (dHp / SH) ** 2
+            + RT * (dCp / SC) * (dHp / SH)
+        )
+        return dE
+
     def calibrate_site(
         self,
         site_id: str,
@@ -248,18 +325,20 @@ class MultiSiteAgreement:
         measured_lab: dict[str, float],
         device_info: str = "",
     ) -> dict[str, Any]:
-        """用标准参考板校准某站点."""
+        """用标准参考板校准某站点. Uses CIEDE2000 and temporal weighting."""
         bias = {
             "L": round(measured_lab["L"] - reference_lab["L"], 3),
             "a": round(measured_lab["a"] - reference_lab["a"], 3),
             "b": round(measured_lab["b"] - reference_lab["b"], 3),
         }
-        de = math.sqrt(bias["L"] ** 2 + bias["a"] ** 2 + bias["b"] ** 2)
+        # Use CIEDE2000 instead of Euclidean
+        de = self._ciede2000(reference_lab, measured_lab)
 
+        now_ts = datetime.now()
         if site_id not in self._sites:
             self._sites[site_id] = []
         self._sites[site_id].append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_ts.isoformat(),
             "reference": reference_lab,
             "measured": measured_lab,
             "bias": bias,
@@ -270,10 +349,23 @@ class MultiSiteAgreement:
             self._sites[site_id] = self._sites[site_id][-100:]
         self._save()
 
+        # Temporal weighting: recent calibrations weighted higher (exponential decay)
+        records = self._sites[site_id]
+        decay_lambda = 0.95
+        weights = []
+        for i, rec in enumerate(records):
+            age = len(records) - 1 - i  # 0 for most recent
+            weights.append(decay_lambda ** age)
+        total_w = sum(weights) or 1.0
+        weighted_dE = sum(w * rec["dE"] for w, rec in zip(weights, records)) / total_w
+
         return {
             "site_id": site_id,
             "偏差": bias,
             "偏差量dE": round(de, 2),
+            "偏差量dE_method": "CIEDE2000",
+            "weighted_avg_dE": round(weighted_dE, 3),
+            "temporal_decay_lambda": decay_lambda,
             "状态": "合格" if de < 1.0 else "注意" if de < 2.0 else "需重新校准",
             "历史校准数": len(self._sites[site_id]),
         }
@@ -316,7 +408,20 @@ class SustainabilityTracker:
     追踪: 避免的废品量、节省的墨水、减少的碳排放.
     """
 
-    def __init__(self) -> None:
+    # Default conversion factors (configurable)
+    DEFAULT_CONVERSION_FACTORS = {
+        "scrap_rate": 0.3,             # fraction of failed area becoming scrap
+        "ink_per_100m2_kg": 0.5,       # kg of ink per 100 m²
+        "co2_per_kg_ink": 3.0,         # kg CO₂ per kg ink
+        "cost_per_m2_scrap": 15.0,     # ¥ per m² of scrap
+        "cost_per_kg_ink": 80.0,       # ¥ per kg of ink saved
+    }
+    UNCERTAINTY_FACTOR = 0.20  # ±20% bounds on all estimates
+
+    def __init__(self, conversion_factors: dict[str, float] | None = None) -> None:
+        self._factors = dict(self.DEFAULT_CONVERSION_FACTORS)
+        if conversion_factors:
+            self._factors.update(conversion_factors)
         self._data = {
             "total_measurements": 0,
             "first_shot_passes": 0,
@@ -337,33 +442,60 @@ class SustainabilityTracker:
             self._data["first_shot_passes"] += 1
         else:
             self._data["rework_avoided"] += 1
-            # 假设没有系统时, 不合格品要到客户处才发现, 需返工
-            self._data["scrap_avoided_m2"] += area_m2 * 0.3  # 30%可能变废品
+            self._data["scrap_avoided_m2"] += area_m2 * self._factors["scrap_rate"]
 
         if ink_saved_pct > 0:
-            # 估算: 每100m² 用墨约0.5kg, 节省x%
-            self._data["ink_saved_kg"] += 0.5 * area_m2 / 100 * ink_saved_pct / 100
-            # CO2: 每kg墨水约3kg CO2
-            self._data["co2_saved_kg"] += 0.5 * area_m2 / 100 * ink_saved_pct / 100 * 3
+            ink_kg = self._factors["ink_per_100m2_kg"] * area_m2 / 100 * ink_saved_pct / 100
+            self._data["ink_saved_kg"] += ink_kg
+            self._data["co2_saved_kg"] += ink_kg * self._factors["co2_per_kg_ink"]
+
+    @staticmethod
+    def _bounds(value: float, pct: float = 0.20) -> dict[str, float]:
+        """Return value with ±pct uncertainty bounds."""
+        return {"estimate": round(value, 2), "low": round(value * (1 - pct), 2), "high": round(value * (1 + pct), 2)}
 
     def report(self) -> dict[str, Any]:
         d = self._data
         total = d["total_measurements"]
         fsp = d["first_shot_passes"]
+        uf = self.UNCERTAINTY_FACTOR
+        economic_value = (d['scrap_avoided_m2'] * self._factors["cost_per_m2_scrap"]
+                          + d['ink_saved_kg'] * self._factors["cost_per_kg_ink"])
         return {
             "总测量次数": total,
             "首次合格率": f"{fsp / max(total, 1) * 100:.1f}%",
             "避免废品面积": f"{d['scrap_avoided_m2']:.0f} m²",
+            "避免废品面积_bounds": self._bounds(d['scrap_avoided_m2'], uf),
             "节省墨水": f"{d['ink_saved_kg']:.1f} kg",
+            "节省墨水_bounds": self._bounds(d['ink_saved_kg'], uf),
             "减少碳排放": f"{d['co2_saved_kg']:.1f} kg CO₂",
+            "减少碳排放_bounds": self._bounds(d['co2_saved_kg'], uf),
             "避免返工次数": d["rework_avoided"],
-            "等效经济价值": f"约 ¥{d['scrap_avoided_m2'] * 15 + d['ink_saved_kg'] * 80:.0f}",
+            "等效经济价值": f"约 ¥{economic_value:.0f}",
+            "等效经济价值_bounds": self._bounds(economic_value, uf),
+            "conversion_factors": dict(self._factors),
         }
 
 
 # ════════════════════════════════════════════════
 # 5. CxF/X-4 光谱数据交换
 # ════════════════════════════════════════════════
+
+def _validate_spectral(spectral_data: list[float]) -> list[str]:
+    """Validate spectral reflectance data and return warnings."""
+    warnings: list[str] = []
+    expected_len = 40  # 380-770 nm in 10nm steps
+    if len(spectral_data) < expected_len:
+        warnings.append(f"Spectral data has {len(spectral_data)} values, expected {expected_len} (380-770nm @10nm)")
+    for i, v in enumerate(spectral_data):
+        if v < 0.0:
+            warnings.append(f"Negative reflectance at index {i}: {v}")
+            break
+        if v > 2.0:
+            warnings.append(f"Unusually high reflectance at index {i}: {v} (>200%)")
+            break
+    return warnings
+
 
 def export_cxf(
     color_name: str,
@@ -377,52 +509,60 @@ def export_cxf(
 
     CxF (Color Exchange Format) 是行业标准的色彩数据交换格式,
     被 GMG, ColorGATE, EFI, X-Rite 等所有主流系统支持.
-    """
-    # 简化版 CxF XML
-    spectral_xml = ""
-    if spectral_data:
-        wavelengths = list(range(380, 780, 10))
-        values = " ".join(f"{v:.4f}" for v in spectral_data[:len(wavelengths)])
-        spectral_xml = f"""
-    <ReflectanceSpectrum>
-      <StartWL>380</StartWL>
-      <EndWL>770</EndWL>
-      <Increment>10</Increment>
-      <Values>{values}</Values>
-    </ReflectanceSpectrum>"""
 
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<CxF xmlns="http://colorexchangeformat.com/CxF3-core"
-     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <FileInformation>
-    <Creator>SENIA Elite Color System</Creator>
-    <CreationDate>{datetime.now().isoformat()}</CreationDate>
-    <Description>Color measurement data exported from SENIA</Description>
-  </FileInformation>
-  <Resources>
-    <ColorSpecificationCollection>
-      <ColorSpecification Id="cs1">
-        <MeasurementSpec>
-          <MeasurementType>Reflectance</MeasurementType>
-          <Illuminant>{illuminant}</Illuminant>
-          <Observer>{observer}</Observer>
-        </MeasurementSpec>
-      </ColorSpecification>
-    </ColorSpecificationCollection>
-  </Resources>
-  <ObjectCollection>
-    <Object Id="obj1" Name="{color_name}">
-      <ColorValues>
-        <ColorCIELab ColorSpecification="cs1">
-          <L>{lab['L']:.4f}</L>
-          <A>{lab['a']:.4f}</A>
-          <B>{lab['b']:.4f}</B>
-        </ColorCIELab>{spectral_xml}
-      </ColorValues>
-    </Object>
-  </ObjectCollection>
-</CxF>"""
-    return xml
+    Uses xml.etree.ElementTree for proper XML construction.
+    Spectral data is validated before export.
+    """
+    ns = "http://colorexchangeformat.com/CxF3-core"
+    xsi = "http://www.w3.org/2001/XMLSchema-instance"
+
+    root = ET.Element("CxF", xmlns=ns)
+    root.set("xmlns:xsi", xsi)
+
+    # FileInformation
+    file_info = ET.SubElement(root, "FileInformation")
+    ET.SubElement(file_info, "Creator").text = "SENIA Elite Color System"
+    ET.SubElement(file_info, "CreationDate").text = datetime.now().isoformat()
+    ET.SubElement(file_info, "Description").text = "Color measurement data exported from SENIA"
+
+    # Resources
+    resources = ET.SubElement(root, "Resources")
+    cs_coll = ET.SubElement(resources, "ColorSpecificationCollection")
+    cs = ET.SubElement(cs_coll, "ColorSpecification", Id="cs1")
+    ms = ET.SubElement(cs, "MeasurementSpec")
+    ET.SubElement(ms, "MeasurementType").text = "Reflectance"
+    ET.SubElement(ms, "Illuminant").text = illuminant
+    ET.SubElement(ms, "Observer").text = observer
+
+    # ObjectCollection
+    obj_coll = ET.SubElement(root, "ObjectCollection")
+    obj = ET.SubElement(obj_coll, "Object", Id="obj1", Name=color_name)
+    cv = ET.SubElement(obj, "ColorValues")
+
+    lab_el = ET.SubElement(cv, "ColorCIELab", ColorSpecification="cs1")
+    ET.SubElement(lab_el, "L").text = f"{lab['L']:.4f}"
+    ET.SubElement(lab_el, "A").text = f"{lab['a']:.4f}"
+    ET.SubElement(lab_el, "B").text = f"{lab['b']:.4f}"
+
+    # Spectral data with validation
+    spectral_warnings: list[str] = []
+    if spectral_data:
+        spectral_warnings = _validate_spectral(spectral_data)
+        wavelengths = list(range(380, 780, 10))
+        values_str = " ".join(f"{v:.4f}" for v in spectral_data[:len(wavelengths)])
+        rs = ET.SubElement(cv, "ReflectanceSpectrum")
+        ET.SubElement(rs, "StartWL").text = "380"
+        ET.SubElement(rs, "EndWL").text = "770"
+        ET.SubElement(rs, "Increment").text = "10"
+        ET.SubElement(rs, "Values").text = values_str
+        if spectral_warnings:
+            comment_el = ET.SubElement(rs, "ValidationWarnings")
+            for w in spectral_warnings:
+                ET.SubElement(comment_el, "Warning").text = w
+
+    ET.indent(root, space="  ")
+    xml_str = ET.tostring(root, encoding="unicode", xml_declaration=True)
+    return xml_str
 
 
 def import_cxf(xml_content: str) -> list[dict[str, Any]]:

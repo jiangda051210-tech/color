@@ -63,8 +63,9 @@ class AdaptiveThreshold:
             b["n"] += 1
             n = b["n"]
 
-            # EWC 学习率: 早期学快, 后期学慢 (保护已学知识)
-            lr = 1.0 / (1.0 + n * 0.1)  # n=10 → lr=0.5, n=100 → lr=0.09
+            # Principled EWC decay rate: 1/sqrt(n)
+            # Decreases smoothly; n=4 → lr=0.5, n=100 → lr=0.1, n=10000 → lr=0.01
+            lr = 1.0 / math.sqrt(n)
 
             if actual_tier == "PASS":
                 # 这个 dE 值应该在 pass 边界以下 → 如果 dE > pass_mean, 上调
@@ -77,7 +78,13 @@ class AdaptiveThreshold:
 
             # 安全约束: pass < marginal, 且不超出物理合理范围
             b["pass_mean"] = max(0.3, min(b["pass_mean"], 3.0))
-            b["marginal_mean"] = max(b["pass_mean"] + 0.5, min(b["marginal_mean"], 6.0))
+            b["marginal_mean"] = max(0.3, min(b["marginal_mean"], 6.0))
+            # Boundary constraint: pass_boundary must always be < marginal_boundary
+            if b["pass_mean"] >= b["marginal_mean"] - 0.5:
+                # Push them apart: keep midpoint, enforce minimum gap of 0.5
+                midpoint = (b["pass_mean"] + b["marginal_mean"]) / 2.0
+                b["pass_mean"] = max(0.3, midpoint - 0.25)
+                b["marginal_mean"] = min(6.0, midpoint + 0.25)
 
             return {
                 "profile": profile,
@@ -124,12 +131,20 @@ class BatchLearner:
         if not dEs:
             return {"learned": False}
 
+        # Use MAD (Median Absolute Deviation) for robust standard deviation
+        median_dE = statistics.median(dEs)
+        mad = statistics.median([abs(d - median_dE) for d in dEs]) if len(dEs) > 1 else 0.0
+        # Scale MAD to be consistent with std for normal distribution (MAD * 1.4826 ≈ std)
+        robust_std = mad * 1.4826
+
         summary = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "product_code": product_code,
             "sample_count": len(dEs),
             "avg_dE": round(statistics.mean(dEs), 4),
             "std_dE": round(statistics.stdev(dEs), 4) if len(dEs) > 1 else 0,
+            "robust_std_dE": round(robust_std, 4),
+            "median_dE": round(median_dE, 4),
             "max_dE": round(max(dEs), 4),
             "pass_rate": round(sum(1 for d in dEs if d < 2.0) / len(dEs), 4),
         }
@@ -140,15 +155,31 @@ class BatchLearner:
             if len(self._batch_history[product_code]) > 100:
                 self._batch_history[product_code] = self._batch_history[product_code][-100:]
 
-        # 趋势分析
+        # Trend analysis via Mann-Kendall test on recent batch averages
         history = self._batch_history[product_code]
         if len(history) >= 3:
-            recent_avg = statistics.mean([h["avg_dE"] for h in history[-3:]])
-            older_avg = statistics.mean([h["avg_dE"] for h in history[-6:-3]]) if len(history) >= 6 else recent_avg
-            trend = recent_avg - older_avg
-            summary["trend"] = "improving" if trend < -0.2 else "degrading" if trend > 0.2 else "stable"
+            avg_series = [h["avg_dE"] for h in history[-min(len(history), 10):]]
+            n_mk = len(avg_series)
+            s_stat = 0
+            for i in range(n_mk - 1):
+                for j in range(i + 1, n_mk):
+                    diff = avg_series[j] - avg_series[i]
+                    if diff > 0:
+                        s_stat += 1
+                    elif diff < 0:
+                        s_stat -= 1
+            max_s = n_mk * (n_mk - 1) // 2
+            tau = s_stat / max_s if max_s > 0 else 0.0
+            if tau < -0.3:
+                summary["trend"] = "improving"
+            elif tau > 0.3:
+                summary["trend"] = "degrading"
+            else:
+                summary["trend"] = "stable"
+            summary["trend_tau"] = round(tau, 4)
         else:
             summary["trend"] = "insufficient_data"
+            summary["trend_tau"] = None
 
         return {"learned": True, "summary": summary}
 
@@ -170,22 +201,54 @@ def periodic_model_refresh(
       3. 检测系统精度趋势
     """
     results: dict[str, Any] = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"), "updates": []}
+    decay_lambda = 0.9  # exponential decay: recent batches weighted higher
 
     with batch_learner._lock:
         for product, batches in batch_learner._batch_history.items():
             if len(batches) < 3:
                 continue
+            n_batches = len(batches)
+            # Exponential decay weights: most recent batch gets weight 1.0,
+            # second most recent gets decay_lambda, etc.
+            weights = [decay_lambda ** (n_batches - 1 - i) for i in range(n_batches)]
+            total_weight = sum(weights)
+
             avg_dEs = [b["avg_dE"] for b in batches]
+            weighted_avg = sum(w * v for w, v in zip(weights, avg_dEs)) / total_weight
+            weighted_var = sum(w * (v - weighted_avg) ** 2 for w, v in zip(weights, avg_dEs)) / total_weight
+            weighted_std = math.sqrt(weighted_var)
+
+            # Also compute unweighted for comparison
             overall_avg = statistics.mean(avg_dEs)
             overall_std = statistics.stdev(avg_dEs) if len(avg_dEs) > 1 else 0
 
+            suggested_pass = round(weighted_avg + weighted_std, 2)
+            suggested_marginal = round(weighted_avg + 2 * weighted_std + 0.5, 2)
+
+            # Threshold validation via historical pass/fail rates
+            pass_rates = [b.get("pass_rate", 0.5) for b in batches]
+            recent_pass_rate = statistics.mean(pass_rates[-5:]) if len(pass_rates) >= 5 else statistics.mean(pass_rates)
+            threshold_validated = True
+            validation_notes = []
+            if recent_pass_rate < 0.3:
+                validation_notes.append("pass_rate_too_low_suggest_looser_thresholds")
+                threshold_validated = False
+            elif recent_pass_rate > 0.98:
+                validation_notes.append("pass_rate_very_high_thresholds_may_be_too_loose")
+                threshold_validated = False
+
             results["updates"].append({
                 "product": product,
-                "batches": len(batches),
+                "batches": n_batches,
                 "avg_dE": round(overall_avg, 4),
                 "std_dE": round(overall_std, 4),
-                "suggested_pass": round(overall_avg + overall_std, 2),
-                "suggested_marginal": round(overall_avg + 2 * overall_std + 0.5, 2),
+                "weighted_avg_dE": round(weighted_avg, 4),
+                "weighted_std_dE": round(weighted_std, 4),
+                "suggested_pass": suggested_pass,
+                "suggested_marginal": suggested_marginal,
+                "recent_pass_rate": round(recent_pass_rate, 4),
+                "threshold_validated": threshold_validated,
+                "validation_notes": validation_notes,
             })
 
     return results
@@ -200,6 +263,8 @@ def transfer_knowledge(
     target_profile: str,
     adaptive_threshold: AdaptiveThreshold,
     similarity: float = 0.8,
+    batch_learner: BatchLearner | None = None,
+    min_source_samples: int = 10,
 ) -> dict[str, Any]:
     """
     知识迁移: 新产品线没有数据时, 从最相似的已有产品迁移.
@@ -207,6 +272,40 @@ def transfer_knowledge(
     例: 新产品 "橡木灰B" 和已有的 "橡木灰A" 很像 → 迁移阈值.
     迁移的参数按相似度加权: 越相似 → 迁移越多.
     """
+    # Minimum source sample count check
+    source_n = 0
+    with adaptive_threshold._lock:
+        source_b = adaptive_threshold._boundaries.get(source_profile)
+        if source_b:
+            source_n = source_b.get("n", 0)
+
+    if source_n < min_source_samples:
+        return {
+            "source": source_profile,
+            "target": target_profile,
+            "similarity": similarity,
+            "transferred": False,
+            "reason": f"source has only {source_n} samples (need >= {min_source_samples})",
+            "source_samples": source_n,
+        }
+
+    # Data-driven similarity: if batch_learner has data for both, compute similarity
+    # from the distribution overlap of their avg_dE values
+    data_driven_similarity = None
+    if batch_learner is not None:
+        with batch_learner._lock:
+            src_batches = batch_learner._batch_history.get(source_profile, [])
+            tgt_batches = batch_learner._batch_history.get(target_profile, [])
+            if len(src_batches) >= 3 and len(tgt_batches) >= 3:
+                src_avg = statistics.mean([b["avg_dE"] for b in src_batches])
+                tgt_avg = statistics.mean([b["avg_dE"] for b in tgt_batches])
+                src_std = statistics.stdev([b["avg_dE"] for b in src_batches]) if len(src_batches) > 1 else 1.0
+                tgt_std = statistics.stdev([b["avg_dE"] for b in tgt_batches]) if len(tgt_batches) > 1 else 1.0
+                pooled_std = math.sqrt((src_std ** 2 + tgt_std ** 2) / 2.0) or 1.0
+                # Similarity from distribution distance (inverse of standardized difference)
+                data_driven_similarity = 1.0 / (1.0 + abs(src_avg - tgt_avg) / pooled_std)
+                similarity = data_driven_similarity
+
     source_pass, source_marginal = adaptive_threshold.get_thresholds(source_profile)
     target_pass, target_marginal = adaptive_threshold.get_thresholds(target_profile)
 
@@ -214,14 +313,19 @@ def transfer_knowledge(
     new_pass = target_pass * (1 - similarity) + source_pass * similarity
     new_marginal = target_marginal * (1 - similarity) + source_marginal * similarity
 
-    return {
+    result: dict[str, Any] = {
         "source": source_profile,
         "target": target_profile,
-        "similarity": similarity,
+        "similarity": round(similarity, 4),
+        "transferred": True,
         "transferred_pass": round(new_pass, 3),
         "transferred_marginal": round(new_marginal, 3),
+        "source_samples": source_n,
         "note": f"从 {source_profile} 迁移了 {similarity*100:.0f}% 的知识到 {target_profile}",
     }
+    if data_driven_similarity is not None:
+        result["data_driven_similarity"] = round(data_driven_similarity, 4)
+    return result
 
 
 # ══════════════════════════════════════════════════════════

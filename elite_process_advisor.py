@@ -232,6 +232,83 @@ def build_process_advice(report: dict[str, Any], config: dict[str, Any], config_
     if risk_level in ("high", "critical") and "建议先小步调参并复测，再批量放行。" not in actions:
         actions.append("建议先小步调参并复测，再批量放行。")
 
+    # --- Improved bias interpretation using signed dL/dC/dH ---
+    bias_interpretation: list[str] = []
+    dL = ctx.get("dL", 0.0)
+    dC = ctx.get("dC", 0.0)
+    dH = ctx.get("dH_deg", 0.0)
+    if abs(dL) > 0.3:
+        bias_interpretation.append(f"L*偏差={dL:+.2f}: {'偏亮 (too bright)' if dL > 0 else '偏暗 (too dark)'}")
+    if abs(dC) > 0.3:
+        bias_interpretation.append(f"C*偏差={dC:+.2f}: {'饱和度偏高 (over-saturated)' if dC > 0 else '饱和度偏低 (under-saturated)'}")
+    if abs(dH) > 0.5:
+        bias_interpretation.append(f"H偏差={dH:+.2f}°: {'色相正偏 (hue shift +)' if dH > 0 else '色相负偏 (hue shift -)'}")
+
+    # --- Estimate expected ΔE improvement per action & assign urgency ---
+    active_rules = [r for r in matched_rules if r.get("matched")]
+    prioritized_actions: list[dict[str, Any]] = []
+    _seen_actions: set[str] = set()
+
+    # Severity -> urgency mapping
+    _urgency_map = {"critical": 0, "high": 1, "medium": 2, "low": 3, None: 3}
+
+    for rule in active_rules:
+        sev = rule.get("severity")
+        urgency_rank = _urgency_map.get(sev, 3)
+        urgency_label = "critical" if urgency_rank == 0 else ("high" if urgency_rank == 1 else ("medium" if urgency_rank == 2 else "fine-tuning"))
+        rule_actions = rule.get("actions", [])
+        # Rough ΔE improvement estimate: higher severity rules have bigger impact
+        base_improvement = {0: 1.5, 1: 1.0, 2: 0.5, 3: 0.2}.get(urgency_rank, 0.2)
+        for a in rule_actions:
+            a_str = str(a).strip()
+            if a_str and a_str not in _seen_actions:
+                _seen_actions.add(a_str)
+                prioritized_actions.append({
+                    "action": a_str,
+                    "urgency": urgency_label,
+                    "urgency_rank": urgency_rank,
+                    "expected_delta_e_improvement": round(base_improvement, 2),
+                    "source_rule_index": rule.get("index"),
+                    "severity": sev,
+                })
+
+    # Sort by urgency (critical first), then by expected improvement descending
+    prioritized_actions.sort(key=lambda x: (x["urgency_rank"], -x["expected_delta_e_improvement"]))
+
+    # --- Interaction warnings: detect potentially counteracting adjustments ---
+    interaction_warnings: list[str] = []
+    action_texts = [pa["action"] for pa in prioritized_actions]
+    # Simple heuristic: if one action says increase and another says decrease the same parameter
+    _increase_kw = ["增加", "提高", "加大", "increase", "raise"]
+    _decrease_kw = ["降低", "减少", "减小", "decrease", "lower", "reduce"]
+    inc_actions = [a for a in action_texts if any(k in a for k in _increase_kw)]
+    dec_actions = [a for a in action_texts if any(k in a for k in _decrease_kw)]
+    if inc_actions and dec_actions:
+        interaction_warnings.append(
+            f"Potential conflict: some actions suggest increasing while others suggest decreasing parameters. "
+            f"Increase: {inc_actions[0]!r}; Decrease: {dec_actions[0]!r}. Review before applying both."
+        )
+
+    # --- Historical success rate placeholder ---
+    # If the config provides historical hit/success counts per rule, include them.
+    history_rates: list[dict[str, Any]] = []
+    rule_history = config.get("action_rule_history", {})
+    if isinstance(rule_history, dict):
+        for pa in prioritized_actions:
+            ridx = pa.get("source_rule_index")
+            key = str(ridx)
+            if key in rule_history:
+                h = rule_history[key]
+                total = _to_float(h.get("total_applications"), 0)
+                successes = _to_float(h.get("successes"), 0)
+                rate = round(successes / max(total, 1), 3)
+                history_rates.append({
+                    "action": pa["action"],
+                    "rule_index": ridx,
+                    "success_rate": rate,
+                    "total_applications": int(total),
+                })
+
     return {
         "enabled": True,
         "config_path": str(config_path),
@@ -242,6 +319,10 @@ def build_process_advice(report: dict[str, Any], config: dict[str, Any], config_
         "matched_rules": matched_rules,
         "suggested_meanings": meanings,
         "suggested_actions": actions,
+        "bias_interpretation": bias_interpretation,
+        "prioritized_actions": prioritized_actions,
+        "interaction_warnings": interaction_warnings,
+        "historical_success_rates": history_rates,
     }
 
 
