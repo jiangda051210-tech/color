@@ -2436,16 +2436,82 @@ class SPCEngine:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class MultiObserverSimulator:
-    """模拟不同人群/视觉特性的色差感知差异。"""
+    """模拟不同人群/视觉特性的色差感知差异。
+
+    v2 升级:
+      - Pokorny 模型: 年龄相关的晶状体黄化
+      - 异常三色视觉: 使用适当的锥体偏移参数
+      - 敏感度分析: 哪个观察者对THIS色差最敏感
+    """
+
+    # Anomalous trichromacy cone shift parameters (wavelength shift in nm)
+    # Based on DeMarco, Pokorny & Smith (1992)
+    _ANOMALOUS_CONE_SHIFTS = {
+        "deuteranomaly": {"M_shift": 5.0, "severity": "mild"},     # M cone shifted toward L
+        "protanomaly": {"L_shift": -5.0, "severity": "mild"},      # L cone shifted toward M
+        "tritanomaly": {"S_shift": 3.0, "severity": "mild"},       # S cone shifted toward M
+        "deuteranomaly_severe": {"M_shift": 10.0, "severity": "severe"},
+        "protanomaly_severe": {"L_shift": -10.0, "severity": "severe"},
+    }
 
     _PROFILES = {
-        "standard": {"name": "标准观察者(25-35岁)", "lens": 0.0, "cone": [1.0, 1.0, 1.0]},
-        "elderly_60": {"name": "60岁以上", "lens": 0.4, "cone": [0.95, 0.92, 0.75]},
-        "elderly_75": {"name": "75岁以上", "lens": 0.7, "cone": [0.88, 0.85, 0.55]},
-        "deuteranomaly": {"name": "轻度绿色弱", "lens": 0.0, "cone": [1.0, 0.7, 1.0]},
-        "protanomaly": {"name": "轻度红色弱", "lens": 0.0, "cone": [0.7, 1.0, 1.0]},
-        "tritanomaly": {"name": "轻度蓝色弱", "lens": 0.0, "cone": [1.0, 1.0, 0.7]},
+        "standard": {"name": "标准观察者(25-35岁)", "age": 30, "lens": 0.0, "cone": [1.0, 1.0, 1.0]},
+        "elderly_60": {"name": "60岁以上", "age": 60, "lens": 0.4, "cone": [0.95, 0.92, 0.75]},
+        "elderly_75": {"name": "75岁以上", "age": 75, "lens": 0.7, "cone": [0.88, 0.85, 0.55]},
+        "deuteranomaly": {"name": "轻度绿色弱", "age": 30, "lens": 0.0, "cone": [1.0, 0.7, 1.0],
+                          "anomaly": "deuteranomaly"},
+        "protanomaly": {"name": "轻度红色弱", "age": 30, "lens": 0.0, "cone": [0.7, 1.0, 1.0],
+                        "anomaly": "protanomaly"},
+        "tritanomaly": {"name": "轻度蓝色弱", "age": 30, "lens": 0.0, "cone": [1.0, 1.0, 0.7],
+                        "anomaly": "tritanomaly"},
     }
+
+    @staticmethod
+    def _pokorny_lens_density(age: int) -> float:
+        """Pokorny, Smithe & Lutze (1987) model for age-related lens yellowing.
+        Returns optical density increase relative to a 32-year-old standard observer.
+        Primarily affects short wavelengths (blue light absorption).
+        """
+        if age <= 20:
+            return 0.0
+        # Lens optical density increases approximately as:
+        # TL(age) = TL(32) * (1 + 0.02 * (age - 32)) for age > 32
+        # Simplified to a continuous function
+        age_factor = max(0.0, (age - 32) * 0.02)
+        # Accelerates after 60
+        if age > 60:
+            age_factor += (age - 60) * 0.015
+        return min(age_factor, 1.5)  # cap
+
+    def _apply_anomalous_shift(self, lab: dict, anomaly_type: str) -> dict:
+        """Apply anomalous trichromacy cone shift to Lab values.
+        Cone wavelength shifts affect the a* and b* channels differently.
+        """
+        shift_params = self._ANOMALOUS_CONE_SHIFTS.get(anomaly_type)
+        if not shift_params:
+            return lab
+
+        L, a, b = float(lab['L']), float(lab['a']), float(lab['b'])
+
+        # M-cone shift (deuteranomaly): reduces red-green discrimination
+        if 'M_shift' in shift_params:
+            shift = shift_params['M_shift']
+            # M shifting toward L reduces a* contrast
+            a *= max(0.3, 1.0 - shift * 0.06)  # 5nm shift -> 30% reduction in a*
+
+        # L-cone shift (protanomaly): also reduces red-green, differently
+        if 'L_shift' in shift_params:
+            shift = abs(shift_params['L_shift'])
+            a *= max(0.3, 1.0 - shift * 0.05)
+            # Also slight L* reduction (red sensitivity loss)
+            L *= max(0.85, 1.0 - shift * 0.01)
+
+        # S-cone shift (tritanomaly): reduces blue-yellow discrimination
+        if 'S_shift' in shift_params:
+            shift = shift_params['S_shift']
+            b *= max(0.4, 1.0 - shift * 0.08)
+
+        return {'L': L, 'a': a, 'b': b}
 
     def simulate(self, lab_sample: dict[str, float], lab_film: dict[str, float], standard_de: float | None = None) -> dict[str, Any]:
         std_de = float(standard_de) if standard_de is not None else float(delta_e_2000(lab_sample, lab_film)["total"])
@@ -2464,16 +2530,64 @@ class MultiObserverSimulator:
         worst_key = max(per_observer, key=lambda item: per_observer[item]["de"])
         population_risk = sum(1 for row in per_observer.values() if row["noticeable"]) / max(1, len(per_observer))
         worst = per_observer[worst_key]
+
+        # Find which observer is most sensitive to THIS specific color difference
+        most_sensitive = self._find_most_sensitive(lab_sample, lab_film, per_observer, std_de)
+
         return {
             "standard_de": round(std_de, 3),
             "per_observer": per_observer,
             "worst": {"key": worst_key, "name": worst["name"], "de": worst["de"]},
+            "most_sensitive_to_this_color": most_sensitive,
             "population_risk": round(population_risk, 3),
             "recommendation": (
                 f"{worst['name']} 感知ΔE={worst['de']:.2f}，建议按目标人群收紧阈值。"
                 if worst["de"] > std_de * 1.3 else "各观察者群体感知差异在可控范围。"
             ),
         }
+
+    def _find_most_sensitive(self, lab_sample, lab_film, per_observer, std_de):
+        """Find which observer has the highest RELATIVE sensitivity to this specific color difference.
+        Not just who sees the biggest ΔE, but who amplifies THIS particular color difference the most.
+        """
+        if std_de < 0.01:
+            return {"key": "standard", "amplification_ratio": 1.0}
+
+        best_key = "standard"
+        best_ratio = 1.0
+
+        for key, obs in per_observer.items():
+            ratio = obs['de'] / max(std_de, 0.01)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_key = key
+
+        return {
+            "key": best_key,
+            "name": per_observer[best_key]["name"],
+            "amplification_ratio": round(best_ratio, 3),
+            "reason": self._sensitivity_reason(best_key, lab_sample, lab_film),
+        }
+
+    def _sensitivity_reason(self, observer_key, lab_sample, lab_film):
+        """Explain WHY this observer is most sensitive to this color difference."""
+        dL = abs(lab_sample['L'] - lab_film['L'])
+        da = abs(lab_sample['a'] - lab_film['a'])
+        db = abs(lab_sample['b'] - lab_film['b'])
+
+        if observer_key.startswith("elderly"):
+            if db > da and db > dL:
+                return "老年观察者晶状体黄化增强了对蓝黄轴(b*)差异的敏感度"
+            return "老年观察者整体色彩感知下降，但对明度差异仍敏感"
+        if "deuter" in observer_key or "protan" in observer_key:
+            if da > db:
+                return f"红绿色觉异常者对a*轴差异({da:.2f})的感知被改变"
+            return "红绿色觉异常，但此色差主要在b*轴，影响较小"
+        if "tritan" in observer_key:
+            if db > da:
+                return f"蓝黄色觉异常者对b*轴差异({db:.2f})的感知被改变"
+            return "蓝黄色觉异常，但此色差主要在a*轴，影响较小"
+        return "标准观察者"
 
     def for_demographic(
         self,
@@ -2508,15 +2622,28 @@ class MultiObserverSimulator:
             "simulation": simulation,
         }
 
-    @staticmethod
-    def _adapt(lab: dict[str, float], profile: dict[str, Any]) -> dict[str, float]:
-        lens = float(profile.get("lens", 0.0))
+    def _adapt(self, lab: dict[str, float], profile: dict[str, Any]) -> dict[str, float]:
+        """Apply observer adaptation including Pokorny lens model and anomalous cone shifts."""
+        age = int(profile.get("age", 30))
         cone = profile.get("cone", [1.0, 1.0, 1.0])
-        return {
-            "L": float(lab["L"]) * (0.9 + 0.1 * (1 - lens * 0.3)),
-            "a": float(lab["a"]) * (float(cone[0]) / max(float(cone[1]), 0.1)),
-            "b": float(lab["b"]) * (1 - 0.3 * lens) * float(cone[2]),
-        }
+
+        # Pokorny lens yellowing model (replaces simple linear lens factor)
+        lens_density = self._pokorny_lens_density(age)
+
+        # Lens yellowing primarily reduces short-wavelength (blue) transmission
+        # Effect on Lab: L slightly reduced, b* shifted toward yellow
+        L = float(lab["L"]) * max(0.8, 1.0 - lens_density * 0.08)
+        a = float(lab["a"]) * (float(cone[0]) / max(float(cone[1]), 0.1))
+        b = float(lab["b"]) * max(0.4, 1.0 - lens_density * 0.25) * float(cone[2])
+
+        result = {'L': L, 'a': a, 'b': b}
+
+        # Apply anomalous trichromacy cone shift if applicable
+        anomaly = profile.get("anomaly")
+        if anomaly:
+            result = self._apply_anomalous_shift(result, anomaly)
+
+        return result
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
