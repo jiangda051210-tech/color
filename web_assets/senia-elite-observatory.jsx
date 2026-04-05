@@ -65,6 +65,28 @@ const DEGauge = ({ value, max = 5, size = 140 }) => {
   </svg>;
 };
 const Tag = ({ t, c }) => <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 7, border: `1px solid ${(c || T.a)}35`, background: `${c || T.a}12`, color: c || T.a, fontSize: 10, fontWeight: 700 }}>{t}</span>;
+const Skeleton = ({ w = "100%", h = 16 }) => <div style={{ width: w, height: h, borderRadius: 6, background: `linear-gradient(90deg, ${T.m} 25%, ${T.b} 50%, ${T.m} 75%)`, backgroundSize: "200% 100%", animation: "shimmer 1.5s infinite" }} />;
+const AnimNum = ({ value, decimals = 2, suffix = "" }) => {
+  const [display, setDisplay] = useState(0);
+  useEffect(() => {
+    if (!Number.isFinite(value)) { setDisplay(value); return; }
+    let start = 0, t0 = null;
+    const step = (ts) => { if (!t0) t0 = ts; const p = Math.min((ts - t0) / 800, 1); const ease = 1 - Math.pow(1 - p, 3); setDisplay(start + (value - start) * ease); if (p < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  }, [value]);
+  return <span>{Number.isFinite(display) ? display.toFixed(decimals) : "--"}{suffix}</span>;
+};
+const ExportBtn = ({ data, filename = "export.csv" }) => {
+  const handleExport = useCallback(() => {
+    if (!data || !data.length) return;
+    const keys = Object.keys(data[0]);
+    const csv = [keys.join(","), ...data.map(r => keys.map(k => JSON.stringify(r[k] ?? "")).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
+  }, [data, filename]);
+  return <button onClick={handleExport} style={{ border: `1px solid ${T.b}`, borderRadius: 7, padding: "4px 10px", background: T.p, color: T.dim, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Export CSV</button>;
+};
 const Spark = ({ d, th, c = T.a, h = 100, label }) => {
   const arr = Array.isArray(d) && d.length > 1 ? d : [0, 1], mn = Math.min(...arr), mx = Math.max(...arr, Number.isFinite(th) ? th : mn + 1), rg = Math.max(0.0001, mx - mn), w = 340, pad = 8;
   const pts = arr.map((v, i) => `${pad + (i / (arr.length - 1)) * (w - 2 * pad)},${h - pad - ((v - mn) / rg) * (h - 2 * pad)}`).join(" ");
@@ -125,7 +147,16 @@ const perObs = (p) => {
   if (!x) return [];
   return Object.keys(x).map((k) => ({ k, n: x[k].name || k, de: num(x[k].de, NaN), dv: num(x[k].delta_vs_standard, 0) })).filter((r) => Number.isFinite(r.de)).sort((a, b) => b.de - a.de);
 };
+const obsStyles = `
+@keyframes shimmer { 0% { background-position:-200% 0; } 100% { background-position:200% 0; } }
+@keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+@keyframes drawLine { from { stroke-dashoffset: 1000; } to { stroke-dashoffset: 0; } }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.6; } }
+.senia-panel:hover { box-shadow: 0 8px 32px rgba(0,0,0,0.4) !important; }
+`;
+let obsStyleInjected = false;
 export default function EliteObservatory() {
+  useEffect(() => { if (!obsStyleInjected && typeof document !== "undefined") { const s = document.createElement("style"); s.textContent = obsStyles; document.head.appendChild(s); obsStyleInjected = true; } }, []);
   const dft = useMemo(() => bootDefaults(), []);
   const [tab, setTab] = useState("overview");
   const [sample, setSample] = useState({ r: 158, g: 149, b: 131 });
