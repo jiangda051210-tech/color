@@ -318,7 +318,12 @@ def weighted_robust_mean(
     # IRLS: 迭代重加权最小二乘
     # 每次迭代: 根据到当前均值的距离重新加权, 远离均值的像素降权
     current_mean = weighted.copy()
+    prev_mean = current_mean.copy()
     for iteration in range(irls_iterations):
+        # Early convergence for degenerate cases (all pixels same color)
+        if iteration > 0 and np.allclose(current_mean, prev_mean, atol=0.001):
+            break  # converged
+        prev_mean = current_mean.copy()
         # 计算每个像素到当前均值的 Lab 距离
         diff = lab_image.astype(np.float64) - current_mean.reshape(1, 1, 3)
         dist = np.sqrt((diff**2).sum(axis=-1))  # Euclidean distance in Lab

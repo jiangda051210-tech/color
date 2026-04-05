@@ -7214,7 +7214,11 @@ async def senia_dual_shot_endpoint(
     不需要把标样放在大货上面, 分别拍即可.
     """
     ref_raw = await reference.read()
+    if len(ref_raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"reference file too large (max {MAX_UPLOAD_BYTES // 1024 // 1024}MB)")
     smp_raw = await sample.read()
+    if len(smp_raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"sample file too large (max {MAX_UPLOAD_BYTES // 1024 // 1024}MB)")
 
     out_dir = _ensure_output_dir(f"dual_{lot_id or 'auto'}_{int(time.time())}")
     ref_path = out_dir / (reference.filename or "reference.jpg")
@@ -7244,6 +7248,8 @@ async def senia_calibrate_endpoint(
     ColorChecker 自动校准: 上传含色卡的照片, 返回 3×3 CCM.
     """
     raw = await image.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"image too large (max {MAX_UPLOAD_BYTES // 1024 // 1024}MB)")
     arr = np.frombuffer(raw, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:

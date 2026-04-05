@@ -138,9 +138,13 @@ def cam16_forward(
     n, z, N_bb, A_w = vc["n"], vc["z"], vc["N_bb"], vc["A_w"]
     _adapt = vc["_adapt"]
 
+    # Guard against negative XYZ values
+    X, Y, Z = max(X, 0.0), max(Y, 0.0), max(Z, 0.0)
     RGB = _dot3(_M16, [X, Y, Z])
     RGB_c = [RGB[i] * D_RGB[i] for i in range(3)]
     RGB_a = [_adapt(r) for r in RGB_c]
+    # Clamp adapted RGB responses to prevent negative values propagating
+    RGB_a = [max(r, 0.0) for r in RGB_a]
 
     # 感知属性
     a = RGB_a[0] - 12 * RGB_a[1] / 11 + RGB_a[2] / 11
@@ -252,7 +256,8 @@ def cam16_inverse(
 
     # M16_inv @ RGB → XYZ
     XYZ = _dot3(_M16_INV, RGB)
-    return (XYZ[0], XYZ[1], XYZ[2])
+    # Prevent negative XYZ values from propagating
+    return (max(XYZ[0], 0.0), max(XYZ[1], 0.0), max(XYZ[2], 0.0))
 
 
 def cam16_delta(
@@ -379,8 +384,9 @@ def metamerism_risk(
     illuminant_risks: list[dict[str, Any]] = []
 
     # CAM16 参考色 (D65 条件)
+    # 近似 Lab→XYZ, clamped to prevent negative values
     cam16_ref = cam16_forward(
-        L * 0.95047, L, L * 1.08883,  # 近似 Lab→XYZ (用于 CAM16 比较)
+        max(L * 0.95047, 0.0), max(L, 0.0), max(L * 1.08883, 0.0),
     )
 
     for illum_name, lab_data, desc, warning in illuminant_data:
@@ -393,7 +399,7 @@ def metamerism_risk(
 
         # CAM16 感知距离 (更准确的环境适应比较)
         cam16_illum = cam16_forward(
-            lab_data[0] * 0.95047, lab_data[0], lab_data[0] * 1.08883,
+            max(lab_data[0] * 0.95047, 0.0), max(lab_data[0], 0.0), max(lab_data[0] * 1.08883, 0.0),
         )
         cam16_de = cam16_ucs_distance(cam16_ref, cam16_illum)
 

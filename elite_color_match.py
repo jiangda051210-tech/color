@@ -3012,7 +3012,7 @@ def write_html_report(report: dict[str, Any], html_path: Path) -> None:
 
     def fnum(v: Any) -> str:
         try:
-            return f"{float(v):.3f}"
+            return escape(f"{float(v):.3f}")
         except Exception:  # noqa: BLE001
             return "-"
 
@@ -3024,7 +3024,7 @@ def write_html_report(report: dict[str, Any], html_path: Path) -> None:
         p = Path(path)
         if not p.exists():
             continue
-        img_src = p.resolve().as_uri()
+        img_src = escape(p.resolve().as_uri(), quote=True)
         images_html.append(
             f"<div class='imgbox'><div class='cap'>{escape(key)}</div><img src='{img_src}' alt='{escape(key)}'/></div>"
         )
