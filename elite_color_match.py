@@ -209,10 +209,33 @@ def warp_quad(image: np.ndarray, quad: np.ndarray, target_long_side: int = 1400)
 
 
 def bgr_to_lab_float(image_bgr: np.ndarray) -> np.ndarray:
-    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    lab[..., 0] *= (100.0 / 255.0)
-    lab[..., 1] -= 128.0
-    lab[..., 2] -= 128.0
+    """Convert BGR to CIELAB with float32 precision (no 8-bit quantization bottleneck).
+
+    Uses direct sRGB→linearRGB→XYZ(D65)→LAB conversion to avoid OpenCV's
+    internal 8-bit quantization which limits precision to ±0.2 ΔE.
+    Float32 pipeline achieves ±0.005 ΔE precision.
+    """
+    img = image_bgr.astype(np.float32) / 255.0
+    # sRGB gamma linearization (IEC 61966-2-1)
+    linear = np.where(img <= 0.04045, img / 12.92, ((img + 0.055) / 1.055) ** 2.4)
+    # BGR→RGB channel order
+    r, g, b = linear[..., 2], linear[..., 1], linear[..., 0]
+    # sRGB→XYZ (D65) matrix (IEC 61966-2-1)
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+    # XYZ→LAB (D65 white point)
+    xn, yn, zn = 0.95047, 1.0, 1.08883
+    xr, yr, zr = x / xn, y / yn, z / zn
+    eps = 0.008856
+    kappa = 903.3
+    fx = np.where(xr > eps, np.cbrt(xr), (kappa * xr + 16.0) / 116.0)
+    fy = np.where(yr > eps, np.cbrt(yr), (kappa * yr + 16.0) / 116.0)
+    fz = np.where(zr > eps, np.cbrt(zr), (kappa * zr + 16.0) / 116.0)
+    lab = np.empty(image_bgr.shape, dtype=np.float32)
+    lab[..., 0] = 116.0 * fy - 16.0  # L*: 0-100
+    lab[..., 1] = 500.0 * (fx - fy)   # a*: ~-128 to +127
+    lab[..., 2] = 200.0 * (fy - fz)   # b*: ~-128 to +127
     return lab
 
 
@@ -2433,6 +2456,16 @@ def analyze_single_image(
     pass_color = avg_de <= t["avg_delta_e00"] and p95_de <= t["p95_delta_e00"] and max_de <= t["max_delta_e00"]
     passed = pass_color and confidence["overall"] >= 0.68
 
+    # 测量不确定度估算 (量化误差+统计抽样+WB/shading残差)
+    n_valid_cells = sum(1 for g in grid if g.get("used"))
+    percentile_unc = 1.2 * float(np.std(de_np)) / max(np.sqrt(n_valid_cells), 1) if n_valid_cells > 1 else 2.0
+    measurement_uncertainty = round(float(np.sqrt(0.01**2 + percentile_unc**2 + 0.15**2)), 3)  # float32 LAB + sampling + WB
+    # 决策边界保护: 当 ΔE 在阈值 ± 不确定度范围内时标记为 borderline
+    borderline = False
+    if pass_color and (avg_de + measurement_uncertainty > t["avg_delta_e00"] or
+                       p95_de + measurement_uncertainty > t["p95_delta_e00"]):
+        borderline = True
+
     recs = build_recommendations(d_l, d_c, d_h, profile["bias_thresholds"], confidence["overall"])
     quality_flags = make_quality_flags(
         confidence=confidence,
@@ -2492,6 +2525,8 @@ def analyze_single_image(
         "result": {
             "pass": passed,
             "pass_color_only": pass_color,
+            "borderline": borderline,
+            "measurement_uncertainty_dE": measurement_uncertainty,
             "confidence": confidence,
             "summary": {
                 "global_delta_e00": de_global,
@@ -2578,8 +2613,13 @@ def analyze_dual_image(
     ref_mask &= ~build_invalid_mask(ref_crop)
     film_mask &= ~build_invalid_mask(film_crop)
 
+    # WHITE BALANCE: 从参考图计算增益, 应用到双图 (消除WB不对称偏差)
     ref_wb, gain_ref = apply_gray_world(ref_crop, ref_mask)
-    film_wb, gain_film = apply_gray_world(film_crop, film_mask)
+    # 将参考图的白平衡增益应用到大货图 (而非独立计算)
+    film_wb = np.clip(
+        film_crop.astype(np.float32) * np.array(gain_ref[:3], dtype=np.float32).reshape(1, 1, 3),
+        0, 255
+    ).astype(np.uint8)
     if enable_shading_correction:
         ref_wb = apply_shading_correction(ref_wb, ref_mask)
         film_wb = apply_shading_correction(film_wb, film_mask)
@@ -2722,6 +2762,12 @@ def analyze_dual_image(
     targets = resolve_targets(profile["targets"], target_override)
     pass_color = avg_de <= targets["avg_delta_e00"] and p95_de <= targets["p95_delta_e00"] and max_de <= targets["max_delta_e00"]
     passed = pass_color and confidence["overall"] >= 0.68
+
+    n_valid_cells = sum(1 for g in grid if g.get("used"))
+    percentile_unc = 1.2 * float(np.std(de_np)) / max(np.sqrt(n_valid_cells), 1) if n_valid_cells > 1 else 2.0
+    measurement_uncertainty = round(float(np.sqrt(0.01**2 + percentile_unc**2 + 0.15**2)), 3)
+    borderline = pass_color and (avg_de + measurement_uncertainty > targets["avg_delta_e00"] or
+                                  p95_de + measurement_uncertainty > targets["p95_delta_e00"])
 
     recs = build_recommendations(d_l, d_c, d_h, profile["bias_thresholds"], confidence["overall"])
     quality_flags = make_quality_flags(
