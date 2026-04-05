@@ -24,8 +24,8 @@ import time
 import statistics
 from dataclasses import dataclass, field, asdict
 from typing import Any
-from collections import deque, defaultdict
-import copy
+from collections import defaultdict
+import numpy as np
 
 # ─────────────────────────────────────────────
 # 基础色彩科学工具
@@ -1582,13 +1582,19 @@ class BatchBlendOptimizer:
             return {'status': 'error',
                     'message': f'批次数{n}不足以满足{n_groups}组x最少{min_per_group}批/组的约束'}
 
-        # 计算所有批次间色差矩阵
+        # Pre-extract Lab values with safe defaults for faster access
+        labs = np.array([[b.get('lab',{}).get('L',50), b.get('lab',{}).get('a',0), b.get('lab',{}).get('b',0)] for b in batches])
+
+        # 计算所有批次间色差矩阵 (computed ONCE and reused)
         de_matrix = [[0.0]*n for _ in range(n)]
         for i in range(n):
             for j in range(i+1, n):
-                de = delta_e_2000(batches[i]['lab'], batches[j]['lab'])['total']
+                lab_i = {'L': labs[i][0], 'a': labs[i][1], 'b': labs[i][2]}
+                lab_j = {'L': labs[j][0], 'a': labs[j][1], 'b': labs[j][2]}
+                de = delta_e_2000(lab_i, lab_j)['total']
                 de_matrix[i][j] = de
                 de_matrix[j][i] = de
+        de_matrix_np = np.array(de_matrix)
 
         # Choose optimization strategy based on size
         if n <= 8:
@@ -1617,8 +1623,8 @@ class BatchBlendOptimizer:
                         if de_matrix[indices[i]][indices[j]] > max_intra_de:
                             constraint_violations.append({
                                 'group': gi + 1,
-                                'batch_i': batches[indices[i]]['batch_id'],
-                                'batch_j': batches[indices[j]]['batch_id'],
+                                'batch_i': batches[indices[i]].get('batch_id', f'unknown_{indices[i]}'),
+                                'batch_j': batches[indices[j]].get('batch_id', f'unknown_{indices[j]}'),
                                 'deltaE': round(de_matrix[indices[i]][indices[j]], 3),
                                 'limit': max_intra_de,
                             })
@@ -1633,15 +1639,15 @@ class BatchBlendOptimizer:
                     intra_des.append(de_matrix[indices[i]][indices[j]])
             max_de = max(intra_des) if intra_des else 0
             avg_de = sum(intra_des)/len(intra_des) if intra_des else 0
-            total_qty = sum(batches[idx]['quantity'] for idx in indices)
+            total_qty = sum(batches[idx].get('quantity', 0) for idx in indices)
             avg_lab = {
-                'L': sum(batches[idx]['lab']['L'] for idx in indices) / len(indices),
-                'a': sum(batches[idx]['lab']['a'] for idx in indices) / len(indices),
-                'b': sum(batches[idx]['lab']['b'] for idx in indices) / len(indices),
+                'L': sum(batches[idx].get('lab', {'L':50,'a':0,'b':0}).get('L', 50) for idx in indices) / len(indices),
+                'a': sum(batches[idx].get('lab', {'L':50,'a':0,'b':0}).get('a', 0) for idx in indices) / len(indices),
+                'b': sum(batches[idx].get('lab', {'L':50,'a':0,'b':0}).get('b', 0) for idx in indices) / len(indices),
             }
             group_stats.append({
                 'group': gi + 1,
-                'batches': [batches[idx]['batch_id'] for idx in indices],
+                'batches': [batches[idx].get('batch_id', f'unknown_{idx}') for idx in indices],
                 'batch_count': len(indices),
                 'total_quantity': total_qty,
                 'max_intra_deltaE': round(max_de, 3),
@@ -1734,6 +1740,7 @@ class BatchBlendOptimizer:
         """Simulated annealing for larger batch sizes."""
         import random as _rng
         n = len(batches)
+        de_matrix_np = np.array(de_matrix)
 
         # Initial assignment: greedy
         greedy = self._greedy_partition(batches, de_matrix, k)
@@ -1745,10 +1752,10 @@ class BatchBlendOptimizer:
         def cost(asgn):
             worst = 0.0
             for g in range(k):
-                members = [i for i in range(n) if asgn[i] == g]
-                for a in range(len(members)):
-                    for b in range(a+1, len(members)):
-                        worst = max(worst, de_matrix[members[a]][members[b]])
+                members_arr = np.array([i for i in range(n) if asgn[i] == g])
+                if len(members_arr) > 1:
+                    sub = de_matrix_np[np.ix_(members_arr, members_arr)]
+                    worst = max(worst, float(np.max(sub)))
             return worst
 
         current_cost = cost(assignment)
@@ -1818,7 +1825,7 @@ class BatchBlendOptimizer:
         n = len(batches)
         # 按 L*a*b 的主成分排序（简化: 按L排序）
         indices = list(range(n))
-        indices.sort(key=lambda i: (batches[i]['lab']['L'], batches[i]['lab']['a'], batches[i]['lab']['b']))
+        indices.sort(key=lambda i: (batches[i].get('lab', {'L':50,'a':0,'b':0}).get('L', 50), batches[i].get('lab', {'L':50,'a':0,'b':0}).get('a', 0), batches[i].get('lab', {'L':50,'a':0,'b':0}).get('b', 0)))
 
         groups = [[] for _ in range(k)]
         for rank, idx in enumerate(indices):
