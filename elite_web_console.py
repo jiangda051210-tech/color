@@ -2575,10 +2575,15 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       background: rgba(11, 25, 42, 0.8);
     }
     .kpi .k { margin: 0; font-size: 11px; color: var(--sub); text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; }
-    .kpi .v { margin: 8px 0 0; font-size: 26px; font-weight: 800; font-family: "JetBrains Mono", "Consolas", monospace; letter-spacing: -0.5px; }
+    .kpi .v { margin: 8px 0 0; font-size: 26px; font-weight: 800; font-family: "JetBrains Mono", "Consolas", monospace; letter-spacing: -0.5px; transition: color 0.4s ease; }
+    .kpi .trend { margin: 4px 0 0; font-size: 11px; color: var(--sub); }
+    .kpi .trend.up { color: var(--good); }
+    .kpi .trend.down { color: var(--bad); }
     .kpi.good .v { color: var(--good); }
     .kpi.warn .v { color: var(--warn); }
     .kpi.bad .v { color: var(--bad); }
+    .kpi { position: relative; overflow: hidden; transition: transform 0.2s ease, box-shadow 0.2s ease; }
+    .kpi:hover { transform: translateY(-2px); box-shadow: 0 14px 36px rgba(4, 12, 22, 0.5); }
     .kpi::before {
       content: "";
       position: absolute;
@@ -2586,9 +2591,19 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       height: 3px;
       border-radius: 12px 12px 0 0;
     }
+    .kpi::after {
+      content: "";
+      position: absolute;
+      top: 3px; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(ellipse at top, rgba(255,255,255,0.03), transparent 60%);
+      pointer-events: none;
+    }
     .kpi.good::before { background: linear-gradient(90deg, var(--good), transparent); }
     .kpi.warn::before { background: linear-gradient(90deg, var(--warn), transparent); }
     .kpi.bad::before { background: linear-gradient(90deg, var(--bad), transparent); }
+    .sparkline { margin-top: 8px; width: 100%; height: 32px; }
+    .sparkline polyline { fill: none; stroke-width: 1.5; stroke-linecap: round; }
+    .sparkline .area { opacity: 0.15; }
     .row {
       margin-top: 12px;
       display: grid;
@@ -2761,18 +2776,36 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       const el = q("#status-text");
       if (el) el.textContent = msg + " - " + new Date().toLocaleTimeString();
     }
+    function animateValue(el, end, suffix, duration = 800) {
+      if (!el || !Number.isFinite(end)) { if (el) el.textContent = "--"; return; }
+      const start = 0, step = (ts) => {
+        if (!step.t0) step.t0 = ts;
+        const p = Math.min((ts - step.t0) / duration, 1);
+        const ease = 1 - Math.pow(1 - p, 3);
+        el.textContent = (start + (end - start) * ease).toFixed(suffix === "%" ? 1 : 2) + suffix;
+        if (p < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    }
+    function syntaxHighlight(json) {
+      if (typeof json !== "string") json = JSON.stringify(json, null, 2);
+      return json.replace(/("(\\\\u[a-zA-Z0-9]{4}|\\\\[^u]|[^\\\\"])*"(\\s*:)?|\\b(true|false|null)\\b|-?\\d+(?:\\.\\d*)?(?:[eE][+\\-]?\\d+)?)/g, function(m) {
+        let c = "#7dd3fc"; if (/^"/.test(m)) { c = /:$/.test(m) ? "#93c5fd" : "#86efac"; } else if (/true|false/.test(m)) c = "#fbbf24"; else if (/null/.test(m)) c = "#a78bfa";
+        return '<span style="color:' + c + '">' + m + '</span>';
+      });
+    }
     async function loadExecutive() {
       setStatus("加载经营指标...");
       const p = params();
       const execResp = await fetch("/v1/history/executive?" + toQuery(p), { headers: authHeaders() });
       if (!execResp.ok) throw new Error("history/executive failed");
       const execData = await execResp.json();
-      q("#exec-json").textContent = JSON.stringify(execData, null, 2);
+      q("#exec-json").innerHTML = syntaxHighlight(JSON.stringify(execData, null, 2));
 
       const passRate = Number(execData?.acceptance?.pass_rate ?? NaN);
       const avgDeltaE = Number(execData?.quality?.avg_delta_e ?? NaN);
-      q("#kpi-pass-rate").textContent = fmtPct(passRate);
-      q("#kpi-avg-de").textContent = fmtNum(avgDeltaE, 2);
+      animateValue(q("#kpi-pass-rate"), passRate * 100, "%");
+      animateValue(q("#kpi-avg-de"), avgDeltaE, "");
       setStatus("经营指标已加载");
     }
     async function loadRisk() {
@@ -2784,10 +2817,14 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       const okResp = await fetch("/v1/history/outcome-kpis?" + toQuery(p), { headers: authHeaders() });
       if (!okResp.ok) throw new Error("history/outcome-kpis failed");
       const okData = await okResp.json();
-      q("#risk-json").textContent = JSON.stringify({ early_warning: ewData, outcome_kpis: okData }, null, 2);
+      q("#risk-json").innerHTML = syntaxHighlight(JSON.stringify({ early_warning: ewData, outcome_kpis: okData }, null, 2));
 
-      q("#kpi-p30").textContent = fmtPct(Number(ewData?.complaint_prob_30d ?? NaN));
-      q("#kpi-risk-level").textContent = String(ewData?.risk_level || "--").toUpperCase();
+      const p30 = Number(ewData?.complaint_prob_30d ?? NaN);
+      animateValue(q("#kpi-p30"), p30 * 100, "%");
+      const rl = String(ewData?.risk_level || "--").toUpperCase();
+      q("#kpi-risk-level").textContent = rl;
+      const rkpi = q("#kpi-risk-level")?.closest(".kpi");
+      if (rkpi) { rkpi.classList.remove("good","warn","bad"); rkpi.classList.add(rl === "LOW" ? "good" : rl === "HIGH" || rl === "CRITICAL" ? "bad" : "warn"); }
     }
     async function exportCsv() {
       const p = params();
@@ -3217,6 +3254,20 @@ INNOVATION_V3_DASHBOARD_TEMPLATE = """
     .ok { color: var(--ok); }
     .warn { color: var(--warn); }
     .bad { color: var(--bad); }
+    @keyframes fadeInUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes shimmer { 0% { background-position:-200% 0; } 100% { background-position:200% 0; } }
+    .hero { animation: fadeInUp 0.5s ease both; }
+    .card { animation: fadeInUp 0.5s ease both; transition: box-shadow 0.2s ease; }
+    .card:hover { box-shadow: 0 14px 38px rgba(4, 12, 22, 0.55); }
+    .card:nth-child(2) { animation-delay: 0.08s; }
+    .card:nth-child(3) { animation-delay: 0.16s; }
+    .kpi { transition: transform 0.2s ease; }
+    .kpi:hover { transform: translateY(-2px); }
+    .link { transition: all 0.2s ease; }
+    .link:hover { background: rgba(63, 168, 255, 0.12); border-color: rgba(63, 168, 255, 0.35); color: #a5d4ff; }
+    button { transition: all 0.2s ease; }
+    button:hover { transform: translateY(-1px); filter: brightness(1.1); }
+    .skeleton { height: 18px; border-radius: 6px; background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
     @media (max-width: 1020px) {
       .cfg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .layout { grid-template-columns: 1fr; }
@@ -3592,6 +3643,8 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
   <title>SENIA Elite Precision Color Observatory</title>
   <style>
     html, body { margin: 0; background: #05060b; }
+    @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+    @keyframes pulseGlow { 0%,100% { box-shadow: 0 0 4px rgba(56,189,248,0.2); } 50% { box-shadow: 0 0 12px rgba(56,189,248,0.4); } }
     .top-bar {
       position: fixed;
       top: 12px;
@@ -3603,6 +3656,7 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
       justify-content: space-between;
       gap: 10px;
       pointer-events: none;
+      animation: fadeIn 0.6s ease;
     }
     .chip-row {
       display: flex;
@@ -3620,7 +3674,9 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
       font: 600 12px/1 "Outfit", "Noto Sans SC", system-ui, sans-serif;
     }
     .chip strong { color: #38bdf8; }
-    #precision-root { min-height: 100vh; }
+    .chip { transition: all 0.2s ease; }
+    .chip:hover { border-color: rgba(56,189,248,0.4); background: rgba(10,11,18,0.95); }
+    #precision-root { min-height: 100vh; animation: fadeIn 0.4s ease; }
     .live-pod {
       position: fixed;
       right: 12px;
@@ -3731,6 +3787,10 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
       font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
     }
     .kpi .v.warn { color: #fb923c; text-shadow: 0 0 10px rgba(251, 146, 60, 0.32); }
+    .kpi { transition: transform 0.15s ease; }
+    .kpi:hover { transform: scale(1.02); }
+    .live-pod { animation: fadeIn 0.5s ease 0.3s both; }
+    .live-head .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #34d399; animation: pulseGlow 2s infinite; display: inline-block; }
     .kpi .v.bad { color: #f472b6; text-shadow: 0 0 10px rgba(244, 114, 182, 0.32); }
     .kpi .v.good { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.32); }
     .nba-line {
