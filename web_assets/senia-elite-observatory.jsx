@@ -38,7 +38,7 @@ const num = (v, d = NaN) => {
   return Number.isFinite(n) ? n : d;
 };
 const mean = (arr) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0);
-const grade = (v) => (v < 0.5 ? ["Perfect", "#0ff0b4"] : v < 1 ? ["Excellent", "#34d399"] : v < 2 ? ["Good", "#a3e635"] : v < 3 ? ["Acceptable", "#fbbf24"] : v < 5 ? ["Need Tune", "#fb923c"] : ["Out", "#ef4444"]);
+const grade = (v) => { if (!Number.isFinite(v)) return ["Unknown", "#6b7280"]; return v < 0.5 ? ["Perfect", "#0ff0b4"] : v < 1 ? ["Excellent", "#34d399"] : v < 2 ? ["Good", "#a3e635"] : v < 3 ? ["Acceptable", "#fbbf24"] : v < 5 ? ["Need Tune", "#fb923c"] : ["Out", "#ef4444"]; };
 const T = { bg: "#050810", p: "#0a0c16", b: "#161824", surface: "#12141f", elevated: "#181b2a", tx: "#e0e0ec", dim: "#6b6f88", m: "#252738", a: "#38bdf8", w: "#f59e0b", r: "#f472b6", g: "#34d399", rd: "#ef4444", mono: "'IBM Plex Mono','JetBrains Mono',monospace", font: "'Inter','Noto Sans SC',system-ui,sans-serif", glass: "rgba(15,17,28,0.75)", glow_a: "0 0 20px rgba(56,189,248,0.15)", glow_g: "0 0 20px rgba(52,211,153,0.15)", border: "rgba(100,110,140,0.2)" };
 const glow = (c, s = 10) => `0 0 ${s}px ${c}30,0 0 ${2 * s}px ${c}10`;
 const describeArc = (cx, cy, r, startAngle, endAngle) => {

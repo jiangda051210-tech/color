@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -103,14 +104,11 @@ def _build_joined_rows(
     target_p95: float,
     target_max: float,
 ) -> list[dict[str, Any]]:
-    outcome_map: dict[int, dict[str, Any]] = {}
+    outcome_map: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for o in outcomes:
         run_id = o.get("run_id")
-        if run_id is None:
-            continue
-        key = int(run_id)
-        if key not in outcome_map:
-            outcome_map[key] = o
+        if run_id is not None:
+            outcome_map[int(run_id)].append(o)
 
     out: list[dict[str, Any]] = []
     for r in runs:
@@ -145,7 +143,7 @@ def _build_joined_rows(
         is_recap = 1.0 if decision_code == "RECAPTURE_REQUIRED" else 0.0
         is_hold = 1.0 if decision_code == "HOLD_AND_ESCALATE" else 0.0
 
-        outcome_row = outcome_map.get(int(run_id))
+        outcome_row = max(outcome_map.get(int(run_id), []), key=lambda x: x.get("ts", 0), default=None)
         bad_score = np.nan
         realized_cost = np.nan
         customer_rating = np.nan

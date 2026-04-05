@@ -408,7 +408,8 @@ def smart_board_segment(
         labels_flat = labels_k.ravel()
 
         # 简化 silhouette score (采样计算, 避免 O(n^2))
-        n_sample = min(2000, len(labels_flat))
+        n_sample = min(max(2000, total_pixels // 100), 5000)
+        n_sample = min(n_sample, len(labels_flat))
         rng = np.random.RandomState(42)
         sample_idx = rng.choice(len(labels_flat), n_sample, replace=False)
         sample_labels = labels_flat[sample_idx]

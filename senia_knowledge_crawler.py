@@ -774,9 +774,10 @@ class AutoModelUpgrader:
             "errors": errors[:5],
         }
 
-    def _merge_new_knowledge(self) -> dict[str, Any]:
-        """合并爬取的数据到知识库."""
+    def _merge_new_knowledge(self) -> list[dict[str, Any]]:
+        """合并爬取的数据到知识库. Returns new pairs instead of mutating global state."""
         merged = {"step": "merge", "updates": []}
+        new_pairs: list[dict[str, Any]] = []
 
         # 合并 CIEDE2000 验证对
         cache_file = self._crawler._cache_dir / "ciede2000_pairs.json"
@@ -784,21 +785,21 @@ class AutoModelUpgrader:
             try:
                 pairs = json.loads(cache_file.read_text(encoding="utf-8"))
                 existing_count = len(EXTRA_CIEDE2000_PAIRS)
+                total_count = existing_count
                 # 添加新的验证对 (不超过 50 对总量)
                 for pair in pairs:
-                    if len(EXTRA_CIEDE2000_PAIRS) >= 50:
+                    if total_count + len(new_pairs) >= 50:
                         break
                     if "expected_dE" in pair:
-                        # 检查是否已存在
+                        # 检查是否已存在 in original or new
                         is_dup = any(
                             abs(e.get("L1", 0) - pair["L1"]) < 0.01 and
                             abs(e.get("a1", 0) - pair["a1"]) < 0.01
-                            for e in EXTRA_CIEDE2000_PAIRS
+                            for e in list(EXTRA_CIEDE2000_PAIRS) + new_pairs
                         )
                         if not is_dup:
-                            EXTRA_CIEDE2000_PAIRS.append(pair)
-                new_count = len(EXTRA_CIEDE2000_PAIRS) - existing_count
-                merged["updates"].append({"type": "ciede2000_pairs", "added": new_count})
+                            new_pairs.append(pair)
+                merged["updates"].append({"type": "ciede2000_pairs", "added": len(new_pairs)})
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -820,7 +821,7 @@ class AutoModelUpgrader:
             except OSError:
                 pass
 
-        return merged
+        return new_pairs
 
     def get_upgrade_history(self) -> list[dict[str, Any]]:
         """返回升级历史."""

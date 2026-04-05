@@ -260,6 +260,7 @@ def diagnose_machine_from_drift(
     drift_slope_dL: float,
     drift_slope_da: float,
     drift_slope_db: float,
+    sensitivity_config: dict | None = None,
 ) -> dict[str, Any]:
     """
     从色差漂移方向推断印刷机可能的故障.
@@ -267,17 +268,27 @@ def diagnose_machine_from_drift(
     ΔL 持续上升 → 墨量减少 → 可能墨泵供墨不足或刮刀磨损
     Δa 持续偏移 → 某路色精供墨不均
     Δb 持续上升 → 黄色组分增多 → 可能墨路混色或清洗不彻底
+
+    sensitivity_config: optional dict to override default thresholds, e.g.
+        {"dL_threshold": 0.02, "da_threshold": 0.015, "db_threshold": 0.015,
+         "db_high_urgency_threshold": 0.03}
     """
+    cfg = sensitivity_config or {}
+    dL_threshold = cfg.get("dL_threshold", 0.02)
+    da_threshold = cfg.get("da_threshold", 0.015)
+    db_threshold = cfg.get("db_threshold", 0.015)
+    db_high_urgency_threshold = cfg.get("db_high_urgency_threshold", 0.03)
+
     diagnoses: list[dict[str, str]] = []
 
-    if drift_slope_dL > 0.02:
+    if drift_slope_dL > dL_threshold:
         diagnoses.append({
             "symptom": f"明度持续上升 (+{drift_slope_dL:.3f}/h)",
             "possible_cause": "墨泵供墨不足 或 刮刀磨损",
             "urgency": "medium",
             "action": "检查墨泵压力和刮刀状态",
         })
-    elif drift_slope_dL < -0.02:
+    elif drift_slope_dL < -dL_threshold:
         diagnoses.append({
             "symptom": f"明度持续下降 ({drift_slope_dL:.3f}/h)",
             "possible_cause": "墨量过多 或 涂布厚度增加",
@@ -285,7 +296,7 @@ def diagnose_machine_from_drift(
             "action": "检查涂布辊间距",
         })
 
-    if abs(drift_slope_da) > 0.015:
+    if abs(drift_slope_da) > da_threshold:
         direction = "偏红" if drift_slope_da > 0 else "偏绿"
         diagnoses.append({
             "symptom": f"红绿轴漂移 ({direction}, {drift_slope_da:+.3f}/h)",
@@ -294,12 +305,12 @@ def diagnose_machine_from_drift(
             "action": "检查对应色精墨路和搅拌器",
         })
 
-    if abs(drift_slope_db) > 0.015:
+    if abs(drift_slope_db) > db_threshold:
         direction = "偏黄" if drift_slope_db > 0 else "偏蓝"
         diagnoses.append({
             "symptom": f"黄蓝轴漂移 ({direction}, {drift_slope_db:+.3f}/h)",
             "possible_cause": "墨路混色" if drift_slope_db > 0 else "蓝色色精过量",
-            "urgency": "high" if abs(drift_slope_db) > 0.03 else "medium",
+            "urgency": "high" if abs(drift_slope_db) > db_high_urgency_threshold else "medium",
             "action": "检查墨路清洗状况和色精比例",
         })
 

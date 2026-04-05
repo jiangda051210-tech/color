@@ -165,6 +165,7 @@ def generate_recipe_advice(
     dC: float,
     root_cause: str = "recipe",
     defect_types: list[str] | None = None,
+    material_type: str = "generic",
 ) -> RecipeAdviceResult:
     """
     根据偏差方向和根因分析, 生成调色/工艺建议.
@@ -173,7 +174,12 @@ def generate_recipe_advice(
       dL, da, db, dC: 色差分量
       root_cause: "recipe" / "process" / "mixed" / "ok" (来自 M6 均匀性分析)
       defect_types: 检测到的缺陷类型列表 ["mottling", "streaks", "spots"]
+      material_type: material category; textured materials ("wood", "stone")
+                     get relaxed dL thresholds (+30%)
     """
+    # For textured materials, relax the dL threshold by 30%
+    dL_threshold = 1.0 * (1.3 if material_type in ("wood", "stone") else 1.0)
+
     result = RecipeAdviceResult(root_cause=root_cause)
     defects = defect_types or []
 
@@ -199,10 +205,13 @@ def generate_recipe_advice(
             return result
 
     # 配方问题 / 混合问题 → 匹配规则表
+    # Apply material-aware dL threshold: use dL_threshold instead of
+    # the hardcoded 1.0 in rule lambdas by scaling dL for evaluation.
+    dL_for_rules = dL / dL_threshold * 1.0 if dL_threshold > 0 else dL
     matched_meanings: list[str] = []
     for rule in RECIPE_RULES:
         try:
-            if rule["condition"](dL, da, db, dC):
+            if rule["condition"](dL_for_rules, da, db, dC):
                 result.advices.extend(rule["advices"])
                 matched_meanings.append(rule["meaning"])
         except Exception:

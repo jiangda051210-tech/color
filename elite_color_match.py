@@ -320,6 +320,12 @@ def robust_mean_lab(lab: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.n
 
 
 def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, list[float]]:
+    # Exclude specular highlights before white point computation
+    if mask is not None:
+        gray_for_spec = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        spec_mask = (gray_for_spec > 245) & (cv2.Sobel(gray_for_spec, cv2.CV_64F, 1, 0).astype(np.float32)**2 + cv2.Sobel(gray_for_spec, cv2.CV_64F, 0, 1).astype(np.float32)**2 < 100)
+        mask = mask & ~spec_mask
+
     valid = image_bgr[mask]
     if valid.size == 0:
         valid = image_bgr.reshape(-1, 3)
@@ -334,7 +340,8 @@ def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarra
     a_channel = valid_lab[:, 1].astype(np.float64) - 128.0  # OpenCV LAB a is 0-255, center at 128
     b_channel = valid_lab[:, 2].astype(np.float64) - 128.0
     chroma = np.sqrt(a_channel ** 2 + b_channel ** 2)
-    chroma_normalized = np.clip(chroma / 130.0, 0, 1)
+    chroma_max = max(float(np.percentile(chroma[chroma > 0], 95)) if np.any(chroma > 0) else 130.0, 10.0)
+    chroma_normalized = np.clip(chroma / chroma_max, 0, 1)
     brightness_normalized = np.clip(L_channel / 255.0, 0, 1)  # OpenCV LAB L is 0-255
 
     weights = (1.0 - chroma_normalized) * brightness_normalized
@@ -876,13 +883,17 @@ def apply_shading_correction(image_bgr: np.ndarray, mask: np.ndarray,
         ref = float(np.median(illum))
     gain = ref / np.maximum(illum, 1e-3)
     gain = np.clip(gain, gain_range[0], gain_range[1])
+    # Limit gain amplification in dark regions to prevent noise amplification
+    dark_regions = l_chan < 30
+    if np.any(dark_regions):
+        gain[dark_regions] = np.clip(gain[dark_regions], gain_range[0], 1.2)
     mix_gain = 1.0 + strength * (gain - 1.0)
     lab[..., 0] = np.clip(l_chan * mix_gain, 0, 255)
     out = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
     return out
 
 
-def build_invalid_mask(image_bgr: np.ndarray, outdoor_mode: bool = False) -> np.ndarray:
+def build_invalid_mask(image_bgr: np.ndarray, outdoor_mode: bool = False, profile_name: str = "") -> np.ndarray:
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     lab = bgr_to_lab_float(image_bgr)
@@ -928,8 +939,11 @@ def build_invalid_mask(image_bgr: np.ndarray, outdoor_mode: bool = False) -> np.
     sat_mean = float(sat_channel.mean())
     sat_std = float(sat_channel.std())
     # Threshold: mean + 2*std, clipped to reasonable range; replaces fixed 120
-    colored_text_thr = float(np.clip(sat_mean + 2.0 * sat_std, 80, 180))
-    high_sat = sat_channel > colored_text_thr
+    sat_threshold = float(np.clip(sat_mean + 2.0 * sat_std, 80, 180))
+    # If material hint available, adjust saturation threshold
+    if profile_name in ("metallic", "high_gloss"):
+        sat_threshold = min(sat_threshold, 100)  # Lower threshold for reflective materials
+    high_sat = sat_channel > sat_threshold
     # 形态学: 只保留小连通区域 (笔迹而非大面积彩色)
     high_sat_cleaned = cv2.morphologyEx(high_sat.astype(np.uint8), cv2.MORPH_OPEN,
                                         np.ones((3, 3), np.uint8))
@@ -1803,6 +1817,9 @@ def draw_heatmap_on_board(
     canvas = board_bgr.copy()
     h, w = canvas.shape[:2]
 
+    # Collect DE values for statistics summary
+    de_used_values: list[float] = []
+
     idx = 0
     for r in range(rows):
         y0 = int(round(r * h / rows))
@@ -1815,11 +1832,16 @@ def draw_heatmap_on_board(
             if not cell["used"]:
                 continue
             de = float(cell["delta_e00"])
+            de_used_values.append(de)
             color = de_color(de)
+
+            # Reduce opacity for cells with low valid pixel count
+            valid_ratio = float(cell.get("valid_ratio", 1.0))
+            alpha = 0.35 * max(0.3, min(1.0, valid_ratio / 0.5))
 
             overlay = canvas[y0:y1, x0:x1]
             patch = np.full_like(overlay, color, dtype=np.uint8)
-            cv2.addWeighted(patch, 0.35, overlay, 0.65, 0, overlay)
+            cv2.addWeighted(patch, alpha, overlay, 1.0 - alpha, 0, overlay)
             cv2.rectangle(canvas, (x0, y0), (x1 - 1, y1 - 1), (36, 36, 36), 1)
             cv2.putText(
                 canvas,
@@ -1831,6 +1853,15 @@ def draw_heatmap_on_board(
                 1,
                 cv2.LINE_AA,
             )
+
+    # Add statistics summary at bottom
+    if de_used_values:
+        de_arr = np.array(de_used_values, dtype=np.float64)
+        avg_de = float(np.mean(de_arr))
+        p95_de = float(np.percentile(de_arr, 95))
+        max_de = float(np.max(de_arr))
+        cv2.putText(canvas, f"Avg:{avg_de:.2f} P95:{p95_de:.2f} Max:{max_de:.2f}",
+                    (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     cv2.imwrite(str(out_path), canvas)
 
@@ -1881,9 +1912,17 @@ def compute_confidence(
     }
 
 
-def coarse_lighting_range(board_lab: np.ndarray, board_mask: np.ndarray, rows: int = 4, cols: int = 4) -> float:
+def coarse_lighting_range(board_lab: np.ndarray, board_mask: np.ndarray, rows: int = 4, cols: int = 4) -> dict[str, Any]:
     h, w = board_mask.shape
-    values = []
+
+    # Adaptive grid sizing based on image area
+    valid_count = int(np.count_nonzero(board_mask))
+    grid_n = max(3, min(8, int(np.sqrt(valid_count / 5000))))
+    rows = grid_n
+    cols = grid_n
+
+    cell_values: list[float] = []
+    cell_variances: list[float] = []
     for r in range(rows):
         y0 = int(round(r * h / rows))
         y1 = int(round((r + 1) * h / rows))
@@ -1893,11 +1932,23 @@ def coarse_lighting_range(board_lab: np.ndarray, board_mask: np.ndarray, rows: i
             m = board_mask[y0:y1, x0:x1]
             if np.count_nonzero(m) < 100:
                 continue
-            values.append(float(np.mean(board_lab[y0:y1, x0:x1, 0][m])))
-    if len(values) < 2:
-        return 0.0
-    _lr_pcts = np.percentile(values, [5, 95])
-    return float(_lr_pcts[1] - _lr_pcts[0])
+            l_vals = board_lab[y0:y1, x0:x1, 0][m]
+            cell_values.append(float(np.mean(l_vals)))
+            cell_variances.append(float(np.var(l_vals)))
+    if len(cell_values) < 2:
+        return {"range": 0.0, "spatial_uniformity": 1.0, "cell_variance_mean": 0.0,
+                "grid_n": grid_n, "n_cells_used": 0}
+    _lr_pcts = np.percentile(cell_values, [5, 95])
+    range_val = float(_lr_pcts[1] - _lr_pcts[0])
+    cell_arr = np.array(cell_values, dtype=np.float64)
+    spatial_uniformity = 1.0 - float(np.std(cell_arr)) / max(float(np.mean(cell_arr)), 1e-6)
+    return {
+        "range": range_val,
+        "spatial_uniformity": float(spatial_uniformity),
+        "cell_variance_mean": float(np.mean(cell_variances)),
+        "grid_n": grid_n,
+        "n_cells_used": len(cell_values),
+    }
 
 
 def resolve_targets(profile_targets: dict[str, float], target_override: dict[str, float] | None) -> dict[str, float]:
@@ -2372,7 +2423,8 @@ def analyze_single_image(
     de_global = float(ciede2000(board_mean.reshape(1, 3), sample_mean.reshape(1, 3))[0])
     d_l, d_c, d_h = delta_components(board_mean, sample_mean)
 
-    lighting_range = coarse_lighting_range(board_lab, board_mask)
+    lighting_info = coarse_lighting_range(board_lab, board_mask)
+    lighting_range = lighting_info["range"]
     board_valid_ratio = float(np.count_nonzero(board_mask) / board_mask.size)
     sample_valid_ratio = float(np.count_nonzero(sample_mask) / sample_mask.size)
     confidence = compute_confidence(det_diag, lighting_range, board_valid_ratio, sample_valid_ratio)
@@ -2652,7 +2704,8 @@ def analyze_dual_image(
 
     de_global = float(ciede2000(ref_mean.reshape(1, 3), film_mean.reshape(1, 3))[0])
 
-    lighting_range = coarse_lighting_range(ref_lab, ref_mask)
+    lighting_info = coarse_lighting_range(ref_lab, ref_mask)
+    lighting_range = lighting_info["range"]
     det_diag = {
         "board_area_ratio": 0.9,
         "board_rectangularity": 0.95,
