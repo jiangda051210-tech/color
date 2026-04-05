@@ -69,8 +69,10 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str
 
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS quality_runs (
@@ -221,7 +223,7 @@ def record_run(
     company_score = _to_float(scores.get("company_score"), np.nan) if isinstance(scores, dict) else np.nan
 
     init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         conn.execute(
             """
@@ -269,7 +271,7 @@ def recent_stats(
     window: int = 30,
 ) -> dict[str, Any]:
     init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         rows = conn.execute(
             """
@@ -437,7 +439,7 @@ def list_recent_runs(
     query += " ORDER BY id DESC LIMIT ?"
     params.append(int(max(1, limit)))
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         rows = conn.execute(query, tuple(params)).fetchall()
     finally:
@@ -632,7 +634,7 @@ def record_outcome(
     if normalized_outcome not in allowed:
         raise ValueError(f"unsupported outcome: {outcome}")
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         run_meta = None
         if run_id is not None:
@@ -726,7 +728,7 @@ def list_outcomes(
     query += " ORDER BY id DESC LIMIT ?"
     params.append(int(max(1, limit)))
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         rows = conn.execute(query, tuple(params)).fetchall()
     finally:

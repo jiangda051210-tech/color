@@ -45,12 +45,17 @@ DEFAULT_POLICY: dict[str, Any] = {
 
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        f = float(value)
+        if f != f or f == float("inf") or f == float("-inf"):  # NaN/Inf check
+            return default
+        return f
     except Exception:  # noqa: BLE001
         return default
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
+    if value != value:  # NaN guard
+        return lo
     return float(max(lo, min(hi, value)))
 
 

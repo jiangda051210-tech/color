@@ -3850,11 +3850,17 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
     )
 
     report_path = output_dir / "elite_color_match_report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        report["_save_error"] = f"Report save failed: {e}"
     html_path = None
     if req.html_report:
         html_path = output_dir / "elite_color_match_report.html"
-        write_html_report(report, html_path)
+        try:
+            write_html_report(report, html_path)
+        except OSError:
+            html_path = None
 
     _record_with_history(report, req.history, report_path)
     resp: dict[str, Any] = {
@@ -4101,11 +4107,17 @@ def analyze_dual(req: DualAnalyzeRequest) -> dict[str, Any]:
     )
 
     report_path = output_dir / "elite_color_match_report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        report["_save_error"] = f"Report save failed: {e}"
     html_path = None
     if req.html_report:
         html_path = output_dir / "elite_color_match_report.html"
-        write_html_report(report, html_path)
+        try:
+            write_html_report(report, html_path)
+        except OSError:
+            html_path = None
 
     _record_with_history(report, req.history, report_path)
     resp: dict[str, Any] = {

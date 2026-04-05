@@ -270,7 +270,27 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     if border_mean < center_mean * 0.5 and border_mean < 40:
         warnings.append("边缘异常暗，可能手指挡住了镜头")
 
-    # ── 10. 饱和度检测 (低=灰卡误放, 高=手机HDR过处理) ──
+    # ── 10. 截图检测 (手机截图而非相机拍照) ──
+    # 截图特征: 顶部状态栏(高亮+文字)、底部导航栏(均匀色块)、精确16:9或类似比例
+    top_20 = gray[:max(20, h // 25), :]
+    bot_20 = gray[-max(20, h // 25):, :]
+    top_var = float(top_20.var()) if top_20.size > 0 else 999
+    bot_var = float(bot_20.var()) if bot_20.size > 0 else 999
+    top_mean_b = float(top_20.mean()) if top_20.size > 0 else 128
+    # 截图状态栏通常很暗或很亮且方差低
+    screenshot_score = 0
+    if top_var < 300 and (top_mean_b > 200 or top_mean_b < 40):
+        screenshot_score += 1
+    if bot_var < 200:
+        screenshot_score += 1
+    aspect = w / max(h, 1)
+    if abs(aspect - 9/16) < 0.02 or abs(aspect - 9/19.5) < 0.02:
+        screenshot_score += 1
+    if screenshot_score >= 2:
+        warnings.append("疑似手机截图而非相机拍照 — 请使用相机直接拍摄产品")
+    scores["screenshot_score"] = screenshot_score
+
+    # ── 11. 饱和度检测 (低=灰卡误放, 高=手机HDR过处理) ──
     saturation = hsv[..., 1]
     mean_sat = float(saturation.mean())
     scores["saturation"] = round(mean_sat, 1)
