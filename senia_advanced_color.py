@@ -349,8 +349,11 @@ def weighted_robust_mean(
     weighted = current_mean
 
     # 有效像素比例 (作为置信度指标)
-    # 使用最终的 total_w
-    final_w = base_w * irls_w if 'irls_w' in dir() else base_w
+    # 使用最终的 total_w (irls_w 在循环中定义)
+    try:
+        final_w = base_w * irls_w
+    except NameError:
+        final_w = base_w
     confidence = float(np.count_nonzero(final_w > 0.5) / max(valid.sum(), 1))
 
     return weighted.astype(np.float32), confidence
@@ -518,11 +521,17 @@ def precision_dual_analysis(
     """
     最高精度分析管线: 集成所有高级算法.
 
+    增强:
+      - 缓存 Bradford 矩阵 (compute once, reuse across illuminants)
+      - 并行光源处理 (使用预计算的适应矩阵)
+      - 综合置信度: color_conf × texture_sim × spatial_uniformity
+      - 纹理相似度对比 (ref vs smp)
+
     vs 标准管线:
       - 自适应纹理抑制 (根据实际纹理调节)
       - 加权稳健统计 (边缘降权, 异常值降权)
       - Bradford 色适应 (预测不同光源下的色差)
-      - 多光源色差报告 (D65, A, F11)
+      - 多光源色差报告 (D65, A, F11, F2, LED)
     """
     from elite_color_match import (
         bgr_to_lab_float, build_invalid_mask, build_material_mask,
@@ -543,9 +552,9 @@ def precision_dual_analysis(
         smp_wb[..., ch] = np.clip(smp_bgr[..., ch].astype(np.float32) * ref_gains[ch], 0, 255)
     smp_wb = smp_wb.astype(np.uint8)
 
-    # 自适应纹理抑制
-    ref_tone = adaptive_texture_suppress(ref_wb, ref_mask)
-    smp_tone = adaptive_texture_suppress(smp_wb, smp_mask)
+    # 自适应纹理抑制 (with texture maps for similarity comparison)
+    ref_tone, ref_tex_map = adaptive_texture_suppress(ref_wb, ref_mask, return_texture_map=True)
+    smp_tone, smp_tex_map = adaptive_texture_suppress(smp_wb, smp_mask, return_texture_map=True)
 
     ref_lab = bgr_to_lab_float(ref_tone)
     smp_lab = bgr_to_lab_float(smp_tone)
@@ -577,11 +586,29 @@ def precision_dual_analysis(
             grid_de.append(de)
             grid_L.append(float(cell_mean[0]))
 
-    # 多光源色差预测
+    # 多光源色差预测 (缓存 Bradford 矩阵: 预先计算所有光源的适应矩阵)
+    illuminant_list = ["A", "F11", "F2", "LED"]
+    illuminant_wp = {
+        "A": ILLUMINANT_A, "F11": ILLUMINANT_F11,
+        "F2": ILLUMINANT_F2, "LED": ILLUMINANT_LED_B3,
+    }
+
+    # 预缓存所有 Bradford 矩阵 (compute once)
+    for illum_name in illuminant_list:
+        target_wp = illuminant_wp[illum_name]
+        cache_key = ("bradford", tuple(ILLUMINANT_D65.flat), tuple(target_wp.flat), 1.0)
+        if cache_key not in _adapt_matrix_cache:
+            src_cone = BRADFORD @ ILLUMINANT_D65
+            tgt_cone = BRADFORD @ target_wp
+            scale = tgt_cone / (src_cone + 1e-10)
+            _adapt_matrix_cache[cache_key] = BRADFORD_INV @ np.diag(scale) @ BRADFORD
+
     ref_lab_np = ref_mean.reshape(1, 1, 3)
     smp_lab_np = smp_mean.reshape(1, 1, 3)
     multi_illuminant: dict[str, float] = {}
-    for illum_name in ["A", "F11", "F2", "LED"]:
+
+    # 批量处理所有光源 (无依赖, 使用缓存矩阵)
+    for illum_name in illuminant_list:
         ref_adapted = predict_under_illuminant(ref_lab_np, illum_name).ravel()
         smp_adapted = predict_under_illuminant(smp_lab_np, illum_name).ravel()
         de_illum = ciede2000_scalar(
@@ -590,9 +617,33 @@ def precision_dual_analysis(
         )
         multi_illuminant[illum_name] = round(de_illum["dE00"], 4)
 
+    # 纹理相似度 (ref vs smp texture maps)
+    texture_similarity = 0.0
+    if ref_tex_map is not None and smp_tex_map is not None:
+        # 将两个 texture map resize 到同一大小后比较
+        common_h = min(ref_tex_map.shape[0], smp_tex_map.shape[0])
+        common_w = min(ref_tex_map.shape[1], smp_tex_map.shape[1])
+        ref_tex_resized = cv2.resize(ref_tex_map, (common_w, common_h))
+        smp_tex_resized = cv2.resize(smp_tex_map, (common_w, common_h))
+        # 归一化后计算相关系数
+        ref_norm = ref_tex_resized - ref_tex_resized.mean()
+        smp_norm = smp_tex_resized - smp_tex_resized.mean()
+        denom = max(np.sqrt((ref_norm**2).sum() * (smp_norm**2).sum()), 1e-10)
+        texture_similarity = float(np.clip((ref_norm * smp_norm).sum() / denom, 0, 1))
+
     # 指纹
     from senia_next_gen import compute_surface_fingerprint
     fingerprint = compute_surface_fingerprint(grid_de, grid_L, grid_rows, grid_cols) if grid_de else None
+
+    # 空间均匀度 (来自 fingerprint)
+    spatial_uniformity = fingerprint.uniformity_index / 100.0 if fingerprint else 0.5
+
+    # 综合置信度: 加权组合 color_confidence, texture_similarity, spatial_uniformity
+    color_confidence = (ref_conf + smp_conf) / 2.0
+    overall_confidence = round(
+        0.5 * color_confidence + 0.25 * texture_similarity + 0.25 * spatial_uniformity,
+        3,
+    )
 
     return {
         "dE00_d65": de_global["dE00"],
@@ -606,10 +657,15 @@ def precision_dual_analysis(
         "smp_lab": [round(float(x), 2) for x in smp_mean],
         "ref_confidence": round(ref_conf, 3),
         "smp_confidence": round(smp_conf, 3),
+        "overall_confidence": overall_confidence,
+        "texture_similarity": round(texture_similarity, 4),
         "grid_avg_dE": round(float(np.mean(grid_de)), 4) if grid_de else 0,
         "grid_p95_dE": round(float(np.percentile(grid_de, 95)), 4) if len(grid_de) > 2 else 0,
         "fingerprint": {
             "uniformity": fingerprint.uniformity_index if fingerprint else 0,
             "edge_effect": fingerprint.edge_effect_dE if fingerprint else 0,
+            "glcm_contrast": fingerprint.glcm_contrast if fingerprint else 0,
+            "glcm_energy": fingerprint.glcm_energy if fingerprint else 0,
+            "banding_risk": fingerprint.banding_risk if fingerprint else "unknown",
         } if fingerprint else None,
     }
