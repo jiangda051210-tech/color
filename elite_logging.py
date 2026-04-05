@@ -98,8 +98,13 @@ def setup_logging(
     root.addHandler(console)
 
     if log_file is not None:
+        from logging.handlers import RotatingFileHandler
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(str(log_file), encoding="utf-8")
+        fh = RotatingFileHandler(
+            str(log_file), encoding="utf-8",
+            maxBytes=100 * 1024 * 1024,  # 100MB per file
+            backupCount=10,
+        )
         fh.setFormatter(fmt)
         root.addHandler(fh)
 

@@ -1619,8 +1619,9 @@ def _record_with_history(
             report_path=str(report_path),
         )
         _invalidate_ops_summary_cache()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        _log.error("record_run_failed", error=str(e), lot_id=getattr(history, "lot_id", ""),
+                   db_path=getattr(history, "db_path", ""))
 
 
 class ImageInput(BaseModel):
@@ -2048,21 +2049,37 @@ async def _upload_to_image_input(upload: UploadFile, field_name: str) -> ImageIn
     return ImageInput(b64=base64.b64encode(payload).decode("ascii"))
 
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _lifespan(application):
+    _log.info("startup", version=APP_VERSION, pid=os.getpid())
+    yield
+    _log.info("shutdown", version=APP_VERSION, note="flushing_audit_log")
+    try:
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+    except Exception:
+        pass
+
 app = FastAPI(
     title="SENIA Elite Color Matching",
     description="AI-Powered Color Quality Intelligence for Decorative Film Manufacturing",
     version=APP_VERSION,
+    lifespan=_lifespan,
 )
 
-# CORS: 允许公网浏览器访问 (手机/PC/任何域名)
+# CORS: 配置跨域访问 (生产环境应限制为工厂网络)
+_CORS_ORIGINS = os.environ.get("ELITE_CORS_ORIGINS", "").strip()
+_cors_allow_origins = [o.strip() for o in _CORS_ORIGINS.split(",") if o.strip()] if _CORS_ORIGINS else ["*"]
 try:
     from fastapi.middleware.cors import CORSMiddleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=_cors_allow_origins,
+        allow_credentials=bool(_CORS_ORIGINS),  # only with explicit origins
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "x-api-key", "x-request-id", "x-tenant-id"],
     )
 except ImportError:
     pass  # CORS middleware not available

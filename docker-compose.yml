@@ -15,12 +15,23 @@ services:
       - ELITE_LOG_LEVEL=info
       - ELITE_ENABLE_AUDIT_LOG=true
       - ELITE_ENABLE_SECURITY_HEADERS=true
+      - ELITE_ENABLE_API_KEY_AUTH=true
+      - ELITE_CORS_ORIGINS=
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+        reservations:
+          memory: 1G
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8877/health')"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
+      start_period: 15s
+    stop_grace_period: 30s
 
 volumes:
   senia-data:
