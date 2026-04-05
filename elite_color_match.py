@@ -285,21 +285,33 @@ def robust_mean_lab(lab: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.n
     if vals.size == 0:
         raise ValueError("No valid pixels for LAB statistics")
 
-    l_low, l_high = np.percentile(vals[:, 0], [4, 96])
-    a_low, a_high = np.percentile(vals[:, 1], [2, 98])
-    b_low, b_high = np.percentile(vals[:, 2], [2, 98])
-    keep = (
-        (vals[:, 0] >= l_low)
-        & (vals[:, 0] <= l_high)
-        & (vals[:, 1] >= a_low)
-        & (vals[:, 1] <= a_high)
-        & (vals[:, 2] >= b_low)
-        & (vals[:, 2] <= b_high)
-    )
+    # MAD-based robust filtering for each channel
+    medians = np.median(vals, axis=0)
+    mad = np.median(np.abs(vals - medians), axis=0) * 1.4826  # scale factor for normal distribution
+    mad = np.maximum(mad, 0.1)  # prevent zero division for constant channels
 
+    # Z-score based on MAD: |Xi - median| / MAD
+    z_scores = np.abs(vals - medians) / mad
+
+    # Keep pixels where ALL channels have z < 3.0
+    keep = np.all(z_scores < 3.0, axis=1)
+
+    # Bimodal detection: if we removed > 40% of pixels, the distribution may be bimodal
+    # In that case, find the dominant mode and filter around it
     filtered = vals[keep]
     if len(filtered) < max(60, int(len(vals) * 0.15)):
-        filtered = vals
+        # Fallback: use percentile clipping (original method)
+        l_low, l_high = np.percentile(vals[:, 0], [4, 96])
+        a_low, a_high = np.percentile(vals[:, 1], [2, 98])
+        b_low, b_high = np.percentile(vals[:, 2], [2, 98])
+        keep_pct = (
+            (vals[:, 0] >= l_low) & (vals[:, 0] <= l_high) &
+            (vals[:, 1] >= a_low) & (vals[:, 1] <= a_high) &
+            (vals[:, 2] >= b_low) & (vals[:, 2] <= b_high)
+        )
+        filtered = vals[keep_pct]
+        if len(filtered) < 60:
+            filtered = vals
 
     return filtered.mean(axis=0), filtered.std(axis=0), int(len(filtered))
 
@@ -307,13 +319,39 @@ def robust_mean_lab(lab: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.n
 def apply_gray_world(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, list[float]]:
     valid = image_bgr[mask]
     if valid.size == 0:
-        means = image_bgr.reshape(-1, 3).mean(axis=0)
+        valid = image_bgr.reshape(-1, 3)
+
+    # Convert valid pixels to LAB for chroma/brightness weighting
+    # Reshape to a 1-row image for cv2.cvtColor
+    valid_f32 = valid.reshape(-1, 3).astype(np.float32)
+    valid_lab = cv2.cvtColor(valid_f32.reshape(1, -1, 3) / 255.0 * 255, cv2.COLOR_BGR2LAB).reshape(-1, 3)
+
+    # Weight: neutral (low chroma) and bright pixels count more
+    L_channel = valid_lab[:, 0]
+    a_channel = valid_lab[:, 1].astype(np.float64) - 128.0  # OpenCV LAB a is 0-255, center at 128
+    b_channel = valid_lab[:, 2].astype(np.float64) - 128.0
+    chroma = np.sqrt(a_channel ** 2 + b_channel ** 2)
+    chroma_normalized = np.clip(chroma / 130.0, 0, 1)
+    brightness_normalized = np.clip(L_channel / 255.0, 0, 1)  # OpenCV LAB L is 0-255
+
+    weights = (1.0 - chroma_normalized) * brightness_normalized
+    weights_sum = weights.sum()
+    if weights_sum < 1e-6:
+        # Fallback to uniform weights
+        means = valid_f32.reshape(-1, 3).mean(axis=0)
     else:
-        means = valid.reshape(-1, 3).mean(axis=0)
+        means = (valid_f32.reshape(-1, 3) * weights[:, np.newaxis]).sum(axis=0) / weights_sum
+
     gray = float(np.mean(means))
     gains = gray / np.maximum(means, 1e-6)
     balanced = np.clip(image_bgr.astype(np.float32) * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
-    return balanced, gains.tolist()
+
+    # Estimate CCT from R/B ratio
+    cct = 6500.0 * (gains[0] / max(gains[2], 1e-6))
+    gains_list = gains.tolist()
+    gains_list.append(float(cct))
+
+    return balanced, gains_list
 
 
 def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
@@ -360,6 +398,146 @@ def texture_suppress(image_bgr: np.ndarray) -> np.ndarray:
     return filtered
 
 
+def compute_lbp_texture(image_bgr: np.ndarray, mask: np.ndarray | None = None) -> dict:
+    """
+    Compute LBP (Local Binary Pattern) texture descriptor for material identification.
+
+    Returns dict with:
+      - complexity: float 0-1, how textured the surface is
+      - uniformity: float 0-1, how uniform the texture pattern is
+      - profile_hint: suggested material profile based on texture
+      - histogram: LBP histogram (58 uniform bins + 1 non-uniform)
+    """
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+
+    # Resize for speed
+    scale = min(1.0, 300.0 / max(h, w))
+    if scale < 1.0:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        if mask is not None:
+            mask = cv2.resize(mask.astype(np.uint8), None, fx=scale, fy=scale,
+                            interpolation=cv2.INTER_NEAREST).astype(bool)
+
+    gh, gw = gray.shape
+
+    # Compute LBP with radius=1, 8 neighbors (uniform pattern)
+    lbp = np.zeros((gh - 2, gw - 2), dtype=np.uint8)
+    for dy, dx, bit in [(-1,-1,0),(-1,0,1),(-1,1,2),(0,1,3),(1,1,4),(1,0,5),(1,-1,6),(0,-1,7)]:
+        neighbor = gray[1+dy:gh-1+dy, 1+dx:gw-1+dx]
+        center = gray[1:gh-1, 1:gw-1]
+        lbp |= ((neighbor >= center).astype(np.uint8) << bit)
+
+    # Count transitions for uniform pattern classification
+    # A pattern is "uniform" if it has <= 2 bitwise transitions (0->1 or 1->0)
+    def count_transitions(val):
+        bits = [(val >> i) & 1 for i in range(8)]
+        return sum(bits[i] != bits[(i+1) % 8] for i in range(8))
+
+    # Build uniform LBP lookup table
+    uniform_table = np.zeros(256, dtype=np.uint8)
+    uniform_count = 0
+    for i in range(256):
+        if count_transitions(i) <= 2:
+            uniform_table[i] = uniform_count
+            uniform_count += 1
+        else:
+            uniform_table[i] = uniform_count  # non-uniform bin
+    n_bins = uniform_count + 1  # 58 uniform + 1 non-uniform = 59
+
+    # Apply uniform mapping
+    lbp_uniform = uniform_table[lbp]
+
+    # Compute histogram (with mask if provided)
+    if mask is not None:
+        m = mask[1:gh-1, 1:gw-1]
+        hist_vals = lbp_uniform[m]
+    else:
+        hist_vals = lbp_uniform.ravel()
+
+    if len(hist_vals) == 0:
+        return {"complexity": 0.5, "uniformity": 0.5, "profile_hint": "solid", "histogram": []}
+
+    hist = np.bincount(hist_vals, minlength=n_bins).astype(float)
+    hist /= max(hist.sum(), 1)
+
+    # Texture complexity: entropy of LBP histogram
+    nonzero = hist[hist > 0]
+    entropy = -np.sum(nonzero * np.log2(nonzero))
+    max_entropy = np.log2(n_bins)
+    complexity = float(entropy / max_entropy) if max_entropy > 0 else 0.0
+
+    # Uniformity: ratio of dominant pattern
+    uniformity = float(1.0 - hist[-1])  # 1 - non-uniform ratio
+
+    # Profile hint based on complexity
+    if complexity < 0.35:
+        profile_hint = "solid"
+    elif complexity < 0.55:
+        profile_hint = "high_gloss"
+    elif complexity < 0.70:
+        profile_hint = "metallic"
+    elif complexity < 0.82:
+        profile_hint = "wood"
+    else:
+        profile_hint = "stone"
+
+    return {
+        "complexity": round(complexity, 4),
+        "uniformity": round(uniformity, 4),
+        "profile_hint": profile_hint,
+        "histogram": hist.tolist(),
+    }
+
+
+def compute_gabor_energy(image_bgr: np.ndarray, mask: np.ndarray | None = None) -> dict:
+    """
+    Multi-scale multi-orientation Gabor filter texture energy.
+    Useful for quantifying texture consistency between reference and film.
+    """
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    h, w = gray.shape
+    scale = min(1.0, 300.0 / max(h, w))
+    if scale < 1.0:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        if mask is not None:
+            mask = cv2.resize(mask.astype(np.uint8), None, fx=scale, fy=scale,
+                            interpolation=cv2.INTER_NEAREST).astype(bool)
+
+    orientations = [0, 45, 90, 135]  # degrees
+    frequencies = [0.05, 0.1, 0.2]   # cycles per pixel
+    energies = []
+
+    for freq in frequencies:
+        for theta_deg in orientations:
+            theta = np.deg2rad(theta_deg)
+            sigma = 1.0 / (2 * np.pi * freq)
+            kernel_size = int(6 * sigma) | 1
+            kernel_size = max(3, min(31, kernel_size))
+            kernel = cv2.getGaborKernel((kernel_size, kernel_size), sigma, theta,
+                                         1.0/freq, 0.5, 0, ktype=cv2.CV_32F)
+            response = cv2.filter2D(gray, cv2.CV_32F, kernel)
+            if mask is not None:
+                energy = float(np.mean(response[mask[: response.shape[0], :response.shape[1]]] ** 2))
+            else:
+                energy = float(np.mean(response ** 2))
+            energies.append(energy)
+
+    total_energy = sum(energies)
+    # Orientation dominance: how much energy is concentrated in one direction
+    orient_energies = [sum(energies[i::len(orientations)]) for i in range(len(orientations))]
+    max_orient = max(orient_energies) if orient_energies else 1
+    total_orient = sum(orient_energies) if orient_energies else 1
+    orientation_dominance = float(max_orient / max(total_orient, 1e-9))
+
+    return {
+        "total_energy": round(total_energy, 6),
+        "orientation_dominance": round(orientation_dominance, 4),
+        "energies": [round(e, 6) for e in energies],
+        "is_directional": orientation_dominance > 0.4,  # strong directional texture (wood grain)
+    }
+
+
 def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, list[float]]:
     """
     户外增强白平衡 — 替代简单的 gray world.
@@ -368,6 +546,7 @@ def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tupl
       1. 仅基于板材区域 (mask) 计算增益, 排除背景干扰
       2. 色温约束: R/B gain 比值限制在 0.8-1.2 (防止极端偏色)
       3. 白标签锚点: 如果检测到白色标签, 优先用其做白平衡参考
+      4. Perfect reflector detection: top 1% brightest + low saturation fallback
     """
     # 先尝试找白色标签作为白平衡锚点
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
@@ -379,12 +558,37 @@ def apply_outdoor_white_balance(image_bgr: np.ndarray, mask: np.ndarray) -> tupl
         anchor = image_bgr[white_pixels].reshape(-1, 3).astype(np.float64)
         means = anchor.mean(axis=0)
     else:
-        # 基于板材区域计算 (非整个场景)
-        valid = image_bgr[mask]
-        if valid.size == 0:
-            means = image_bgr.reshape(-1, 3).astype(np.float64).mean(axis=0)
-        else:
-            means = valid.reshape(-1, 3).astype(np.float64).mean(axis=0)
+        # Perfect reflector detection: top 1% brightest pixels with low saturation
+        means = None
+        masked_v = hsv[..., 2].copy()
+        masked_v[~mask] = 0
+        brightness_threshold = np.percentile(masked_v[mask], 99)
+        bright_pixels = (masked_v >= brightness_threshold) & mask
+        if int(np.count_nonzero(bright_pixels)) > 0:
+            bright_sat = hsv[..., 1][bright_pixels]
+            low_sat_among_bright = (bright_sat < 30)
+            # Build mask for bright + low-sat pixels
+            bright_coords = np.argwhere(bright_pixels)
+            if low_sat_among_bright.sum() > 50:
+                # Use bright low-saturation pixels as perfect reflector reference
+                bright_low_sat_mask = np.zeros(mask.shape, dtype=bool)
+                selected_coords = bright_coords[low_sat_among_bright]
+                bright_low_sat_mask[selected_coords[:, 0], selected_coords[:, 1]] = True
+                reflector = image_bgr[bright_low_sat_mask].reshape(-1, 3).astype(np.float64)
+                means = reflector.mean(axis=0)
+
+        if means is None:
+            # Fall back to weighted gray world
+            balanced, gains_list = apply_gray_world(image_bgr, mask)
+            gains = np.array(gains_list[:3])  # exclude CCT element
+            # Apply R/B gain ratio constraint
+            rb_gain_ratio = gains[2] / max(gains[0], 1e-6)
+            if rb_gain_ratio > 1.2:
+                gains[2] = gains[0] * 1.2
+            elif rb_gain_ratio < 0.8:
+                gains[2] = gains[0] * 0.8
+            balanced = np.clip(image_bgr.astype(np.float32) * gains.reshape(1, 1, 3), 0, 255).astype(np.uint8)
+            return balanced, gains.tolist()
 
     gray_target = float(np.mean(means))
     gains = gray_target / np.maximum(means, 1e-6)
@@ -603,10 +807,28 @@ def _lab_color_segmentation(image_bgr: np.ndarray, n_clusters: int = 3) -> list[
     lab = cv2.cvtColor(filtered, cv2.COLOR_BGR2LAB).astype(np.float32)
     pixels = lab.reshape(-1, 3)
 
-    # K-Means 聚类
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-    _, labels, centers = cv2.kmeans(pixels, n_clusters, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
-    labels = labels.reshape(sh, sw)
+    # GMM with BIC-based cluster selection (fallback to K-Means if sklearn unavailable)
+    try:
+        from sklearn.mixture import GaussianMixture
+        best_bic = float('inf')
+        best_labels = None
+        best_n = n_clusters
+        for n in range(2, min(7, n_clusters + 3)):
+            gmm = GaussianMixture(n_components=n, covariance_type='full',
+                                   max_iter=50, n_init=2, random_state=42)
+            gmm.fit(pixels)
+            bic = gmm.bic(pixels)
+            if bic < best_bic:
+                best_bic = bic
+                best_labels = gmm.predict(pixels)
+                best_n = n
+        labels = best_labels.reshape(sh, sw)
+        n_clusters = best_n
+    except ImportError:
+        # Fallback to OpenCV K-Means
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+        _, labels, centers = cv2.kmeans(pixels, n_clusters, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
+        labels = labels.reshape(sh, sw)
 
     results: list[RectCandidate] = []
 

@@ -18,10 +18,13 @@ HOME_PAGE_TEMPLATE = """
       --bg-0: #091322;
       --bg-1: #0f1f34;
       --bg-2: #13263f;
+      --bg-3: #0a1929;
       --ink-0: #eef6ff;
       --ink-1: #bad0e8;
       --ink-2: #85a4c4;
+      --ink-3: #5a7d9e;
       --line: rgba(147, 191, 232, 0.22);
+      --line-h: rgba(147, 191, 232, 0.38);
       --accent-a: #00b7a8;
       --accent-b: #3fa8ff;
       --accent-c: #ff9f43;
@@ -29,6 +32,14 @@ HOME_PAGE_TEMPLATE = """
       --warn: #ffb145;
       --bad: #ff5d73;
       --card: rgba(13, 26, 43, 0.88);
+      --card-h: rgba(18, 34, 55, 0.92);
+      --glow-a: rgba(0, 183, 168, 0.25);
+      --glow-b: rgba(63, 168, 255, 0.25);
+      --radius-sm: 10px;
+      --radius-md: 16px;
+      --radius-lg: 22px;
+      --shadow-card: 0 10px 30px rgba(5, 13, 23, 0.45);
+      --shadow-glow: 0 0 30px rgba(0, 183, 168, 0.15);
     }
     * { box-sizing: border-box; }
     body {
@@ -307,6 +318,93 @@ HOME_PAGE_TEMPLATE = """
       padding: 8px 10px;
       font-size: 12px;
     }
+    /* ── 拖拽上传区域 ── */
+    .drop-zone {
+      position: relative;
+      border: 2px dashed rgba(147, 191, 232, 0.25);
+      border-radius: 12px;
+      padding: 16px;
+      text-align: center;
+      transition: all 0.3s ease;
+      cursor: pointer;
+      min-height: 80px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .drop-zone:hover { border-color: var(--accent-a); background: rgba(0, 183, 168, 0.04); }
+    .drop-zone.drag-over {
+      border-color: var(--accent-a);
+      background: rgba(0, 183, 168, 0.08);
+      box-shadow: 0 0 20px rgba(0, 183, 168, 0.15);
+    }
+    .drop-zone .drop-text { font-size: 12px; color: var(--ink-2); pointer-events: none; }
+    .drop-zone .drop-icon { font-size: 24px; opacity: 0.4; pointer-events: none; }
+    .drop-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .preview-img {
+      max-width: 100%;
+      max-height: 120px;
+      border-radius: 8px;
+      margin-top: 6px;
+      border: 1px solid rgba(147, 191, 232, 0.2);
+      object-fit: contain;
+    }
+    /* ── 色差仪表盘 ── */
+    .de-gauge { text-align: center; margin: 10px 0; }
+    .de-gauge svg { filter: drop-shadow(0 2px 8px rgba(0,0,0,0.3)); }
+    /* ── 色板对比 ── */
+    .color-compare {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      margin: 10px 0;
+    }
+    .color-swatch {
+      width: 54px;
+      height: 54px;
+      border-radius: 12px;
+      border: 2px solid rgba(147, 191, 232, 0.2);
+    }
+    .color-label { font-size: 9px; color: var(--ink-2); text-align: center; margin-top: 4px; font-family: "JetBrains Mono", monospace; }
+    .color-arrow {
+      width: 30px;
+      height: 6px;
+      border-radius: 6px;
+    }
+    /* ── 动画 ── */
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(42, 198, 112, 0.3); } 70% { box-shadow: 0 0 0 8px rgba(42, 198, 112, 0); } }
+    @keyframes scaleIn { from { transform: scale(0.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    @keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+    @keyframes gaugeStroke { from { stroke-dashoffset: 283; } to { stroke-dashoffset: 0; } }
+    .hero { animation: fadeInUp 0.5s ease; }
+    .panel { animation: fadeInUp 0.5s ease both; }
+    .main-grid .panel:nth-child(1) { animation-delay: 0.1s; }
+    .main-grid .panel:nth-child(2) { animation-delay: 0.2s; }
+    .status-card { transition: transform 0.2s; }
+    .status-card:hover { transform: translateY(-2px); }
+    button { transition: all 0.2s; }
+    button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(0, 209, 166, 0.35); }
+    button:active:not(:disabled) { transform: translateY(0); }
+    /* ── 结果面板动画 ── */
+    .result-animate { animation: scaleIn 0.4s ease both; }
+    /* ── Toast 通知 ── */
+    .toast-container { position: fixed; top: 16px; right: 16px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
+    .toast {
+      padding: 10px 16px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #fff;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+      animation: fadeInUp 0.3s ease, fadeInUp 0.3s ease 2.7s reverse forwards;
+    }
+    .toast.success { background: linear-gradient(135deg, #0a7c5f, #2ac670); }
+    .toast.error { background: linear-gradient(135deg, #8b1a32, #ff5d73); }
+    .toast.warning { background: linear-gradient(135deg, #8b6d1a, #ffb145); }
     @media (max-width: 1080px) {
       .main-grid { grid-template-columns: 1fr; }
     }
@@ -384,11 +482,19 @@ HOME_PAGE_TEMPLATE = """
           <div class="form-grid">
             <div class="field">
               <label>样板图（reference）</label>
-              <input type="file" name="reference" accept="image/*" required />
+              <div class="drop-zone">
+                <span class="drop-icon">&#128247;</span>
+                <span class="drop-text">拖拽或点击上传样板图</span>
+                <input type="file" name="reference" accept="image/*" required />
+              </div>
             </div>
             <div class="field">
               <label>彩膜图（film）</label>
-              <input type="file" name="film" accept="image/*" required />
+              <div class="drop-zone">
+                <span class="drop-icon">&#127912;</span>
+                <span class="drop-text">拖拽或点击上传彩膜图</span>
+                <input type="file" name="film" accept="image/*" required />
+              </div>
             </div>
             <div class="field">
               <label>材质档位</label>
@@ -466,7 +572,11 @@ HOME_PAGE_TEMPLATE = """
           <div class="form-grid">
             <div class="field full">
               <label>现场图（image）</label>
-              <input type="file" name="image" accept="image/*" required />
+              <div class="drop-zone">
+                <span class="drop-icon">&#128248;</span>
+                <span class="drop-text">拖拽或点击上传现场图</span>
+                <input type="file" name="image" accept="image/*" required />
+              </div>
             </div>
             <div class="field">
               <label>材质档位</label>
@@ -543,8 +653,71 @@ HOME_PAGE_TEMPLATE = """
     </section>
   </div>
 
+  <div class="toast-container" id="toast-container"></div>
+
   <script>
     const q = (s) => document.querySelector(s);
+
+    function showToast(message, type = "success") {
+      const c = document.getElementById("toast-container");
+      const t = document.createElement("div");
+      t.className = "toast " + type;
+      t.textContent = message;
+      c.appendChild(t);
+      setTimeout(() => t.remove(), 3000);
+    }
+
+    function setupDropZone(dropEl) {
+      const fileInput = dropEl.querySelector('input[type="file"]');
+      if (!fileInput) return;
+      dropEl.addEventListener("dragover", (e) => { e.preventDefault(); dropEl.classList.add("drag-over"); });
+      dropEl.addEventListener("dragleave", () => dropEl.classList.remove("drag-over"));
+      dropEl.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropEl.classList.remove("drag-over");
+        if (e.dataTransfer.files.length) {
+          fileInput.files = e.dataTransfer.files;
+          showPreview(dropEl, e.dataTransfer.files[0]);
+        }
+      });
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files[0]) showPreview(dropEl, fileInput.files[0]);
+      });
+    }
+
+    function showPreview(container, file) {
+      if (!file || !file.type.startsWith("image/")) return;
+      let img = container.querySelector(".preview-img");
+      if (!img) { img = document.createElement("img"); img.className = "preview-img"; container.appendChild(img); }
+      const reader = new FileReader();
+      reader.onload = (e) => { img.src = e.target.result; };
+      reader.readAsDataURL(file);
+      const dropText = container.querySelector(".drop-text");
+      if (dropText) dropText.textContent = file.name;
+    }
+
+    function describeArc(cx, cy, r, startAngle, endAngle) {
+      const rad = Math.PI / 180;
+      const s = { x: cx + r * Math.cos(startAngle * rad), y: cy + r * Math.sin(startAngle * rad) };
+      const e = { x: cx + r * Math.cos(endAngle * rad), y: cy + r * Math.sin(endAngle * rad) };
+      return "M " + s.x + " " + s.y + " A " + r + " " + r + " 0 " + (endAngle - startAngle > 180 ? 1 : 0) + " 1 " + e.x + " " + e.y;
+    }
+
+    function renderGauge(deltaE) {
+      const max = 5, pct = Math.min(deltaE / max, 1), angle = pct * 270;
+      const color = deltaE < 1 ? "#2ac670" : deltaE < 2 ? "#a3e635" : deltaE < 3 ? "#ffb145" : "#ff5d73";
+      const label = deltaE < 0.5 ? "Perfect" : deltaE < 1 ? "Excellent" : deltaE < 2 ? "Good" : deltaE < 3 ? "Acceptable" : "Out";
+      const size = 130, r = size * 0.38, cx = size / 2, cy = size / 2;
+      const bgPath = describeArc(cx, cy, r, 135, 405);
+      const fgPath = angle > 0.5 ? describeArc(cx, cy, r, 135, 135 + angle) : "";
+      return '<div class="de-gauge"><svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '">' +
+        '<path d="' + bgPath + '" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="8" stroke-linecap="round"/>' +
+        (fgPath ? '<path d="' + fgPath + '" fill="none" stroke="' + color + '" stroke-width="8" stroke-linecap="round" style="filter:drop-shadow(0 0 6px ' + color + '50)"/>' : '') +
+        '<text x="' + cx + '" y="' + (cy - 6) + '" text-anchor="middle" fill="' + color + '" font-size="24" font-weight="900" font-family="JetBrains Mono,monospace">' + deltaE.toFixed(2) + '</text>' +
+        '<text x="' + cx + '" y="' + (cy + 10) + '" text-anchor="middle" fill="#85a4c4" font-size="9">DE 2000</text>' +
+        '<text x="' + cx + '" y="' + (cy + 23) + '" text-anchor="middle" fill="' + color + '" font-size="10" font-weight="700">' + label + '</text>' +
+        '</svg></div>';
+    }
 
     function authHeaders() {
       const key = (q("#api-key")?.value || "").trim();
@@ -597,22 +770,36 @@ HOME_PAGE_TEMPLATE = """
       const process = data.process_advice || {};
       const decision = data.decision_center || {};
       const innovation = data.innovation_engine || {};
+      const summary = data.summary || data.result?.summary || {};
+      const avgDE = typeof summary.avg_delta_e00 === "number" ? summary.avg_delta_e00 : null;
+
+      let gaugeHtml = "";
+      if (avgDE !== null) {
+        gaugeHtml = renderGauge(avgDE);
+      }
+
       target.innerHTML = `
-        <div><strong>${esc(title)}</strong> ${yesNo(data.pass)}</div>
-        <div class="metric-grid">
-          <div class="metric"><p class="k">置信度</p><p class="v">${fmt(data.confidence, 3)}</p></div>
-          <div class="metric"><p class="k">风险等级</p><p class="v">${esc(process.risk_level || "--")}</p></div>
-          <div class="metric"><p class="k">决策码</p><p class="v">${esc(decision.decision_code || "--")}</p></div>
-          <div class="metric"><p class="k">创新项数量</p><p class="v">${esc(innovation.innovation_count ?? "--")}</p></div>
-          <div class="metric"><p class="k">老化风险</p><p class="v">${esc(innovation.aging_warranty_risk || "--")}</p></div>
-          <div class="metric"><p class="k">输出目录</p><p class="v">${esc(data.output_dir || "--")}</p></div>
-        </div>
-        <div class="link-row" style="margin-top:10px;">
-          ${reportLink(data.html_path)}
-          ${jsonLink(data.report_path)}
+        <div class="result-animate">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+            <strong style="font-size:15px;">${esc(title)}</strong> ${yesNo(data.pass)}
+          </div>
+          ${gaugeHtml}
+          <div class="metric-grid">
+            <div class="metric"><p class="k">置信度</p><p class="v">${fmt(data.confidence, 3)}</p></div>
+            <div class="metric"><p class="k">风险等级</p><p class="v">${esc(process.risk_level || "--")}</p></div>
+            <div class="metric"><p class="k">决策码</p><p class="v">${esc(decision.decision_code || "--")}</p></div>
+            <div class="metric"><p class="k">创新项数量</p><p class="v">${esc(innovation.innovation_count ?? "--")}</p></div>
+            <div class="metric"><p class="k">老化风险</p><p class="v">${esc(innovation.aging_warranty_risk || "--")}</p></div>
+            <div class="metric"><p class="k">输出目录</p><p class="v" style="font-size:10px;word-break:break-all;">${esc(data.output_dir || "--")}</p></div>
+          </div>
+          <div class="link-row" style="margin-top:10px;">
+            ${reportLink(data.html_path)}
+            ${jsonLink(data.report_path)}
+          </div>
         </div>
       `;
       q("#json-preview").textContent = JSON.stringify(data, null, 2);
+      showToast(data.pass ? "分析完成 - 通过" : "分析完成 - 未通过", data.pass ? "success" : "warning");
     }
 
     async function refreshStatus() {
@@ -702,6 +889,26 @@ HOME_PAGE_TEMPLATE = """
       q("#refresh-btn").addEventListener("click", refreshStatus);
       refreshStatus();
       setInterval(refreshStatus, 15000);
+
+      // Setup drag & drop zones for all file inputs
+      document.querySelectorAll(".drop-zone").forEach(setupDropZone);
+
+      // Clipboard paste support
+      document.addEventListener("paste", (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (const item of items) {
+          if (item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            const activeForm = document.activeElement?.closest("form");
+            if (activeForm) {
+              const dropZone = activeForm.querySelector(".drop-zone");
+              if (dropZone) showPreview(dropZone, file);
+            }
+            break;
+          }
+        }
+      });
     });
   </script>
 </body>
@@ -2367,41 +2574,71 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       padding: 10px;
       background: rgba(11, 25, 42, 0.8);
     }
-    .kpi .k { margin: 0; font-size: 11px; color: var(--sub); text-transform: uppercase; }
-    .kpi .v { margin: 6px 0 0; font-size: 20px; font-weight: 700; }
+    .kpi .k { margin: 0; font-size: 11px; color: var(--sub); text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; }
+    .kpi .v { margin: 8px 0 0; font-size: 26px; font-weight: 800; font-family: "JetBrains Mono", "Consolas", monospace; letter-spacing: -0.5px; }
     .kpi.good .v { color: var(--good); }
     .kpi.warn .v { color: var(--warn); }
     .kpi.bad .v { color: var(--bad); }
+    .kpi::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      border-radius: 12px 12px 0 0;
+    }
+    .kpi.good::before { background: linear-gradient(90deg, var(--good), transparent); }
+    .kpi.warn::before { background: linear-gradient(90deg, var(--warn), transparent); }
+    .kpi.bad::before { background: linear-gradient(90deg, var(--bad), transparent); }
     .row {
       margin-top: 12px;
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 10px;
+      gap: 12px;
     }
     .log {
-      margin-top: 8px;
-      font-size: 12px;
-      color: #d6ebff;
-      background: #071423;
-      border: 1px solid rgba(157, 199, 241, 0.2);
-      border-radius: 9px;
-      max-height: 260px;
+      margin-top: 10px;
+      font-size: 11px;
+      font-family: "JetBrains Mono", "Consolas", monospace;
+      color: #c4d4f0;
+      background: #060c18;
+      border: 1px solid rgba(157, 199, 241, 0.15);
+      border-radius: 10px;
+      max-height: 300px;
       overflow: auto;
-      padding: 10px;
+      padding: 12px;
       white-space: pre-wrap;
       word-break: break-word;
+      line-height: 1.6;
     }
+    .log::-webkit-scrollbar { width: 4px; }
+    .log::-webkit-scrollbar-thumb { background: var(--sub); border-radius: 4px; }
     .link {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
       margin-top: 8px;
       font-size: 12px;
       border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 5px 10px;
-      color: #dceeff;
+      border-radius: 10px;
+      padding: 7px 14px;
+      color: var(--sub);
       text-decoration: none;
-      background: rgba(17, 32, 51, 0.72);
+      background: rgba(17, 32, 51, 0.5);
+      font-weight: 600;
+      transition: all 0.2s;
     }
+    .link:hover { background: rgba(61, 160, 255, 0.10); color: #78b8ff; border-color: rgba(61, 160, 255, 0.3); }
+    .card h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .card h3::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .status-bar {
+      display: flex; align-items: center; gap: 8px;
+      margin-top: 10px; padding: 8px 12px; border-radius: 9px;
+      background: rgba(41, 197, 111, 0.06); border: 1px solid rgba(41, 197, 111, 0.15);
+      font-size: 11px; color: var(--sub);
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); animation: pulse 2s infinite; }
     @media (max-width: 980px) {
       .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2410,17 +2647,28 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
     @media (max-width: 560px) {
       .form-grid { grid-template-columns: 1fr; }
       .kpi-grid { grid-template-columns: 1fr; }
+      .kpi .v { font-size: 20px; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <section class="hero">
-      <h1 class="title">SENIA 经营驾驶舱</h1>
-      <p class="sub">老板视角实时关注放行效率、客诉风险和综合成本，支持按产线/产品/批次快速筛选。可直接复用历史数据库。</p>
-      <span class="badge">Version __APP_VERSION__</span>
-      <a class="link" href="/" target="_blank">返回智能对色控制台</a>
-      <a class="link" href="/v1/web/innovation-v3" target="_blank">创新作战看板</a>
+    <section class="hero" style="animation: fadeInUp 0.5s ease;">
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
+        <div>
+          <h1 class="title">SENIA 经营驾驶舱</h1>
+          <p class="sub">实时关注放行效率、客诉风险和综合成本，支持按产线/产品/批次快速筛选，可直接复用历史数据库。</p>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <a class="link" href="/">返回控制台</a>
+          <a class="link" href="/v1/web/innovation-v3">创新作战看板</a>
+          <a class="link" href="/v1/web/precision-observatory">精密监控台</a>
+        </div>
+      </div>
+      <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+        <span class="badge">Version __APP_VERSION__</span>
+        <span class="badge">Executive View</span>
+      </div>
     </section>
 
     <section class="card">
@@ -2451,21 +2699,25 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
         <button class="secondary" id="risk-btn">刷新风险视图</button>
         <button class="secondary" id="export-btn">导出 CSV</button>
       </div>
+      <div class="status-bar">
+        <span class="status-dot"></span>
+        <span id="status-text">就绪</span>
+      </div>
     </section>
 
     <section class="kpi-grid">
-      <div class="kpi good"><p class="k">放行率</p><p class="v" id="kpi-pass-rate">--</p></div>
-      <div class="kpi"><p class="k">平均 DeltaE</p><p class="v" id="kpi-avg-de">--</p></div>
-      <div class="kpi warn"><p class="k">30天客诉概率</p><p class="v" id="kpi-p30">--</p></div>
-      <div class="kpi bad"><p class="k">综合风险等级</p><p class="v" id="kpi-risk-level">--</p></div>
+      <div class="kpi good" style="position:relative;animation:fadeInUp 0.5s 0.1s both;"><p class="k">放行率</p><p class="v" id="kpi-pass-rate">--</p></div>
+      <div class="kpi" style="position:relative;animation:fadeInUp 0.5s 0.15s both;"><p class="k">平均 DeltaE</p><p class="v" id="kpi-avg-de">--</p></div>
+      <div class="kpi warn" style="position:relative;animation:fadeInUp 0.5s 0.2s both;"><p class="k">30天客诉概率</p><p class="v" id="kpi-p30">--</p></div>
+      <div class="kpi bad" style="position:relative;animation:fadeInUp 0.5s 0.25s both;"><p class="k">综合风险等级</p><p class="v" id="kpi-risk-level">--</p></div>
     </section>
 
     <section class="row">
-      <div class="card">
+      <div class="card" style="animation:fadeInUp 0.5s 0.3s both;">
         <h3 style="margin:0;font-size:16px;">经营概览</h3>
         <pre class="log" id="exec-json">{"status":"ready"}</pre>
       </div>
-      <div class="card">
+      <div class="card" style="animation:fadeInUp 0.5s 0.35s both;">
         <h3 style="margin:0;font-size:16px;">风险与闭环</h3>
         <pre class="log" id="risk-json">{"status":"ready"}</pre>
       </div>
@@ -2505,7 +2757,12 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       }
       return usp.toString();
     }
+    function setStatus(msg) {
+      const el = q("#status-text");
+      if (el) el.textContent = msg + " - " + new Date().toLocaleTimeString();
+    }
     async function loadExecutive() {
+      setStatus("加载经营指标...");
       const p = params();
       const execResp = await fetch("/v1/history/executive?" + toQuery(p), { headers: authHeaders() });
       if (!execResp.ok) throw new Error("history/executive failed");
@@ -2516,6 +2773,7 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       const avgDeltaE = Number(execData?.quality?.avg_delta_e ?? NaN);
       q("#kpi-pass-rate").textContent = fmtPct(passRate);
       q("#kpi-avg-de").textContent = fmtNum(avgDeltaE, 2);
+      setStatus("经营指标已加载");
     }
     async function loadRisk() {
       const p = params();

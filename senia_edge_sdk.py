@@ -132,15 +132,22 @@ def extract_base_color(lab_values: list[tuple[float, float, float]],
 
 def filter_outliers(lab_values: list[tuple[float, float, float]],
                     sigma: float = 2.0) -> list[tuple[float, float, float]]:
-    """σ 法则过滤异常值 (手写/贴纸/反光)."""
+    """MAD-based robust outlier filtering (手写/贴纸/反光)."""
     if len(lab_values) < 10: return lab_values
     n = len(lab_values)
+
+    # MAD-based filtering on L channel
     Ls = [v[0] for v in lab_values]
-    L_mean = sum(Ls) / n
-    L_var = sum((l - L_mean)**2 for l in Ls) / n
-    L_std = max(L_var ** 0.5, 3.0)
-    lo, hi = L_mean - sigma * L_std, L_mean + sigma * L_std
-    result = [v for v in lab_values if lo <= v[0] <= hi]
+    Ls_sorted = sorted(Ls)
+    L_median = Ls_sorted[n // 2] if n % 2 else (Ls_sorted[n // 2 - 1] + Ls_sorted[n // 2]) / 2.0
+    abs_devs = sorted(abs(l - L_median) for l in Ls)
+    n_dev = len(abs_devs)
+    mad = (abs_devs[n_dev // 2] if n_dev % 2
+           else (abs_devs[n_dev // 2 - 1] + abs_devs[n_dev // 2]) / 2.0)
+    mad_scaled = max(mad * 1.4826, 3.0)  # scale factor for normal distribution
+
+    # Filter using MAD z-score threshold (use sigma parameter as z threshold)
+    result = [v for v in lab_values if abs(v[0] - L_median) / mad_scaled <= sigma]
     return result if len(result) >= n * 0.5 else lab_values
 
 
