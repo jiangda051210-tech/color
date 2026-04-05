@@ -426,6 +426,30 @@ _PRIORITY_MAP: dict[str, str] = {
 _PRIORITY_ORDER: dict[str, int] = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 
+def _build_explanation(decision_code: str, reasons: list[str], scores: dict[str, float],
+                       ctx: dict[str, Any], risk_probability: float) -> str:
+    """Generate a 1-2 sentence Chinese summary explaining the decision."""
+    avg_de = ctx.get("avg_de", 0.0)
+    confidence = ctx.get("confidence", 0.0)
+
+    if decision_code == "AUTO_RELEASE":
+        return (f"自动放行: 色差{avg_de:.2f}, 置信度{confidence * 100:.0f}%, "
+                f"全部指标达标")
+    elif decision_code == "MANUAL_REVIEW":
+        blockers = [r for r in reasons if "blocked" in r or "gate_misses" in r]
+        detail = blockers[0] if blockers else "部分指标未达标"
+        return (f"需人工复核: 色差{avg_de:.2f}, 置信度{confidence * 100:.0f}%, "
+                f"{detail}")
+    elif decision_code == "RECAPTURE_REQUIRED":
+        return (f"需重新拍摄: 置信度{confidence * 100:.0f}%过低或拍摄质量不足, "
+                f"无法做出可靠判定")
+    elif decision_code == "HOLD_AND_ESCALATE":
+        return (f"紧急扣留: 色差{avg_de:.2f}, 风险概率{risk_probability * 100:.0f}%, "
+                f"工艺风险等级为{ctx.get('process_risk', 'unknown')}, "
+                f"原因: {'; '.join(reasons[:2])}")
+    return f"决策: {decision_code}, 色差{avg_de:.2f}"
+
+
 def build_decision_center(report: dict[str, Any], policy: dict[str, Any], policy_source: str) -> dict[str, Any]:
     ctx = _extract_context(report)
     decision_code, reasons = _decide(ctx, policy)
@@ -447,7 +471,10 @@ def build_decision_center(report: dict[str, Any], policy: dict[str, Any], policy
         priority = "P1"
         reasons.append("priority_escalated_due_to_high_risk")
 
-    return {
+    # Auto Decision Explanation (Part 2D)
+    auto_explanation = _build_explanation(decision_code, reasons, scores, ctx, risk_probability)
+
+    result: dict[str, Any] = {
         "enabled": True,
         "policy_source": policy_source,
         "decision_code": decision_code,
@@ -459,6 +486,7 @@ def build_decision_center(report: dict[str, Any], policy: dict[str, Any], policy
         "stakeholder_scores": scores,
         "recommended_actions_top3": actions[:3],
         "executive_messages": msgs,
+        "auto_explanation": auto_explanation,
         "context_snapshot": {
             "avg_ratio": ctx["avg_ratio"],
             "p95_ratio": ctx["p95_ratio"],
@@ -468,6 +496,21 @@ def build_decision_center(report: dict[str, Any], policy: dict[str, Any], policy
             "process_risk": ctx["process_risk"],
         },
     }
+
+    # Auto Alert Escalation (Part 2F)
+    if decision_code == "HOLD_AND_ESCALATE":
+        lot_id = str(report.get("inputs", {}).get("lot_id", report.get("lot_id", "unknown")))
+        product_code = str(report.get("inputs", {}).get("product_code", report.get("product_code", "unknown")))
+        result["auto_alert"] = {
+            "level": "critical",
+            "title": f"紧急扣留: {lot_id} / {product_code}",
+            "body": (f"色差ΔE={ctx['avg_de']:.2f}, "
+                     f"风险={risk_probability:.0%}, "
+                     f"原因: {'; '.join(reasons[:3])}"),
+            "channels": ["webhook", "dingtalk"],
+        }
+
+    return result
 
 
 def attach_decision_center(
