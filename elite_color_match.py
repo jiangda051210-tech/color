@@ -1661,16 +1661,77 @@ def infer_profile(board_bgr: np.ndarray, board_mask: np.ndarray, requested_profi
     hsv = cv2.cvtColor(board_bgr, cv2.COLOR_BGR2HSV)
     highlight_ratio = float(np.mean((hsv[..., 2] > 244) & (hsv[..., 1] < 35) & valid))
 
+    # ── Weighted Ensemble: Sobel texture + LBP-like + chroma statistics ──
+    # Signal 1: Sobel gradient texture (original)
+    sobel_vote: str
     if highlight_ratio > 0.05:
-        name = "high_gloss"
+        sobel_vote = "high_gloss"
     elif texture_score > 22:
-        name = "stone"
+        sobel_vote = "stone"
     elif texture_score > 9.5:
-        name = "wood"
+        sobel_vote = "wood"
     else:
-        name = "solid"
+        sobel_vote = "solid"
 
-    return name, {"texture_score": texture_score, "highlight_ratio": highlight_ratio, "note": "auto-inferred"}
+    # Signal 2: LBP-like local variance (simplified — use Laplacian variance)
+    lap_var = float(cv2.Laplacian(gray, cv2.CV_32F)[valid].var()) if np.any(valid) else 0.0
+    lbp_vote: str
+    if lap_var > 600:
+        lbp_vote = "stone"
+    elif lap_var > 200:
+        lbp_vote = "wood"
+    elif highlight_ratio > 0.05:
+        lbp_vote = "high_gloss"
+    else:
+        lbp_vote = "solid"
+
+    # Signal 3: Chroma statistics (metallic = low chroma + mid texture)
+    chroma = np.sqrt(hsv[..., 1].astype(np.float32) ** 2)
+    chroma_mean = float(chroma[valid].mean()) if np.any(valid) else 0.0
+    chroma_vote: str
+    if chroma_mean < 25 and texture_score > 6:
+        chroma_vote = "metallic"
+    elif chroma_mean < 20 and highlight_ratio > 0.03:
+        chroma_vote = "high_gloss"
+    elif texture_score > 18:
+        chroma_vote = "stone"
+    elif texture_score > 8:
+        chroma_vote = "wood"
+    else:
+        chroma_vote = "solid"
+
+    # ── Consensus logic ──
+    votes = [sobel_vote, lbp_vote, chroma_vote]
+    vote_counts: dict[str, int] = {}
+    for v in votes:
+        vote_counts[v] = vote_counts.get(v, 0) + 1
+
+    max_count = max(vote_counts.values())
+    if max_count >= 2:
+        # Majority agreement -> high confidence
+        name = max(vote_counts, key=lambda k: vote_counts[k])
+        confidence_label = "high" if max_count == 3 else "medium"
+    else:
+        # All three disagree -> use safest (strictest) profile
+        # Strictness order: solid > high_gloss > metallic > wood > stone
+        strictness_order = ["solid", "high_gloss", "metallic", "wood", "stone"]
+        for candidate in strictness_order:
+            if candidate in vote_counts:
+                name = candidate
+                break
+        else:
+            name = "solid"
+        confidence_label = "low"
+
+    return name, {
+        "texture_score": texture_score,
+        "highlight_ratio": highlight_ratio,
+        "lap_variance": round(lap_var, 1),
+        "chroma_mean": round(chroma_mean, 1),
+        "ensemble_votes": votes,
+        "ensemble_confidence": confidence_label,
+        "note": "auto-inferred (ensemble)",
+    }
 
 
 def delta_components(reference_lab: np.ndarray, target_lab: np.ndarray) -> tuple[float, float, float]:
@@ -2264,7 +2325,13 @@ def analyze_single_image(
                     }
                 )
                 continue
-            mean_lab, std_lab, cnt = robust_mean_lab(board_lab[y0:y1, x0:x1], cell_mask)
+            try:
+                mean_lab, std_lab, cnt = robust_mean_lab(board_lab[y0:y1, x0:x1], cell_mask)
+            except ValueError:
+                grid.append({"row": r + 1, "col": c + 1, "used": False, "delta_e00": None,
+                             "valid_ratio": float(np.count_nonzero(cell_mask) / max(1, cell_mask.size)),
+                             "skip_reason": "all_pixels_invalid"})
+                continue
             de = float(ciede2000(mean_lab.reshape(1, 3), sample_vec)[0])
             de_values.append(de)
             grid.append(
@@ -2281,7 +2348,20 @@ def analyze_single_image(
             )
 
     if not de_values:
-        raise RuntimeError("可用采样网格为空，请检查图像质量与遮挡。")
+        return {
+            "mode": "single",
+            "error": "all_pixels_invalid",
+            "error_detail": "所有像素被标记为无效（可能是镜面反射或遮挡），请调整拍摄角度重试",
+            "pass": False,
+            "confidence": {"overall": 0.0},
+            "result": {"pass": False, "summary": {},
+                       "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0},
+                       "recommendations": ["重新拍摄: 避免强反光和遮挡"]},
+            "profile": inferred_profile,
+            "detection": det_diag,
+            "quality_flags": ["all_grid_cells_invalid"],
+            "recommendations": ["重新拍摄: 避免强反光和遮挡"],
+        }
 
     de_np = np.array(de_values, dtype=np.float32)
     avg_de = float(np.mean(de_np))
@@ -2459,8 +2539,36 @@ def analyze_dual_image(
     ref_lab = bgr_to_lab_float(ref_tone)
     film_lab = bgr_to_lab_float(film_tone)
 
-    ref_mean, ref_std, ref_used = robust_mean_lab(ref_lab, ref_mask)
-    film_mean, film_std, film_used = robust_mean_lab(film_lab, film_mask)
+    try:
+        ref_mean, ref_std, ref_used = robust_mean_lab(ref_lab, ref_mask)
+    except ValueError:
+        return {
+            "mode": "dual_image",
+            "error": "all_pixels_invalid",
+            "error_detail": "参考图像所有像素被标记为无效（可能是镜面反射或遮挡），请调整拍摄角度重试",
+            "pass": False,
+            "confidence": {"overall": 0.0},
+            "result": {"pass": False, "summary": {},
+                       "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0},
+                       "recommendations": ["重新拍摄参考图像: 避免强反光和遮挡"]},
+            "quality_flags": ["reference_all_pixels_invalid"],
+            "recommendations": ["重新拍摄参考图像: 避免强反光和遮挡"],
+        }
+    try:
+        film_mean, film_std, film_used = robust_mean_lab(film_lab, film_mask)
+    except ValueError:
+        return {
+            "mode": "dual_image",
+            "error": "all_pixels_invalid",
+            "error_detail": "大货图像所有像素被标记为无效（可能是镜面反射或遮挡），请调整拍摄角度重试",
+            "pass": False,
+            "confidence": {"overall": 0.0},
+            "result": {"pass": False, "summary": {},
+                       "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0},
+                       "recommendations": ["重新拍摄大货图像: 避免强反光和遮挡"]},
+            "quality_flags": ["film_all_pixels_invalid"],
+            "recommendations": ["重新拍摄大货图像: 避免强反光和遮挡"],
+        }
 
     profile_used, profile_metrics = infer_profile(ref_tone, ref_mask, profile_name)
     profile = PROFILES[profile_used]
@@ -2485,8 +2593,13 @@ def analyze_dual_image(
                 grid.append({"row": r + 1, "col": c + 1, "used": False, "delta_e00": None})
                 continue
 
-            ref_cell, ref_std_cell, cnt_ref = robust_mean_lab(ref_lab[y0:y1, x0:x1], m)
-            film_cell, film_std_cell, cnt_film = robust_mean_lab(film_lab[y0:y1, x0:x1], m)
+            try:
+                ref_cell, ref_std_cell, cnt_ref = robust_mean_lab(ref_lab[y0:y1, x0:x1], m)
+                film_cell, film_std_cell, cnt_film = robust_mean_lab(film_lab[y0:y1, x0:x1], m)
+            except ValueError:
+                grid.append({"row": r + 1, "col": c + 1, "used": False, "delta_e00": None,
+                             "skip_reason": "all_pixels_invalid"})
+                continue
 
             de = float(ciede2000(ref_cell.reshape(1, 3), film_cell.reshape(1, 3))[0])
             d_l, d_c, d_h = delta_components(ref_cell, film_cell)
@@ -2514,7 +2627,18 @@ def analyze_dual_image(
             )
 
     if not de_values:
-        raise RuntimeError("可用采样网格为空，请检查ROI和图像质量。")
+        return {
+            "mode": "dual_image",
+            "error": "all_pixels_invalid",
+            "error_detail": "所有网格单元像素均无效（可能是镜面反射或遮挡），请调整拍摄角度重试",
+            "pass": False,
+            "confidence": {"overall": 0.0},
+            "result": {"pass": False, "summary": {},
+                       "confidence": {"overall": 0.0, "geometry": 0.0, "lighting": 0.0, "coverage": 0.0},
+                       "recommendations": ["重新拍摄: 避免强反光和遮挡"]},
+            "quality_flags": ["all_grid_cells_invalid"],
+            "recommendations": ["重新拍摄: 避免强反光和遮挡"],
+        }
 
     de_np = np.array(de_values, dtype=np.float32)
     avg_de = float(np.mean(de_np))

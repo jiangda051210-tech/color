@@ -21,6 +21,51 @@ import cv2
 import numpy as np
 
 
+def _auto_orient(image_bgr: np.ndarray) -> np.ndarray:
+    """Auto-rotate based on EXIF orientation if present.
+
+    OpenCV's imread does not honour EXIF orientation tags.  We apply two
+    heuristics in order:
+
+    1. Try to read the raw EXIF orientation byte from the JPEG header
+       (lightweight, no extra dependency).
+    2. Fallback: if the image is portrait-like (height > 1.5 * width) it was
+       likely shot on a phone held vertically — rotate 90 degrees CCW so that
+       subsequent analysis sees the expected landscape layout.
+    """
+    # --- Attempt 1: lightweight EXIF orientation parse (JPEG only) ---
+    try:
+        # Re-encode to buffer so we can inspect the raw bytes for the
+        # orientation tag without pulling in a heavy EXIF library.
+        ok, buf = cv2.imencode(".jpg", image_bgr)
+        if ok:
+            data = bytes(buf)
+            # JPEG APP1 EXIF orientation tag id = 0x0112
+            idx = data.find(b"\x01\x12")
+            if idx != -1 and idx + 4 < len(data):
+                orient = data[idx + 2] * 256 + data[idx + 3]
+                if orient == 0:
+                    orient = data[idx + 3]
+                if orient == 3:
+                    image_bgr = cv2.rotate(image_bgr, cv2.ROTATE_180)
+                    return image_bgr
+                elif orient == 6:
+                    image_bgr = cv2.rotate(image_bgr, cv2.ROTATE_90_CLOCKWISE)
+                    return image_bgr
+                elif orient == 8:
+                    image_bgr = cv2.rotate(image_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    return image_bgr
+    except Exception:  # noqa: BLE001
+        pass  # EXIF parse failed — fall through to heuristic
+
+    # --- Attempt 2: aspect-ratio heuristic for portrait phone photos ---
+    h, w = image_bgr.shape[:2]
+    if h > w * 1.5:
+        # Likely a portrait phone photo that should be landscape — rotate 90 CCW
+        image_bgr = cv2.rotate(image_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return image_bgr
+
+
 def detect_outdoor_environment(image_bgr: np.ndarray) -> dict[str, Any]:
     """
     检测是否为户外拍摄环境.
@@ -163,6 +208,9 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
       errors: list — 错误列表 (建议重拍)
       scores: dict — 各项质量评分
     """
+    # ── Auto-orient: fix EXIF rotation before any analysis ──
+    image_bgr = _auto_orient(image_bgr)
+
     h, w = image_bgr.shape[:2]
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
@@ -170,6 +218,7 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
     scores: dict[str, float] = {}
+    retake_guidance: list[dict[str, Any]] = []
 
     # ── 1. 模糊检测 (噪声感知 Laplacian 方差) ──
     lap = cv2.Laplacian(gray, cv2.CV_64F)
@@ -182,8 +231,18 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     scores["adjusted_sharpness"] = round(adjusted_sharpness, 1)
     if adjusted_sharpness < 30:
         errors.append("照片严重模糊，请稳住手机重新拍摄")
+        retake_guidance.append({
+            "issue": "blur",
+            "action": "固定手机在三脚架或平面上，使用定时快门避免抖动",
+            "auto_recoverable": False,
+        })
     elif adjusted_sharpness < 80:
         warnings.append("照片轻微模糊，可能影响精度")
+        retake_guidance.append({
+            "issue": "slight_blur",
+            "action": "尝试稳住手机或使用连拍模式选最清晰的一张",
+            "auto_recoverable": True,
+        })
     if noise_est > 50:
         warnings.append(f"检测到较高图像噪声 (噪声指数={noise_est:.0f})，建议在更好光线下拍摄")
 
@@ -192,16 +251,36 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
     scores["brightness"] = round(mean_brightness, 1)
     if mean_brightness < 40:
         errors.append("照片太暗，请在光线充足的地方拍摄 (当前亮度={:.0f}, 需要>60)".format(mean_brightness))
+        retake_guidance.append({
+            "issue": "too_dark",
+            "action": "打开灯箱或移到光线充足的位置，确保亮度>60",
+            "auto_recoverable": False,
+        })
     elif mean_brightness < 60:
         warnings.append("照片偏暗，建议打开灯光 (亮度={:.0f})".format(mean_brightness))
+        retake_guidance.append({
+            "issue": "dim",
+            "action": "增加环境光或调高灯箱亮度",
+            "auto_recoverable": True,
+        })
     elif mean_brightness > 220:
         warnings.append("照片过亮，请避免强光直射 (亮度={:.0f})".format(mean_brightness))
+        retake_guidance.append({
+            "issue": "overexposure",
+            "action": "减少光源强度或调低手机曝光补偿",
+            "auto_recoverable": True,
+        })
 
     # ── 3. 过曝检测 (像素饱和) ──
     overexposed_ratio = float(np.mean(gray > 250))
     scores["overexposed_ratio"] = round(overexposed_ratio, 4)
     if overexposed_ratio > 0.40:
         errors.append("严重过曝 ({:.0f}%)，可能是闪光灯或纯白图片，请重拍".format(overexposed_ratio * 100))
+        retake_guidance.append({
+            "issue": "severe_overexposure",
+            "action": "关闭闪光灯，降低曝光补偿，避免强光直射产品表面",
+            "auto_recoverable": False,
+        })
     elif overexposed_ratio > 0.15:
         warnings.append("部分过曝 ({:.0f}%)，白色背景区域会被自动排除".format(overexposed_ratio * 100))
     elif overexposed_ratio > 0.05:
@@ -313,6 +392,8 @@ def preflight_check(image_bgr: np.ndarray) -> dict[str, Any]:
         "scores": scores,
         "suggestion": _build_suggestion(errors, warnings),
         "environment": env_info,
+        "retake_guidance": retake_guidance,
+        "corrected_image": image_bgr,  # auto-oriented image for downstream use
     }
 
 

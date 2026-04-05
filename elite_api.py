@@ -4,10 +4,14 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
+import shutil
+import sqlite3
 import sys
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -226,6 +230,97 @@ ONLINE_LEARNER = OnlineLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_feedback.
 AMBIENT_LEARNER = AmbientLightLearner(store_path=DEFAULT_OUTPUT_ROOT / "senia_ambient.json")
 RECIPE_TWIN = RecipeDigitalTwin(store_path=DEFAULT_OUTPUT_ROOT / "senia_recipe_twin.json")
 BATCH_MEMORY = CrossBatchMemory(store_path=DEFAULT_OUTPUT_ROOT / "senia_batch_memory.json")
+
+# ── Analysis Concurrency Semaphore (Part 1C) ──
+_ANALYSIS_SEMAPHORE = threading.Semaphore(4)  # max 4 concurrent heavy analyses
+
+
+# ── Auto-Resize Large Images (Part 1D) ──
+def _auto_resize_if_needed(image_bgr, max_side: int = 3000):
+    """Downscale images larger than max_side px on the long edge."""
+    h, w = image_bgr.shape[:2]
+    if max(h, w) <= max_side:
+        return image_bgr
+    scale = max_side / max(h, w)
+    new_w, new_h = int(w * scale), int(h * scale)
+    return cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+# ── Calibration Age Tracker (Part 2A) ──
+_CALIBRATION_TIMESTAMP_FILE = Path(DEFAULT_OUTPUT_ROOT) / "last_calibration.txt"
+
+
+def check_calibration_age() -> dict[str, Any]:
+    """Return calibration freshness status for injection into analysis responses."""
+    if not _CALIBRATION_TIMESTAMP_FILE.exists():
+        return {"status": "unknown", "days_since": None,
+                "warning": "从未校准 — 建议立即进行ColorChecker校准"}
+    try:
+        last_cal = float(_CALIBRATION_TIMESTAMP_FILE.read_text().strip())
+    except (ValueError, OSError):
+        return {"status": "unknown", "days_since": None,
+                "warning": "校准时间戳读取失败 — 建议重新校准"}
+    days = (time.time() - last_cal) / 86400
+    if days > 30:
+        return {"status": "expired", "days_since": round(days),
+                "warning": f"校准已过期{int(days)}天 — 色差测量可能不准确"}
+    if days > 14:
+        return {"status": "aging", "days_since": round(days),
+                "warning": f"校准即将过期({int(days)}天) — 建议尽快重新校准"}
+    return {"status": "ok", "days_since": round(days)}
+
+
+def record_calibration_timestamp() -> None:
+    """Record current time as latest calibration timestamp."""
+    _CALIBRATION_TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _CALIBRATION_TIMESTAMP_FILE.write_text(str(time.time()))
+
+
+# ── Auto Health Self-Healing Watchdog (Part 2E) ──
+def _auto_cleanup_old_reports(days: int = 30) -> int:
+    """Remove report directories older than `days`. Returns count of removed dirs."""
+    cutoff = time.time() - days * 86400
+    removed = 0
+    try:
+        for entry in DEFAULT_OUTPUT_ROOT.iterdir():
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+    except OSError:
+        pass
+    return removed
+
+
+def _health_watchdog():
+    """Background thread that monitors system health and self-heals."""
+    while True:
+        time.sleep(60)
+        try:
+            # Check disk space
+            usage = shutil.disk_usage(str(DEFAULT_OUTPUT_ROOT))
+            if usage.free < 500 * 1024 * 1024:  # <500MB
+                _log.warning("disk_low", free_mb=usage.free // (1024 * 1024))
+                cleaned = _auto_cleanup_old_reports(days=30)
+                _log.info("auto_cleanup_done", removed_dirs=cleaned)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # Check DB health
+            conn = sqlite3.connect(str(DEFAULT_HISTORY_DB), timeout=5)
+            conn.execute("SELECT 1")
+            conn.close()
+        except Exception as e:  # noqa: BLE001
+            _log.error("db_health_failed", error=str(e))
+        try:
+            # Check calibration age and log warning
+            cal_status = check_calibration_age()
+            if cal_status["status"] in ("expired", "unknown"):
+                _log.warning("calibration_stale", **cal_status)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+threading.Thread(target=_health_watchdog, daemon=True, name="health-watchdog").start()
 
 _log.info("modules_initialized", version=APP_VERSION,
           config_count=len(CONFIG_STORE.status()),
@@ -1089,6 +1184,10 @@ def _decode_image_b64(raw: str) -> np.ndarray:
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=400, detail="b64 payload is not a valid image")
+    # Auto-orient and auto-resize
+    from senia_preflight import _auto_orient
+    img = _auto_orient(img)
+    img = _auto_resize_if_needed(img)
     return img
 
 
@@ -2033,7 +2132,11 @@ def _load_image(source: ImageInput) -> np.ndarray:
         p = Path(source.path)
         if not p.exists():
             raise HTTPException(status_code=400, detail=f"image not found: {source.path}")
-        return read_image(p)
+        img = read_image(p)
+        from senia_preflight import _auto_orient
+        img = _auto_orient(img)
+        img = _auto_resize_if_needed(img)
+        return img
     if source.b64:
         return _decode_image_b64(source.b64)
     raise HTTPException(status_code=400, detail="image source is empty")
@@ -3809,6 +3912,7 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
     target_override = build_target_override(req.target_avg, req.target_p95, req.target_max)
     aruco_config = {"enabled": bool(req.use_aruco), "dict_name": req.aruco_dict, "ids_order": req.aruco_ids}
 
+    _ANALYSIS_SEMAPHORE.acquire()
     try:
         report = analyze_single_image(
             image_bgr=image,
@@ -3826,6 +3930,10 @@ def analyze_single(req: SingleAnalyzeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=f"Analysis failed: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal analysis error: {type(e).__name__}")
+    finally:
+        _ANALYSIS_SEMAPHORE.release()
+    # Inject calibration status into every analysis response
+    report["calibration_status"] = check_calibration_age()
     report["inputs"] = {
         "image": req.image.path if req.image.path else "inline_b64",
         "grid": {"rows": rows, "cols": cols},
@@ -4089,17 +4197,23 @@ def analyze_dual(req: DualAnalyzeRequest) -> dict[str, Any]:
     target_override = build_target_override(req.target_avg, req.target_p95, req.target_max)
     roi = req.roi.to_roi() if req.roi is not None else None
 
-    report = analyze_dual_image(
-        reference_bgr=reference,
-        film_bgr=film,
-        grid_rows=rows,
-        grid_cols=cols,
-        profile_name=req.profile,
-        roi=roi,
-        output_dir=output_dir,
-        target_override=target_override,
-        enable_shading_correction=not req.disable_shading_correction,
-    )
+    _ANALYSIS_SEMAPHORE.acquire()
+    try:
+        report = analyze_dual_image(
+            reference_bgr=reference,
+            film_bgr=film,
+            grid_rows=rows,
+            grid_cols=cols,
+            profile_name=req.profile,
+            roi=roi,
+            output_dir=output_dir,
+            target_override=target_override,
+            enable_shading_correction=not req.disable_shading_correction,
+        )
+    finally:
+        _ANALYSIS_SEMAPHORE.release()
+    # Inject calibration status into every analysis response
+    report["calibration_status"] = check_calibration_age()
     report["inputs"] = {
         "reference": req.reference.path if req.reference.path else "inline_b64",
         "film": req.film.path if req.film.path else "inline_b64",
@@ -7168,6 +7282,11 @@ async def senia_analyze_endpoint(
                             detail="Cannot decode image. Supported formats: JPG, PNG, BMP, TIFF, WebP. "
                                    "PDF and other document formats are not supported.")
 
+    # Auto-orient and auto-resize
+    from senia_preflight import _auto_orient
+    img = _auto_orient(img)
+    img = _auto_resize_if_needed(img)
+
     # 网格参数验证
     rows, cols = 6, 8
     try:
@@ -7195,6 +7314,9 @@ async def senia_analyze_endpoint(
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Inject calibration status
+    report["calibration_status"] = check_calibration_age()
 
     summary = report.get("result", {}).get("summary", {})
     tier = report.get("tier", "UNKNOWN")
