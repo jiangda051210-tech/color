@@ -97,7 +97,7 @@ def detect_outdoor_environment(image_bgr: np.ndarray) -> dict[str, Any]:
     estimated_cct = 6500.0  # 默认 D65
     if rb_ratio > 0.01:
         # 简化色温估算: McCamy 近似的简化版
-        estimated_cct = 6500.0 / rb_ratio
+        estimated_cct = max(1800.0, min(25000.0, 6500.0 / rb_ratio))
     details["estimated_cct"] = round(estimated_cct, 0)
     details["rb_ratio"] = round(rb_ratio, 3)
     if estimated_cct > 5000:

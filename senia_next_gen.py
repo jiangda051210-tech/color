@@ -402,9 +402,15 @@ def metamerism_risk(
         de_result = ciede2000(L, a, b, lab_data[0], lab_data[1], lab_data[2])
         de_val = de_result["dE00"]
 
-        # CAM16 感知距离 (更准确的环境适应比较)
+        # CAM16 感知距离 — 正确Lab→XYZ逆变换
+        _fy_i = (lab_data[0] + 16.0) / 116.0
+        _fx_i = lab_data[1] / 500.0 + _fy_i
+        _fz_i = _fy_i - lab_data[2] / 200.0
+        _xr_i = _fx_i**3 if _fx_i**3 > 0.008856 else (116.0 * _fx_i - 16.0) / 903.3
+        _yr_i = _fy_i**3 if lab_data[0] > 903.3 * 0.008856 else lab_data[0] / 903.3
+        _zr_i = _fz_i**3 if _fz_i**3 > 0.008856 else (116.0 * _fz_i - 16.0) / 903.3
         cam16_illum = cam16_forward(
-            max(lab_data[0] * 0.95047, 0.0), max(lab_data[0], 0.0), max(lab_data[0] * 1.08883, 0.0),
+            max(_xr_i * 0.95047, 0.0), max(_yr_i * 1.0, 0.0), max(_zr_i * 1.08883, 0.0),
         )
         cam16_de = cam16_ucs_distance(cam16_ref, cam16_illum)
 

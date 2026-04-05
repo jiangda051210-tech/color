@@ -305,7 +305,10 @@ def recent_stats(
     x = np.arange(len(avg), dtype=np.float64)
     slope = 0.0
     if len(avg) >= 4 and np.std(avg) > 1e-8:
-        slope = float(np.polyfit(x, avg, 1)[0])
+        try:
+            slope = float(np.polyfit(x, avg, 1)[0])
+        except (np.linalg.LinAlgError, ValueError):
+            slope = 0.0
 
     # Mann-Kendall trend test for robust trend detection
     mk_result = _mann_kendall(avg)
@@ -970,7 +973,10 @@ def complaint_early_warning(
     avg_seq = avg_seq[~np.isnan(avg_seq)]
     if avg_seq.size >= 5 and np.std(avg_seq) > 1e-8:
         x = np.arange(avg_seq.size, dtype=np.float64)
-        slope = float(np.polyfit(x, avg_seq, 1)[0])
+        try:
+            slope = float(np.polyfit(x, avg_seq, 1)[0])
+        except (np.linalg.LinAlgError, ValueError):
+            slope = 0.0
 
     uplift_avg = max(0.0, avg7_m / max(1e-6, avg30_m) - 1.0)
     conf_drop = max(0.0, conf30_m - conf7_m)

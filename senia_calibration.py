@@ -156,7 +156,7 @@ def ciede2000(L1: float, a1: float, b1: float,
     C1 = math.hypot(a1, b1)
     C2 = math.hypot(a2, b2)
     C_bar = (C1 + C2) / 2.0
-    G = 0.5 * (1.0 - math.sqrt(C_bar ** 7 / (C_bar ** 7 + 25.0 ** 7)))
+    G = 0.5 * (1.0 - math.sqrt(C_bar ** 7 / (C_bar ** 7 + 25.0 ** 7 + 1e-30)))
     a1p, a2p = a1 * (1 + G), a2 * (1 + G)
     C1p, C2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
     h1p = math.degrees(math.atan2(b1, a1p)) % 360.0
@@ -190,7 +190,7 @@ def ciede2000(L1: float, a1: float, b1: float,
     SL = 1 + 0.015 * (Lp - 50) ** 2 / math.sqrt(20 + (Lp - 50) ** 2)
     SC = 1 + 0.045 * Cp
     SH = 1 + 0.015 * Cp * T
-    RT = -2 * math.sqrt(Cp ** 7 / (Cp ** 7 + 25 ** 7)) * math.sin(
+    RT = -2 * math.sqrt(Cp ** 7 / (Cp ** 7 + 25 ** 7 + 1e-30)) * math.sin(
         math.radians(60 * math.exp(-((hp - 275) / 25) ** 2)))
 
     vL, vC, vH = dLp / SL, dCp / SC, dHp / SH

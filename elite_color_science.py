@@ -184,7 +184,7 @@ def ciede2000_vectorized(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     c1 = np.sqrt(a1**2 + b1**2)
     c2 = np.sqrt(a2**2 + b2**2)
     avg_c = (c1 + c2) / 2.0
-    g = 0.5 * (1.0 - np.sqrt(avg_c**7 / (avg_c**7 + 25.0**7 + 1e-12)))
+    g = 0.5 * (1.0 - np.sqrt(avg_c**7 / (avg_c**7 + 25.0**7 + 1e-30)))
     a1p = (1.0 + g) * a1
     a2p = (1.0 + g) * a2
     c1p = np.sqrt(a1p**2 + b1**2)
@@ -212,7 +212,7 @@ def ciede2000_vectorized(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
          + 0.32 * np.cos(np.radians(3.0 * avg_hp + 6.0))
          - 0.20 * np.cos(np.radians(4.0 * avg_hp - 63.0)))
     delta_theta = 30.0 * np.exp(-((avg_hp - 275.0) / 25.0) ** 2)
-    rc = 2.0 * np.sqrt(avg_cp**7 / (avg_cp**7 + 25.0**7 + 1e-12))
+    rc = 2.0 * np.sqrt(avg_cp**7 / (avg_cp**7 + 25.0**7 + 1e-30))
     sl = 1.0 + 0.015 * (avg_l - 50.0) ** 2 / np.sqrt(20.0 + (avg_l - 50.0) ** 2)
     sc = 1.0 + 0.045 * avg_cp
     sh = 1.0 + 0.015 * avg_cp * t
