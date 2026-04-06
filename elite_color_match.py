@@ -1610,6 +1610,50 @@ def _find_sample_inside_board(image_bgr: np.ndarray, board_quad: np.ndarray) -> 
     return best
 
 
+def _score_candidate_for_board(cand: RectCandidate, image_bgr: np.ndarray,
+                               image_area: float) -> tuple[float, bool]:
+    """Score a candidate for board selection using texture and chroma analysis.
+
+    Returns (score, is_likely_background).
+    Higher score = more likely to be a product board (not concrete/background).
+    """
+    h, w = image_bgr.shape[:2]
+    # Extract bounding box of the candidate region
+    pts = cand.quad.astype(np.int32)
+    x_coords = np.clip(pts[:, 0], 0, w - 1)
+    y_coords = np.clip(pts[:, 1], 0, h - 1)
+    x0, x1 = int(x_coords.min()), int(x_coords.max())
+    y0, y1 = int(y_coords.min()), int(y_coords.max())
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return 0.0, False
+
+    roi = image_bgr[y0:y1, x0:x1]
+
+    # Texture complexity (Laplacian variance) — wood has higher texture than concrete
+    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    texture_var = float(cv2.Laplacian(gray_roi, cv2.CV_64F).var())
+
+    # Chroma analysis — concrete/cement has very low chroma (neutral gray)
+    lab_roi = bgr_to_lab_float(roi)
+    mean_chroma = float(np.sqrt(lab_roi[:, :, 1] ** 2 + lab_roi[:, :, 2] ** 2).mean())
+    mean_L = float(lab_roi[:, :, 0].mean())
+
+    # Concrete detection: low chroma + mid-range lightness
+    is_likely_background = (mean_chroma < 8.0 and 25.0 < mean_L < 75.0)
+
+    # Score: prefer higher texture and higher chroma (= more likely a product, not concrete)
+    # Texture component: normalized roughly 0-1 range
+    texture_score = min(texture_var / 500.0, 2.0)
+    # Chroma component: normalized
+    chroma_score = min(mean_chroma / 30.0, 2.0)
+    # Rectangularity bonus
+    rect_bonus = cand.rectangularity
+
+    score = texture_score * 0.4 + chroma_score * 0.4 + rect_bonus * 0.2
+
+    return score, is_likely_background
+
+
 def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, int, int],
                             image_bgr: np.ndarray | None = None,
                             multi_board: bool = False) -> tuple[RectCandidate | None, RectCandidate | None, dict[str, Any]]:
@@ -1621,12 +1665,62 @@ def choose_board_and_sample(cands: list[RectCandidate], image_shape: tuple[int, 
     if multi_board and image_bgr is not None:
         all_boards_info = detect_all_boards(cands, image_shape, image_bgr)
 
+    # ── Fix: Skip candidates covering >80% of image (likely full background) ──
+    filtered_cands = [c for c in cands if c.rect_area / image_area < 0.80]
+    if not filtered_cands:
+        filtered_cands = cands  # fallback to all if everything is >80%
+
+    # ── Fix: Score candidates by texture/chroma to avoid selecting concrete background ──
+    # Only score if we have the image data
+    cand_scores: dict[int, tuple[float, bool]] = {}
+    if image_bgr is not None:
+        for c in filtered_cands:
+            ratio = c.rect_area / image_area
+            if 0.02 <= ratio <= 0.80 and c.rectangularity >= 0.35:
+                score, is_bg = _score_candidate_for_board(c, image_bgr, image_area)
+                cand_scores[id(c)] = (score, is_bg)
+
     board = None
-    for c in cands:
-        ratio = c.rect_area / image_area
-        if 0.14 <= ratio <= 0.95 and c.rectangularity >= 0.45:
-            board = c
-            break
+
+    # Strategy 1: Find best candidate using texture/chroma scoring (skip background-like regions)
+    if cand_scores:
+        scored = [(c, cand_scores[id(c)]) for c in filtered_cands if id(c) in cand_scores]
+        # Filter out likely background candidates
+        non_bg = [(c, s) for c, (s, is_bg) in scored if not is_bg]
+        if non_bg:
+            # Among non-background candidates, prefer the one with best combined score
+            # weighted by area (larger boards preferred if not background)
+            best_c, best_s = max(non_bg, key=lambda x: x[1] * 0.6 + (x[0].rect_area / image_area) * 0.4)
+            if best_c.rect_area / image_area >= 0.02:
+                board = best_c
+        else:
+            # All candidates are background-like (e.g. wood with low chroma on concrete).
+            # Pick the highest-scoring one with reasonable area — it's likely the actual board.
+            reasonable_bg = [(c, s) for c, (s, is_bg) in scored
+                             if 0.05 <= c.rect_area / image_area <= 0.80 and c.rectangularity >= 0.40]
+            if reasonable_bg:
+                best_c, best_s = max(reasonable_bg, key=lambda x: x[1])
+                board = best_c
+
+    # Strategy 2: Original logic as fallback (on filtered candidates, skip bg if possible)
+    if board is None:
+        for c in filtered_cands:
+            ratio = c.rect_area / image_area
+            if 0.14 <= ratio <= 0.80 and c.rectangularity >= 0.45:
+                if id(c) in cand_scores:
+                    _, is_bg = cand_scores[id(c)]
+                    if is_bg:
+                        continue  # skip concrete-like candidates
+                board = c
+                break
+
+    # Strategy 3: Relaxed fallback (allow bg candidates)
+    if board is None:
+        for c in filtered_cands:
+            ratio = c.rect_area / image_area
+            if 0.14 <= ratio <= 0.95 and c.rectangularity >= 0.45:
+                board = c
+                break
 
     if board is None and cands:
         # 只用面积在合理范围的候选, 避免选到整张图大小的 LAB 分割区域
@@ -2238,7 +2332,7 @@ def analyze_single_image(
     enable_shading_correction: bool = True,
 ) -> dict[str, Any]:
     cands = contour_candidates(image_bgr)
-    board_cand, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape)
+    board_cand, sample_cand, det_diag = choose_board_and_sample(cands, image_bgr.shape, image_bgr=image_bgr)
     det_diag["manual_board_override"] = bool(board_quad_override is not None)
     det_diag["manual_sample_override"] = bool(sample_quad_override is not None)
     aruco_info: dict[str, Any] = {"found": False, "enabled": bool(aruco_config and aruco_config.get("enabled", False))}
