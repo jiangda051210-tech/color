@@ -152,6 +152,290 @@ def _detect_plank_regions(image_bgr: np.ndarray, min_area_ratio: float = 0.01,
     return product_planks
 
 
+# ─── 创新算法1: 接缝线色差检测 (Edge Seam ΔE) ─────────────
+
+def expert_seam_compare(image_bgr: np.ndarray,
+                        planks: list[dict[str, Any]] | None = None,
+                        sample_points: int = 20) -> dict[str, Any]:
+    """
+    沿板材接缝线取色对比 — 模拟老员工把两块板靠在一起看的方式.
+
+    原理: 人眼对相邻区域色差最敏感 (同时对比效应).
+    在两块板的交界处, 左右各取一条窄带(5px), 逐点计算ΔE.
+    这比全板平均值更接近人眼实际感知.
+    """
+    h, w = image_bgr.shape[:2]
+    if planks is None:
+        planks = _detect_plank_regions(image_bgr)
+    if len(planks) < 2:
+        return {"seam_count": 0, "seams": [], "human_summary": "板数不足, 无接缝可对比"}
+
+    lab = bgr_to_lab_float32(image_bgr)
+
+    # 找相邻板对 (按中心Y坐标排序, 相邻的可能是并排的板)
+    sorted_planks = sorted(planks, key=lambda p: p["center"][1])
+    seams = []
+
+    for idx in range(len(sorted_planks) - 1):
+        p1 = sorted_planks[idx]
+        p2 = sorted_planks[idx + 1]
+
+        # 计算两板间的接缝区域
+        box1 = p1["box"]
+        box2 = p2["box"]
+        y1_bottom = int(box1[:, 1].max())
+        y2_top = int(box2[:, 1].min())
+
+        # 只处理垂直相邻的 (间距<图像高度10%)
+        gap = y2_top - y1_bottom
+        if gap < 0 or gap > h * 0.10:
+            # 尝试水平相邻
+            x1_right = int(box1[:, 0].max())
+            x2_left = int(box2[:, 0].min())
+            gap_h = x2_left - x1_right
+            if gap_h < 0 or gap_h > w * 0.10:
+                continue
+            # 水平接缝: 取左板右边缘5px vs 右板左边缘5px
+            x_seam = (x1_right + x2_left) // 2
+            y_start = max(int(max(box1[:, 1].min(), box2[:, 1].min())), 0)
+            y_end = min(int(min(box1[:, 1].max(), box2[:, 1].max())), h)
+            if y_end - y_start < 20:
+                continue
+            strip_width = 5
+            left_strip = lab[y_start:y_end, max(0, x_seam - strip_width):x_seam]
+            right_strip = lab[y_start:y_end, x_seam:min(w, x_seam + strip_width)]
+        else:
+            # 垂直接缝: 取上板底边5px vs 下板顶边5px
+            y_seam = (y1_bottom + y2_top) // 2
+            x_start = max(int(max(box1[:, 0].min(), box2[:, 0].min())), 0)
+            x_end = min(int(min(box1[:, 0].max(), box2[:, 0].max())), w)
+            if x_end - x_start < 20:
+                continue
+            strip_width = 5
+            top_strip = lab[max(0, y_seam - strip_width):y_seam, x_start:x_end]
+            bottom_strip = lab[y_seam:min(h, y_seam + strip_width), x_start:x_end]
+            left_strip = top_strip
+            right_strip = bottom_strip
+
+        if left_strip.size < 30 or right_strip.size < 30:
+            continue
+
+        # 沿接缝均匀采样N个点
+        seam_length = max(left_strip.shape[0], left_strip.shape[1])
+        step = max(1, seam_length // sample_points)
+        point_des = []
+
+        for s in range(0, seam_length, step):
+            if left_strip.shape[0] > left_strip.shape[1]:
+                # 垂直方向采样
+                if s >= left_strip.shape[0] or s >= right_strip.shape[0]:
+                    break
+                l1 = left_strip[s].mean(axis=0)
+                l2 = right_strip[s].mean(axis=0) if s < right_strip.shape[0] else right_strip[-1].mean(axis=0)
+            else:
+                # 水平方向采样
+                if s >= left_strip.shape[1] or s >= right_strip.shape[1]:
+                    break
+                l1 = left_strip[:, s].mean(axis=0)
+                l2 = right_strip[:, s].mean(axis=0) if s < right_strip.shape[1] else right_strip[:, -1].mean(axis=0)
+
+            de = ciede2000_scalar(float(l1[0]), float(l1[1]), float(l1[2]),
+                                  float(l2[0]), float(l2[1]), float(l2[2]))
+            point_des.append(de["total"])
+
+        if not point_des:
+            continue
+
+        avg_seam_de = float(np.mean(point_des))
+        max_seam_de = float(np.max(point_des))
+        p50_seam_de = float(np.median(point_des))
+
+        diag = _directional_diagnosis(
+            (float(left_strip.reshape(-1, 3)[:, 0].mean()),
+             float(left_strip.reshape(-1, 3)[:, 1].mean()),
+             float(left_strip.reshape(-1, 3)[:, 2].mean())),
+            (float(right_strip.reshape(-1, 3)[:, 0].mean()),
+             float(right_strip.reshape(-1, 3)[:, 1].mean()),
+             float(right_strip.reshape(-1, 3)[:, 2].mean())),
+            "wood"
+        )
+
+        seams.append({
+            "plank_a": p1.get("plank_id", idx + 1),
+            "plank_b": p2.get("plank_id", idx + 2),
+            "sample_count": len(point_des),
+            "avg_seam_dE": round(avg_seam_de, 3),
+            "max_seam_dE": round(max_seam_de, 3),
+            "median_seam_dE": round(p50_seam_de, 3),
+            "diagnosis": diag["short"],
+            "point_dEs": [round(d, 2) for d in point_des[:10]],
+        })
+
+    worst_seam = max(seams, key=lambda s: s["avg_seam_dE"]) if seams else None
+
+    summary = f"检测到{len(seams)}条接缝"
+    if worst_seam:
+        summary += f", 最大接缝色差ΔE={worst_seam['avg_seam_dE']:.2f} ({worst_seam['plank_a']}号↔{worst_seam['plank_b']}号: {worst_seam['diagnosis']})"
+    return {
+        "seam_count": len(seams),
+        "seams": seams,
+        "worst_seam": worst_seam,
+        "human_summary": summary,
+    }
+
+
+# ─── 创新算法2: 视觉显著性加权色差 (Perceptual Saliency ΔE) ───
+
+def _perceptual_weighted_de(lab1_region: np.ndarray, lab2_region: np.ndarray,
+                             mask1: np.ndarray | None = None, mask2: np.ndarray | None = None) -> dict[str, float]:
+    """
+    视觉显著性加权色差 — 人眼对不同区域的关注度不同.
+
+    原理:
+      1. 中心权重高 (人眼先看中间)
+      2. 平坦区域权重高 (纹理区域色差被掩蔽)
+      3. 高亮度区域权重高 (暗区色差不易察觉)
+
+    这比简单平均ΔE更接近人眼的实际感受.
+    """
+    h1, w1 = lab1_region.shape[:2]
+    h2, w2 = lab2_region.shape[:2]
+
+    # 统一尺寸
+    th = min(h1, h2, 200)
+    tw = min(w1, w2, 200)
+    r1 = cv2.resize(lab1_region, (tw, th))
+    r2 = cv2.resize(lab2_region, (tw, th))
+
+    # 1. 中心权重 (高斯分布, 中心=1.0, 边缘=0.3)
+    cy, cx = th // 2, tw // 2
+    yy, xx = np.mgrid[:th, :tw]
+    center_w = 0.3 + 0.7 * np.exp(-((yy - cy) ** 2 / (th * 0.8) ** 2 + (xx - cx) ** 2 / (tw * 0.8) ** 2))
+
+    # 2. 纹理掩蔽权重 (平坦区域→高权重, 纹理区域→低权重)
+    gray1 = r1[:, :, 0]  # L channel
+    lap = cv2.Laplacian(gray1.astype(np.float32), cv2.CV_32F)
+    texture_energy = np.abs(lap)
+    max_tex = float(texture_energy.max()) + 1e-6
+    texture_w = 1.0 - 0.5 * (texture_energy / max_tex)  # 纹理高→权重低
+
+    # 3. 亮度权重 (暗区色差不易感知)
+    brightness_w = np.clip(r1[:, :, 0] / 60.0, 0.3, 1.0)
+
+    # 综合权重
+    weights = center_w * texture_w * brightness_w
+    weights /= weights.sum() + 1e-10
+
+    # 逐像素ΔE (简化: 用欧氏距离近似, 真实CIEDE2000太慢)
+    diff = r1.astype(np.float64) - r2.astype(np.float64)
+    pixel_de = np.sqrt(diff[:, :, 0] ** 2 + diff[:, :, 1] ** 2 + diff[:, :, 2] ** 2)
+
+    # 加权ΔE
+    weighted_de = float((pixel_de * weights).sum())
+    unweighted_de = float(pixel_de.mean())
+
+    # 用全局LAB均值算精确CIEDE2000
+    m1 = r1.reshape(-1, 3).mean(axis=0)
+    m2 = r2.reshape(-1, 3).mean(axis=0)
+    precise_de = ciede2000_scalar(float(m1[0]), float(m1[1]), float(m1[2]),
+                                   float(m2[0]), float(m2[1]), float(m2[2]))
+
+    return {
+        "perceptual_dE": round(weighted_de, 3),
+        "simple_dE": round(unweighted_de, 3),
+        "ciede2000": round(precise_de["total"], 3),
+        "perceptual_vs_simple_ratio": round(weighted_de / max(unweighted_de, 0.01), 3),
+        "note": "perceptual_dE更接近人眼感受: 中心区域+平坦区域+高亮区域权重更高",
+    }
+
+
+# ─── 创新算法3: 45°角色光泽差异检测 ──────────────────────────
+
+def expert_gloss_variation(image_bgr: np.ndarray,
+                           planks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """
+    检测板材间的光泽差异 — 模拟老员工从侧面看板子的习惯.
+
+    原理:
+      高光泽材料在不同角度颜色变化更大.
+      通过分析每块板的高光分布(specular highlights)推断光泽度.
+      光泽不一致 = 即使颜色一样, 到客户手里也会看起来不同.
+    """
+    h, w = image_bgr.shape[:2]
+    if planks is None:
+        planks = _detect_plank_regions(image_bgr)
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+
+    gloss_scores = []
+    for p in planks:
+        box = p["box"]
+        x0, y0 = max(0, box[:, 0].min()), max(0, box[:, 1].min())
+        x1, y1 = min(w, box[:, 0].max()), min(h, box[:, 1].max())
+        if x1 - x0 < 20 or y1 - y0 < 20:
+            gloss_scores.append({"plank_id": p.get("plank_id", 0), "gloss": 0, "valid": False})
+            continue
+
+        roi_gray = gray[y0:y1, x0:x1]
+        roi_v = hsv[y0:y1, x0:x1, 2]  # Value channel
+
+        # 光泽指标1: 高光像素比例 (V>230)
+        specular_ratio = float(np.mean(roi_v > 230))
+
+        # 光泽指标2: 亮度标准差 (高光泽=高方差, 因为有specular反射)
+        brightness_std = float(roi_gray.astype(np.float32).std())
+
+        # 光泽指标3: 梯度峰值 (高光泽面有锐利的亮度跳变)
+        grad = cv2.Sobel(roi_gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_peak = float(np.percentile(np.abs(grad), 95))
+
+        # 综合光泽分数 (0-100)
+        gloss = min(100, (specular_ratio * 200 + brightness_std * 0.5 + grad_peak * 0.1))
+
+        gloss_scores.append({
+            "plank_id": p.get("plank_id", 0),
+            "gloss": round(gloss, 1),
+            "specular_ratio": round(specular_ratio, 4),
+            "brightness_std": round(brightness_std, 1),
+            "valid": True,
+        })
+
+    valid = [g for g in gloss_scores if g["valid"]]
+    if len(valid) < 2:
+        return {"gloss_consistent": True, "variation": 0, "scores": gloss_scores,
+                "human_summary": "板数不足, 无法对比光泽"}
+
+    values = [g["gloss"] for g in valid]
+    mean_gloss = float(np.mean(values))
+    max_diff = float(max(values) - min(values))
+    cv_gloss = float(np.std(values) / max(mean_gloss, 0.1))
+
+    issues = []
+    for g in valid:
+        if abs(g["gloss"] - mean_gloss) > max(mean_gloss * 0.3, 5):
+            label = "偏亮(高光泽)" if g["gloss"] > mean_gloss else "偏哑(低光泽)"
+            issues.append({"plank": g["plank_id"], "issue": label,
+                           "diff": round(g["gloss"] - mean_gloss, 1)})
+
+    consistent = max_diff < max(mean_gloss * 0.4, 8)
+    summary = f"平均光泽度={mean_gloss:.0f}, 最大差异={max_diff:.0f}"
+    if not consistent:
+        summary += f", ⚠光泽不一致"
+        if issues:
+            summary += f": {issues[0]['plank']}号板{issues[0]['issue']}"
+
+    return {
+        "gloss_consistent": consistent,
+        "mean_gloss": round(mean_gloss, 1),
+        "max_diff": round(max_diff, 1),
+        "cv": round(cv_gloss, 3),
+        "scores": gloss_scores,
+        "issues": issues,
+        "human_summary": summary,
+    }
+
+
 # ─── 多板一致性检测 ──────────────────────────────────────
 
 def _cluster_same_product(planks: list[dict[str, Any]], max_de: float = 12.0) -> list[dict[str, Any]]:
@@ -456,10 +740,18 @@ def expert_full_analysis(image_bgr: np.ndarray, profile: str = "wood") -> dict[s
     # Step 3: 纹理一致性
     texture = expert_texture_consistency(image_bgr, planks)
 
-    # Step 4: 综合判定
+    # Step 4: 接缝线色差 (创新: 沿接缝逐点取色)
+    seam = expert_seam_compare(image_bgr, planks)
+
+    # Step 5: 光泽一致性 (创新: 检测高光分布)
+    gloss = expert_gloss_variation(image_bgr, planks)
+
+    # Step 6: 综合判定 — 融合全部5个维度
     worst_de = consistency.get("worst_delta_e", 0)
     avg_de = consistency.get("avg_delta_e", 0)
     texture_ok = texture.get("texture_consistent", True)
+    gloss_ok = gloss.get("gloss_consistent", True)
+    worst_seam_de = seam.get("worst_seam", {}).get("avg_seam_dE", 0) if seam.get("worst_seam") else 0
 
     # 阈值 (模拟老员工经验)
     thresholds = {
@@ -470,19 +762,25 @@ def expert_full_analysis(image_bgr: np.ndarray, profile: str = "wood") -> dict[s
     }
     th = thresholds.get(profile, thresholds["wood"])
 
-    if worst_de <= th["pass"] and texture_ok:
+    # 使用接缝ΔE和全局ΔE中较高的作为判定依据 (更接近人眼)
+    effective_de = max(worst_de, worst_seam_de)
+
+    if effective_de <= th["pass"] and texture_ok and gloss_ok:
         verdict = "PASS"
-        confidence = min(0.98, 0.85 + (th["pass"] - worst_de) / th["pass"] * 0.13)
-    elif worst_de <= th["marginal"]:
+        confidence = min(0.98, 0.85 + (th["pass"] - effective_de) / th["pass"] * 0.13)
+    elif effective_de <= th["marginal"]:
         verdict = "MARGINAL"
-        confidence = 0.65 + (th["marginal"] - worst_de) / th["marginal"] * 0.15
+        confidence = 0.65 + (th["marginal"] - effective_de) / th["marginal"] * 0.15
     else:
         verdict = "FAIL"
-        confidence = max(0.3, 0.6 - (worst_de - th["marginal"]) / 5)
+        confidence = max(0.3, 0.6 - (effective_de - th["marginal"]) / 5)
 
     if not texture_ok and verdict == "PASS":
         verdict = "MARGINAL"
         confidence *= 0.85
+    if not gloss_ok and verdict == "PASS":
+        verdict = "MARGINAL"
+        confidence *= 0.90
 
     # 生成人话总结
     summary_parts = []
@@ -505,17 +803,25 @@ def expert_full_analysis(image_bgr: np.ndarray, profile: str = "wood") -> dict[s
         summary_parts.append("建议退回调色")
 
     if not texture_ok:
-        summary_parts.append(f"另: {texture['human_summary']}")
+        summary_parts.append(f"纹理: {texture['human_summary']}")
+    if not gloss_ok:
+        summary_parts.append(f"光泽: {gloss['human_summary']}")
+    if seam.get("worst_seam"):
+        ws = seam["worst_seam"]
+        summary_parts.append(f"接缝色差ΔE={ws['avg_seam_dE']:.2f}")
 
     return {
         "verdict": verdict,
         "confidence": round(confidence, 3),
         "human_summary": ", ".join(summary_parts) + "。",
         "plank_count": n,
+        "effective_delta_e": round(effective_de, 3),
         "avg_delta_e": avg_de,
         "worst_delta_e": worst_de,
         "consistency": consistency,
         "diagnoses": diagnoses,
+        "seam_analysis": seam,
         "texture": texture,
+        "gloss": gloss,
         "profile_used": profile,
     }
