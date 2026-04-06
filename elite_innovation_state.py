@@ -9,7 +9,7 @@ from typing import Any
 
 def init_innovation_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         conn.execute(
             """
@@ -115,7 +115,7 @@ def record_acceptance_event(
 ) -> int:
     init_innovation_db(db_path)
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         cur = conn.execute(
             """
@@ -144,7 +144,7 @@ def reload_customer_acceptance_from_db(
     limit: int = 10000,
 ) -> int:
     init_innovation_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -196,7 +196,7 @@ def upsert_acceptance_profile(db_path: Path, learner: Any, customer_id: str) -> 
         if isinstance(item, dict):
             theta = item.get("theta")
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         conn.execute(
             """
@@ -236,7 +236,7 @@ def upsert_acceptance_profile(db_path: Path, learner: Any, customer_id: str) -> 
 
 def save_color_passport(db_path: Path, passport: dict[str, Any]) -> None:
     init_innovation_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         conn.execute(
             """
@@ -264,7 +264,7 @@ def save_color_passport(db_path: Path, passport: dict[str, Any]) -> None:
 
 def load_color_passport(db_path: Path, passport_id: str) -> dict[str, Any] | None:
     init_innovation_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -296,7 +296,7 @@ def save_supplier_record(
 ) -> int:
     init_innovation_db(db_path)
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         cur = conn.execute(
             """
@@ -325,7 +325,7 @@ def load_supplier_records(
     limit: int = 5000,
 ) -> list[dict[str, Any]]:
     init_innovation_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         if supplier_id:
@@ -367,7 +367,7 @@ def load_supplier_records(
 
 def next_standard_version(db_path: Path, code: str) -> int:
     init_innovation_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         row = conn.execute(
             """
@@ -399,7 +399,7 @@ def save_standard_version(
         "a": float(lab.get("a", 0.0)),
         "b": float(lab.get("b", 0.0)),
     }
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
         conn.execute(
             """
@@ -432,7 +432,7 @@ def load_standard_versions(
     limit: int = 5000,
 ) -> list[dict[str, Any]]:
     init_innovation_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         if code:

@@ -134,7 +134,7 @@ class ImageStore:
         )
 
         with self._lock:
-            conn = sqlite3.connect(str(self._db_path))
+            conn = sqlite3.connect(str(self._db_path), timeout=10.0)
             try:
                 conn.execute(
                     """INSERT INTO images
@@ -198,7 +198,7 @@ class ImageStore:
             "%Y-%m-%dT%H:%M:%S",
             time.localtime(time.time() - max_age_days * 86400),
         )
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         try:
             rows = conn.execute(
                 "SELECT ref_id, path FROM images WHERE archived = 0 AND created_at < ?",
@@ -235,7 +235,7 @@ class ImageStore:
             time.localtime(time.time() - max_age_days * 86400),
         )
         with self._lock:
-            conn = sqlite3.connect(str(self._db_path))
+            conn = sqlite3.connect(str(self._db_path), timeout=10.0)
             try:
                 rows = conn.execute(
                     "SELECT ref_id, path FROM images WHERE created_at < ?",
@@ -255,7 +255,7 @@ class ImageStore:
 
     def disk_usage(self) -> dict[str, Any]:
         """Return disk usage statistics."""
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         try:
             row = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM images"
@@ -274,7 +274,7 @@ class ImageStore:
             conn.close()
 
     def _get_meta(self, ref_id: str) -> dict[str, Any] | None:
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute(

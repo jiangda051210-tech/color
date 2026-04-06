@@ -22,7 +22,7 @@ def query_lot_history(
     """查询某批次/产品的历史分析记录."""
     if not db_path.exists():
         return []
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         conditions = []

@@ -52,7 +52,7 @@ class MigrationRunner:
         Returns list of migration names that were applied.
         """
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
@@ -102,7 +102,7 @@ class MigrationRunner:
                 "pending_names": [m.name for m in self._migrations],
             }
 
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         try:
             try:
                 rows = conn.execute("SELECT name, applied_at FROM _schema_migrations ORDER BY applied_at").fetchall()

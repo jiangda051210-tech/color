@@ -141,7 +141,7 @@ class BackupManager:
             # Verify each SQLite database
             for db_file in backup_path.glob("*.sqlite"):
                 try:
-                    conn = sqlite3.connect(str(db_file))
+                    conn = sqlite3.connect(str(db_file), timeout=10.0)
                     conn.execute("PRAGMA integrity_check")
                     conn.close()
                     result[db_file.name] = "integrity_ok"
@@ -181,8 +181,8 @@ class BackupManager:
     @staticmethod
     def _backup_sqlite(src: Path, dst: Path) -> None:
         """Use SQLite online backup API for safe hot backup."""
-        src_conn = sqlite3.connect(str(src))
-        dst_conn = sqlite3.connect(str(dst))
+        src_conn = sqlite3.connect(str(src), timeout=10.0)
+        dst_conn = sqlite3.connect(str(dst), timeout=10.0)
         try:
             src_conn.backup(dst_conn)
         finally:
