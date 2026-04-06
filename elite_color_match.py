@@ -1638,18 +1638,17 @@ def _score_candidate_for_board(cand: RectCandidate, image_bgr: np.ndarray,
     mean_chroma = float(np.sqrt(lab_roi[:, :, 1] ** 2 + lab_roi[:, :, 2] ** 2).mean())
     mean_L = float(lab_roi[:, :, 0].mean())
 
-    # Concrete detection: low chroma + mid-range lightness
-    is_likely_background = (mean_chroma < 8.0 and 25.0 < mean_L < 75.0)
+    # Concrete detection: low chroma + mid-range lightness + low color variation
+    chroma_std = float(np.sqrt(lab_roi[:, :, 1] ** 2 + lab_roi[:, :, 2] ** 2).std())
+    is_likely_background = (mean_chroma < 6.0 and 25.0 < mean_L < 75.0 and chroma_std < 4.0)
 
-    # Score: prefer higher texture and higher chroma (= more likely a product, not concrete)
-    # Texture component: normalized roughly 0-1 range
+    # Score: prefer higher texture, higher chroma, AND higher color variation
     texture_score = min(texture_var / 500.0, 2.0)
-    # Chroma component: normalized
-    chroma_score = min(mean_chroma / 30.0, 2.0)
-    # Rectangularity bonus
+    chroma_score = min(mean_chroma / 25.0, 2.0)
+    variation_score = min(chroma_std / 8.0, 1.5)
     rect_bonus = cand.rectangularity
 
-    score = texture_score * 0.4 + chroma_score * 0.4 + rect_bonus * 0.2
+    score = texture_score * 0.3 + chroma_score * 0.3 + variation_score * 0.2 + rect_bonus * 0.2
 
     return score, is_likely_background
 
