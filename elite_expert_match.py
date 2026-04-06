@@ -438,29 +438,43 @@ def expert_gloss_variation(image_bgr: np.ndarray,
 
 # ─── 多板一致性检测 ──────────────────────────────────────
 
-def _cluster_same_product(planks: list[dict[str, Any]], max_de: float = 12.0) -> list[dict[str, Any]]:
-    """聚类同色系板材 — 只保留最大同色系群组(同一产品)."""
+def _cluster_same_product(planks: list[dict[str, Any]], max_de: float = 8.0) -> list[dict[str, Any]]:
+    """聚类同色系板材 — 只保留最大同色系群组(同一产品).
+
+    使用完全链接聚类(complete-linkage): 组内所有板两两ΔE都<max_de.
+    比单链更严格, 避免通过中间板间接连通不同色号.
+    """
     if len(planks) <= 2:
         return planks
-    # 用简单的单链聚类: 两板ΔE<max_de则归为同组
     n = len(planks)
-    group = list(range(n))
+    # 计算距离矩阵
+    de_mat = [[0.0] * n for _ in range(n)]
     for i in range(n):
         for j in range(i + 1, n):
             li, ai, bi = planks[i]["mean_lab"]
             lj, aj, bj = planks[j]["mean_lab"]
             de = ciede2000_scalar(li, ai, bi, lj, aj, bj)["total"]
-            if de < max_de:
-                # Union
-                gi, gj = group[i], group[j]
-                for k in range(n):
-                    if group[k] == gj:
-                        group[k] = gi
-    # 找最大组
-    from collections import Counter
-    counts = Counter(group)
-    largest_group = counts.most_common(1)[0][0]
-    return [p for i, p in enumerate(planks) if group[i] == largest_group]
+            de_mat[i][j] = de
+            de_mat[j][i] = de
+
+    # 贪心完全链接: 从面积最大的板开始, 逐个添加与组内所有板ΔE<max_de的板
+    sorted_idx = sorted(range(n), key=lambda i: planks[i]["area_ratio"], reverse=True)
+    best_group = [sorted_idx[0]]
+    for idx in sorted_idx[1:]:
+        # 检查与组内所有成员的ΔE
+        all_close = all(de_mat[idx][g] < max_de for g in best_group)
+        if all_close:
+            best_group.append(idx)
+
+    # 如果组太小, 放宽重试
+    if len(best_group) < 2 and n >= 2:
+        best_group = [sorted_idx[0]]
+        for idx in sorted_idx[1:]:
+            all_close = all(de_mat[idx][g] < max_de * 1.5 for g in best_group)
+            if all_close:
+                best_group.append(idx)
+
+    return [planks[i] for i in sorted(best_group)]
 
 
 def expert_multi_plank_consistency(image_bgr: np.ndarray) -> dict[str, Any]:
