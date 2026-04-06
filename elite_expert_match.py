@@ -99,10 +99,19 @@ def _detect_plank_regions(image_bgr: np.ndarray, min_area_ratio: float = 0.01,
         crop = gray[y0:y1, x0:x1]
         texture = float(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size > 100 else 0
 
-        # 背景判断: 水泥地面 = 低色度+低纹理
-        is_background = chroma < 5 and texture < 80
+        # 宽高比 (板材通常是长条形 w:h > 1.5)
+        rect_w = max(rect[1][0], rect[1][1])
+        rect_h = min(rect[1][0], rect[1][1])
+        aspect = rect_w / max(rect_h, 1)
+
+        # 背景判断: 水泥地面 = 低色度+低纹理+非长条形
+        is_background = (chroma < 5 and texture < 100) or (chroma < 3)
+        # 非常小或非常方的区域更可能是背景碎片
+        if ratio < 0.03 and aspect < 1.5:
+            is_background = True
 
         planks.append({
+            "aspect_ratio": round(aspect, 2),
             "box": box,
             "center": (int(rect[0][0]), int(rect[0][1])),
             "area_ratio": round(ratio, 4),
@@ -119,6 +128,23 @@ def _detect_plank_regions(image_bgr: np.ndarray, min_area_ratio: float = 0.01,
         product_planks = sorted(planks, key=lambda p: p["chroma"], reverse=True)[:5]
     product_planks.sort(key=lambda p: p["area_ratio"], reverse=True)
 
+    # 去重: 合并中心点距离过近的候选 (取面积较大的)
+    merged = []
+    for p in product_planks:
+        is_dup = False
+        for m in merged:
+            dx = abs(p["center"][0] - m["center"][0])
+            dy = abs(p["center"][1] - m["center"][1])
+            if dx < w * 0.08 and dy < h * 0.08:
+                is_dup = True
+                break
+        if not is_dup:
+            merged.append(p)
+    product_planks = merged
+
+    # 限制最大板材数 (真实场景通常2-8块)
+    product_planks = product_planks[:8]
+
     # 编号
     for idx, p in enumerate(product_planks):
         p["plank_id"] = idx + 1
@@ -128,16 +154,47 @@ def _detect_plank_regions(image_bgr: np.ndarray, min_area_ratio: float = 0.01,
 
 # ─── 多板一致性检测 ──────────────────────────────────────
 
+def _cluster_same_product(planks: list[dict[str, Any]], max_de: float = 12.0) -> list[dict[str, Any]]:
+    """聚类同色系板材 — 只保留最大同色系群组(同一产品)."""
+    if len(planks) <= 2:
+        return planks
+    # 用简单的单链聚类: 两板ΔE<max_de则归为同组
+    n = len(planks)
+    group = list(range(n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            li, ai, bi = planks[i]["mean_lab"]
+            lj, aj, bj = planks[j]["mean_lab"]
+            de = ciede2000_scalar(li, ai, bi, lj, aj, bj)["total"]
+            if de < max_de:
+                # Union
+                gi, gj = group[i], group[j]
+                for k in range(n):
+                    if group[k] == gj:
+                        group[k] = gi
+    # 找最大组
+    from collections import Counter
+    counts = Counter(group)
+    largest_group = counts.most_common(1)[0][0]
+    return [p for i, p in enumerate(planks) if group[i] == largest_group]
+
+
 def expert_multi_plank_consistency(image_bgr: np.ndarray) -> dict[str, Any]:
     """检测所有板材的一致性. 模拟老员工一眼扫过所有板子."""
-    planks = _detect_plank_regions(image_bgr)
+    all_planks = _detect_plank_regions(image_bgr)
+    # 聚类同色系板材 — 过滤掉不同产品/背景碎片
+    planks = _cluster_same_product(all_planks, max_de=12.0)
     n = len(planks)
+    # 重新编号
+    for idx, p in enumerate(planks):
+        p["plank_id"] = idx + 1
 
     if n < 2:
         return {
             "plank_count": n,
+            "total_detected": len(all_planks),
             "consistency": "insufficient_planks",
-            "human_summary": f"仅检测到{n}块板材, 无法进行一致性对比",
+            "human_summary": f"检测到{len(all_planks)}个区域, 同色系{n}块, 无法对比",
             "planks": planks,
         }
 
