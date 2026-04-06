@@ -6929,8 +6929,8 @@ def get_history_policy_recommendation(
         rec["suggested_policy"] = apply_policy_patch(base_policy, rec.get("policy_patch", {}))
     except HTTPException:
         raise
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        _log.warning("policy_patch_failed", error=str(e))
     return rec
 
 
