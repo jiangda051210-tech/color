@@ -10,7 +10,10 @@ HOME_PAGE_TEMPLATE = """
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="theme-color" content="#091322" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="/manifest.json" />
   <title>SENIA Elite Smart Console</title>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
@@ -431,6 +434,33 @@ HOME_PAGE_TEMPLATE = """
       .form-grid { grid-template-columns: 1fr; }
       .field.full { grid-column: span 1; }
       .metric-grid { grid-template-columns: 1fr; }
+    }
+    /* ── 移动端适配 ── */
+    @media (max-width: 767px) {
+      body { font-size: 15px; }
+      .hero { padding: 16px; }
+      .hero-title { font-size: 22px; }
+      .hero-sub { font-size: 14px; }
+      .status-grid { grid-template-columns: 1fr; }
+      .main-grid { grid-template-columns: 1fr; }
+      .form-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: span 1; }
+      .metric-grid { grid-template-columns: 1fr; }
+      .auth-row { grid-template-columns: 1fr; }
+      .link-row { gap: 6px; }
+      .link-chip { padding: 10px 12px; min-height: 44px; display: inline-flex; align-items: center; font-size: 13px; }
+      button { padding: 12px 16px; min-height: 44px; font-size: 14px; }
+      input[type="text"], input[type="file"], select { font-size: 16px; min-height: 44px; padding: 12px; }
+      input::file-selector-button { padding: 10px 14px; min-height: 44px; }
+      .badge { padding: 8px 12px; font-size: 13px; }
+      .mono { font-size: 11px; max-height: 200px; }
+      .result { padding: 10px; }
+    }
+    @media (max-width: 374px) {
+      .wrap { padding: 10px 8px; }
+      .hero { padding: 12px; border-radius: 14px; }
+      .panel { padding: 10px; border-radius: 12px; }
+      .hero-title { font-size: 18px; }
     }
   </style>
 </head>
@@ -902,6 +932,11 @@ HOME_PAGE_TEMPLATE = """
       }
     }
 
+    // PWA Service Worker 注册
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
       q("#dual-form").addEventListener("submit", submitDual);
       q("#single-form").addEventListener("submit", submitSingle);
@@ -940,7 +975,10 @@ SMART_HOME_PAGE_TEMPLATE = """
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="theme-color" content="#091322" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="/manifest.json" />
   <title>SENIA Elite 智能工作台</title>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
@@ -1368,6 +1406,32 @@ SMART_HOME_PAGE_TEMPLATE = """
       .kpi-grid { grid-template-columns: 1fr; }
       .intel-grid { grid-template-columns: 1fr; }
       .stat-strip { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 767px) {
+      body { font-size: 15px; }
+      .hero h1 { font-size: 20px; }
+      .hero p { font-size: 14px; }
+      .stat-strip { grid-template-columns: 1fr; gap: 6px; }
+      .stat-card .v { font-size: 18px; }
+      .grid { grid-template-columns: 1fr; }
+      .field-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: span 1; }
+      .kpi-grid { grid-template-columns: 1fr; }
+      .intel-grid { grid-template-columns: 1fr; }
+      .seg { flex-wrap: wrap; }
+      .seg button { padding: 10px 14px; min-height: 44px; font-size: 13px; flex: 1 1 auto; }
+      button.primary, button.secondary, button.ghost { padding: 12px 16px; min-height: 44px; font-size: 14px; width: 100%; }
+      .btn-row { flex-direction: column; }
+      input[type="text"], input[type="file"], select { font-size: 16px; min-height: 44px; }
+      .link { padding: 10px 14px; min-height: 44px; display: inline-flex; align-items: center; }
+      .badge { padding: 8px 12px; }
+      .mono { font-size: 11px; max-height: 200px; }
+      .side-nav .item { padding: 12px; min-height: 44px; }
+    }
+    @media (max-width: 374px) {
+      .wrap { padding: 8px; gap: 8px; }
+      .hero { padding: 12px; }
+      .card { padding: 10px; }
     }
   </style>
 </head>
@@ -2583,7 +2647,10 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="theme-color" content="#091322" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="/manifest.json" />
   <title>SENIA Elite Executive Dashboard</title>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap");
@@ -2751,6 +2818,14 @@ EXECUTIVE_DASHBOARD_TEMPLATE = """
       .form-grid { grid-template-columns: 1fr; }
       .kpi-grid { grid-template-columns: 1fr; }
       .kpi .v { font-size: 20px; }
+    }
+    @media (max-width: 767px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .kpi-grid { grid-template-columns: 1fr; }
+      .kpi .v { font-size: 20px; }
+      .row { grid-template-columns: 1fr; }
+      button { min-height: 44px; font-size: 14px; }
+      input { font-size: 16px; min-height: 44px; }
     }
   </style>
 </head>
@@ -2973,7 +3048,10 @@ EXECUTIVE_BRIEF_TEMPLATE = """
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="theme-color" content="#091322" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="/manifest.json" />
   <title>SENIA Executive Brief</title>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
@@ -3200,7 +3278,10 @@ INNOVATION_V3_DASHBOARD_TEMPLATE = """
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="theme-color" content="#091322" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="/manifest.json" />
   <title>SENIA Innovation v3 Dashboard</title>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
@@ -3364,6 +3445,13 @@ INNOVATION_V3_DASHBOARD_TEMPLATE = """
     @media (max-width: 620px) {
       .cfg-grid { grid-template-columns: 1fr; }
       .kpi-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 767px) {
+      .cfg-grid { grid-template-columns: 1fr; }
+      .layout { grid-template-columns: 1fr; }
+      .kpi-grid { grid-template-columns: 1fr; }
+      button { min-height: 44px; width: 100%; }
+      input, select, textarea { font-size: 16px; min-height: 44px; }
     }
   </style>
 </head>
@@ -3727,7 +3815,10 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="theme-color" content="#091322" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="/manifest.json" />
   <title>SENIA Elite Precision Color Observatory</title>
   <style>
     html, body { margin: 0; background: #05060b; }
@@ -3904,6 +3995,15 @@ PRECISION_OBSERVATORY_PAGE_TEMPLATE = """
       .live-pod { position: static; width: auto; margin: 8px 12px 16px; }
       .top-bar { position: static; padding: 12px; }
       #precision-root { min-height: auto; }
+    }
+    @media (max-width: 767px) {
+      .top-bar { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .chip { font-size: 11px; padding: 8px 10px; }
+      .live-pod { width: calc(100vw - 16px); right: 8px; bottom: 8px; left: 8px; }
+      .f-grid { grid-template-columns: 1fr; }
+      .btn-row { grid-template-columns: 1fr; }
+      .kpi-grid { grid-template-columns: 1fr; }
+      .kpi .v { font-size: 13px; }
     }
   </style>
   <script type="importmap">

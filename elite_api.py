@@ -390,6 +390,10 @@ def _apply_security_headers(response: Response, path: str) -> None:
         headers["referrer-policy"] = "no-referrer"
     if "permissions-policy" not in headers:
         headers["permissions-policy"] = "camera=(), microphone=(), geolocation=()"
+    if "strict-transport-security" not in headers:
+        headers["strict-transport-security"] = "max-age=31536000; includeSubDomains"
+    if "x-permitted-cross-domain-policies" not in headers:
+        headers["x-permitted-cross-domain-policies"] = "none"
     if (path.startswith("/v1/") or path in {"/health", "/ready"}) and "cache-control" not in headers:
         headers["cache-control"] = "no-store"
 
@@ -3781,6 +3785,23 @@ def get_system_self_test() -> dict[str, Any]:
             payload={"failed_checks": failed, "check_count": len(checks)},
         )
     return result
+
+
+@app.get("/manifest.json")
+def pwa_manifest():
+    manifest_path = Path(__file__).parent / "web_assets" / "manifest.json"
+    if manifest_path.exists():
+        return Response(content=manifest_path.read_text(encoding="utf-8"), media_type="application/manifest+json")
+    return Response(content="{}", media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    sw_path = Path(__file__).parent / "web_assets" / "sw.js"
+    if sw_path.exists():
+        return Response(content=sw_path.read_text(encoding="utf-8"), media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})
+    return Response(content="// no service worker", media_type="application/javascript")
 
 
 @app.get("/", response_class=HTMLResponse)

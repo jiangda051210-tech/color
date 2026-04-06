@@ -3,12 +3,11 @@ version: "3.8"
 services:
   senia:
     build: .
-    ports:
-      - "8877:8877"
     volumes:
       - senia-data:/app/data
       - senia-runs:/app/service_runs
       - senia-logs:/app/logs
+      - ./web_assets:/app/web_assets:ro
     environment:
       - ELITE_API_HOST=0.0.0.0
       - ELITE_API_PORT=8877
@@ -32,6 +31,26 @@ services:
       retries: 3
       start_period: 15s
     stop_grace_period: 30s
+
+  # Nginx反向代理 — HTTPS + Gzip + 安全头
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./web_assets:/app/web_assets:ro
+      - ./certs:/etc/nginx/certs:ro  # SSL证书目录
+    depends_on:
+      senia:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256M
 
 volumes:
   senia-data:
