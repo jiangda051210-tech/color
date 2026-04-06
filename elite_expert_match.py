@@ -172,50 +172,57 @@ def expert_seam_compare(image_bgr: np.ndarray,
 
     lab = bgr_to_lab_float32(image_bgr)
 
-    # 找相邻板对 (按中心Y坐标排序, 相邻的可能是并排的板)
-    sorted_planks = sorted(planks, key=lambda p: p["center"][1])
+    # 找所有相邻板对: 用中心距离判断, 最近边距<25%图像尺寸
     seams = []
 
-    for idx in range(len(sorted_planks) - 1):
-        p1 = sorted_planks[idx]
-        p2 = sorted_planks[idx + 1]
+    for idx in range(len(planks)):
+      for jdx in range(idx + 1, len(planks)):
+        p1 = planks[idx]
+        p2 = planks[jdx]
 
-        # 计算两板间的接缝区域
         box1 = p1["box"]
         box2 = p2["box"]
-        y1_bottom = int(box1[:, 1].max())
-        y2_top = int(box2[:, 1].min())
 
-        # 只处理垂直相邻的 (间距<图像高度10%)
-        gap = y2_top - y1_bottom
-        if gap < 0 or gap > h * 0.10:
-            # 尝试水平相邻
-            x1_right = int(box1[:, 0].max())
-            x2_left = int(box2[:, 0].min())
-            gap_h = x2_left - x1_right
-            if gap_h < 0 or gap_h > w * 0.10:
-                continue
-            # 水平接缝: 取左板右边缘5px vs 右板左边缘5px
-            x_seam = (x1_right + x2_left) // 2
-            y_start = max(int(max(box1[:, 1].min(), box2[:, 1].min())), 0)
-            y_end = min(int(min(box1[:, 1].max(), box2[:, 1].max())), h)
+        # 计算两板最近边距
+        y1_min, y1_max = int(box1[:, 1].min()), int(box1[:, 1].max())
+        y2_min, y2_max = int(box2[:, 1].min()), int(box2[:, 1].max())
+        x1_min, x1_max = int(box1[:, 0].min()), int(box1[:, 0].max())
+        x2_min, x2_max = int(box2[:, 0].min()), int(box2[:, 0].max())
+
+        # Y方向间距 (负=重叠)
+        y_gap = max(y2_min - y1_max, y1_min - y2_max)
+        # X方向间距
+        x_gap = max(x2_min - x1_max, x1_min - x2_max)
+
+        # 至少一个方向是近邻
+        is_y_adjacent = -h * 0.15 < y_gap < h * 0.25
+        is_x_adjacent = -w * 0.15 < x_gap < w * 0.25
+        # 另一方向要有重叠
+        y_overlap = y1_max > y2_min and y2_max > y1_min
+        x_overlap = x1_max > x2_min and x2_max > x1_min
+
+        if is_x_adjacent and y_overlap:
+            # 水平相邻: 取左板右缘 vs 右板左缘
+            x_seam = (min(x1_max, x2_max) + max(x1_min, x2_min)) // 2
+            y_start = max(y1_min, y2_min, 0)
+            y_end = min(y1_max, y2_max, h)
             if y_end - y_start < 20:
                 continue
             strip_width = 5
             left_strip = lab[y_start:y_end, max(0, x_seam - strip_width):x_seam]
             right_strip = lab[y_start:y_end, x_seam:min(w, x_seam + strip_width)]
-        else:
-            # 垂直接缝: 取上板底边5px vs 下板顶边5px
-            y_seam = (y1_bottom + y2_top) // 2
-            x_start = max(int(max(box1[:, 0].min(), box2[:, 0].min())), 0)
-            x_end = min(int(min(box1[:, 0].max(), box2[:, 0].max())), w)
+        elif is_y_adjacent and x_overlap:
+            # 垂直相邻
+            y_seam = (min(y1_max, y2_max) + max(y1_min, y2_min)) // 2
+            x_start = max(x1_min, x2_min, 0)
+            x_end = min(x1_max, x2_max, w)
             if x_end - x_start < 20:
                 continue
             strip_width = 5
-            top_strip = lab[max(0, y_seam - strip_width):y_seam, x_start:x_end]
-            bottom_strip = lab[y_seam:min(h, y_seam + strip_width), x_start:x_end]
-            left_strip = top_strip
-            right_strip = bottom_strip
+            left_strip = lab[max(0, y_seam - strip_width):y_seam, x_start:x_end]
+            right_strip = lab[y_seam:min(h, y_seam + strip_width), x_start:x_end]
+        else:
+            continue
 
         if left_strip.size < 30 or right_strip.size < 30:
             continue
