@@ -1415,7 +1415,10 @@ def _policy_recommendation_brief(report: dict[str, Any]) -> dict[str, Any]:
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        f = float(value)
+        if f != f or f == float("inf") or f == float("-inf"):
+            return default
+        return f
     except (TypeError, ValueError):
         return default
 
@@ -1468,12 +1471,12 @@ def _report_to_innovation_input(report: dict[str, Any]) -> dict[str, Any]:
     confidence_obj = result.get("confidence", {}) if isinstance(result, dict) else {}
     mode = str(report.get("mode", "unknown"))
 
-    avg_de = _safe_float(summary.get("avg_delta_e00"), np.nan)
-    p95_de = _safe_float(summary.get("p95_delta_e00"), np.nan)
-    d_l = _safe_float(summary.get("dL"), np.nan)
-    d_c = _safe_float(summary.get("dC"), np.nan)
-    d_h = _safe_float(summary.get("dH_deg"), np.nan)
-    confidence = _safe_float(confidence_obj.get("overall"), np.nan) if isinstance(confidence_obj, dict) else np.nan
+    avg_de = _safe_float(summary.get("avg_delta_e00"), 0.0)
+    p95_de = _safe_float(summary.get("p95_delta_e00"), 0.0)
+    d_l = _safe_float(summary.get("dL"), 0.0)
+    d_c = _safe_float(summary.get("dC"), 0.0)
+    d_h = _safe_float(summary.get("dH_deg"), 0.0)
+    confidence = _safe_float(confidence_obj.get("overall"), 0.0) if isinstance(confidence_obj, dict) else 0.0
 
     if mode == "ensemble_single":
         avg_de = _safe_float(summary.get("median_avg_delta_e00"), avg_de)
